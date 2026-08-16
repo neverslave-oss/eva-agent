@@ -5,6 +5,7 @@
 ![version](https://img.shields.io/badge/version-v1.0.0-purple)
 ![status](https://img.shields.io/badge/status-active-green)
 ![python](https://img.shields.io/badge/python-3.11%2B-blue)
+[![Hippocratic License HL3-LAW-MIL-SV](https://img.shields.io/static/v1?label=Hippocratic%20License&message=HL3-LAW-MIL-SV&labelColor=5e2751&color=bc8c3d)](https://firstdonoharm.dev/version/3/0/law-mil-sv.html)
 
 > **v1.0.0 — fresh open-source launch.** This is a scrubbed, portable release of
 > the Kernel-Evolving agent. Machine-specific paths, credentials, and internal
