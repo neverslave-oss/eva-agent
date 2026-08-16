@@ -1,0 +1,682 @@
+"""
+tools.py — Kernel Evo tool registry + executor.
+Provides 4 tools for native function-calling: exec_shell, read_file, http_get, write_file.
+"""
+import subprocess
+import json
+import os
+import re
+import time
+from pathlib import Path
+from runtime_paths import WORKSPACE_ROOT
+
+try:
+    import requests as _requests
+    _HAS_REQUESTS = True
+except ImportError:
+    _HAS_REQUESTS = False
+
+KERNEL_WORKSPACE = str(WORKSPACE_ROOT)
+WORKSPACE = os.environ.get("KERNEL_WORKSPACE", KERNEL_WORKSPACE)
+
+# ── Authorization gate: current chat_id for exec_shell auth ──────────────
+# Only a same-process fallback for in-process callers (e.g. model.py's
+# in-process tool loop, which shares memory with agent.py's triage()).
+# The model_server process is multi-threaded (ThreadingMixIn) and runs in a
+# separate process from the API/agent.py — this global is never set there.
+# Cross-process callers (model_server.py) must pass chat_id explicitly to
+# execute_tool_with_meta()/execute_tool() instead of relying on this global.
+_current_chat_id: str = ""
+
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "exec_shell",
+            "description": "Execute a shell command and return stdout/stderr. Use for running scripts, checking service health, git operations, file operations.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "The shell command to run"},
+                    "timeout": {"type": "integer", "description": "Timeout in seconds (default 30)"}
+                },
+                "required": ["command"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "Read the contents of a file. Use for reading logs, configs, memory files, ROUTINE.md steps.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Absolute or workspace-relative file path"}
+                },
+                "required": ["path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "http_get",
+            "description": "Make an HTTP GET request to a URL and return the response body. Use ONLY for http:// or https:// URLs. For local files use read_file instead.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string"},
+                    "timeout": {"type": "integer", "description": "Timeout in seconds (default 5)"}
+                },
+                "required": ["url"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "description": "Write content to a file.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "content": {"type": "string"}
+                },
+                "required": ["path", "content"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_skill",
+            "description": "Execute a named skill from the Kernel skill ecosystem. Use this when the user's request matches a skill's purpose (e.g. browser search, image generation, GitHub operations, security scan). Pass the user's original request as 'input'.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "skill_name": {
+                        "type": "string",
+                        "description": "The skill name (e.g. 'browser-automation', 'github', 'security-scanner')"
+                    },
+                    "input": {
+                        "type": "string",
+                        "description": "The user's request or task to pass to the skill"
+                    }
+                },
+                "required": ["skill_name", "input"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_routine",
+            "description": "Execute a named routine from the Kernel routine library. Routines are multi-step procedures (e.g. morning-briefing, security-check, deploy, end-of-session).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "routine_name": {
+                        "type": "string",
+                        "description": "The routine name (e.g. 'morning-briefing', 'security-check', 'deploy', 'end-of-session')"
+                    }
+                },
+                "required": ["routine_name"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "send_file",
+            "description": "Send a file from the local workspace to the user via Telegram. Use this when the user asks to receive, download, or get a file, report, export, or any workspace document.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "Absolute or workspace-relative path to the file to send (e.g. ~/.kernel-evolving/workspace/documents/report.md)"
+                    },
+                    "caption": {
+                        "type": "string",
+                        "description": "Optional caption shown with the file in Telegram"
+                    }
+                },
+                "required": ["file_path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": "Search the web or fetch a URL using the browser-automation skill (Puppeteer + Chromium). Use when you need fresh information, documentation, news, research papers, or anything not in local files. Returns page content or search results.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query (e.g. 'python asyncio tutorial 2026') or full URL to fetch (e.g. 'https://docs.python.org/3/library/asyncio.html')"
+                    },
+                    "save_to": {
+                        "type": "string",
+                        "description": "Optional file path to save the result to (e.g. ~/evo_research.md)"
+                    }
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_skills",
+            "description": "Search installed skills by name or description keyword. Use this to find the right skill before calling run_skill. Returns a list of matching skills with their names, commands, and descriptions.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search term (e.g. 'browser', 'image', 'github', 'security'). Pass empty string to list all skills."
+                    }
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_routines",
+            "description": "List all available routines. Use this to find the correct routine name before calling run_routine. Returns each routine's name, trigger, and description.",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "recall_memory",
+            "description": "Semantic search of long-term memory for past conversations, notes, or facts. Pass a topic or question as query — NOT a filename or date. Example: query='voice clone setup' not query='2026-06-07.md'. Use when the user references something from a past session or you need context about prior work.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search term or topic to look up in memory"
+                    }
+                },
+                "required": ["query"]
+            }
+        }
+    }
+]
+
+
+def _rewrite_date_tokens(text: str) -> str:
+    from core.tool_arg_utils import rewrite_date_tokens
+    return rewrite_date_tokens(text)
+
+
+def _extract_backend_hint(result_text: str) -> str:
+    m = re.search(r"\[backend=([^\]]+)\]", result_text or "")
+    return (m.group(1).strip() if m else "")
+
+
+def classify_tool_result(name: str, result_text: str) -> dict:
+    """Classify a tool result into explicit success/failure metadata."""
+    text = (result_text or "").strip()
+    low = text.lower()
+
+    if not text:
+        return {
+            "ok": False,
+            "status": "empty",
+            "failure_reason": "tool returned empty output",
+            "backend": "",
+        }
+
+    if low.startswith("(timeout") or "timeout" in low:
+        return {
+            "ok": False,
+            "status": "timeout",
+            "failure_reason": text[:240],
+            "backend": _extract_backend_hint(text),
+        }
+
+    if low.startswith("(error") or "[model_server error]" in low or "[model_client error]" in low:
+        status = "error"
+        if name == "run_skill" and "not found" in low:
+            status = "skill_not_found"
+        elif name == "run_routine" and "not found" in low:
+            status = "routine_not_found"
+        return {
+            "ok": False,
+            "status": status,
+            "failure_reason": text[:240],
+            "backend": _extract_backend_hint(text),
+        }
+
+    # Informational "not found" results from read_file and recall_memory are
+    # valid answers — treat as ok so the model moves on instead of retrying.
+    informational_markers = (
+        "no memory entries found",
+        "no such file",
+        "file not found",
+        "does not exist",
+    )
+    if name in ("read_file", "recall_memory") and any(m in low for m in informational_markers):
+        return {
+            "ok": True,
+            "status": "ok",
+            "failure_reason": "",
+            "backend": _extract_backend_hint(text),
+        }
+
+    # Generic failure markers for shell/skill/routine dispatchers only.
+    failure_markers = (
+        "unknown command",
+        "command not found",
+        "no such file or directory",
+        "traceback (most recent call last)",
+        "exception:",
+        "failed:",
+        "permission denied",
+    )
+    if any(m in low for m in failure_markers):
+        status = "error"
+        if name == "run_skill":
+            status = "skill_execution_failed"
+        elif name == "run_routine":
+            status = "routine_execution_failed"
+        return {
+            "ok": False,
+            "status": status,
+            "failure_reason": text[:240],
+            "backend": _extract_backend_hint(text),
+        }
+
+    # "(no results for:" from web_search etc. — still a soft failure worth retrying
+    if "(no results for:" in low:
+        return {
+            "ok": False,
+            "status": "no_results",
+            "failure_reason": text[:240],
+            "backend": _extract_backend_hint(text),
+        }
+
+    return {
+        "ok": True,
+        "status": "ok",
+        "failure_reason": "",
+        "backend": _extract_backend_hint(text),
+    }
+
+
+def execute_tool_with_meta(name: str, arguments: dict, workspace: str = WORKSPACE, chat_id: str = "") -> dict:
+    """Execute tool and return structured metadata for observability."""
+    started = time.monotonic()
+    result = execute_tool(name, arguments, workspace=workspace, chat_id=chat_id)
+    meta = classify_tool_result(name, result)
+    meta.update({
+        "tool": name,
+        "result": result,
+        "duration_ms": int((time.monotonic() - started) * 1000),
+    })
+    return meta
+
+
+def execute_tool(name: str, arguments: dict, workspace: str = WORKSPACE, chat_id: str = "") -> str:
+    """Execute a tool call and return the result as a string."""
+    import os
+    # Always expand ~ so subprocess.run cwd never gets a literal tilde
+    workspace = os.path.expanduser(workspace)
+    if name == "exec_shell":
+        cmd = arguments.get("command")
+        if not cmd:
+            return "(error: exec_shell requires 'command' argument)"
+        cmd = _rewrite_date_tokens(str(cmd))
+        timeout = arguments.get("timeout", 30)
+        # ── Authorization gate ─────────────────────────────────────────
+        # Check if the command requires user approval via Telegram.
+        # Prefer the explicitly-passed chat_id (required for cross-process
+        # callers like model_server.py); fall back to the module global for
+        # same-process callers that still rely on it.
+        _chat_id = chat_id or _current_chat_id
+        if _chat_id:
+            try:
+                from core.auth_gate import request_auth
+                auth_result = request_auth(_chat_id, cmd)
+                if auth_result == "deny":
+                    return "(authorization denied — command blocked)"
+                elif auth_result == "timeout":
+                    return "(authorization timed out — command blocked)"
+                elif auth_result.startswith("deny"):
+                    return f"(authorization failed: {auth_result})"
+                # auth_result == "allow" → proceed
+            except ImportError:
+                pass  # auth_gate not available (tests) → proceed without gate
+            except Exception as e:
+                print(f"[tools] auth gate error (proceeding anyway): {e}", flush=True)
+        # ── Execute ────────────────────────────────────────────────────
+        try:
+            result = subprocess.run(
+                cmd, shell=True, capture_output=True, text=True,
+                timeout=timeout, cwd=workspace
+            )
+            out = result.stdout.strip() or result.stderr.strip() or "(no output)"
+            return out[:10000]
+        except subprocess.TimeoutExpired:
+            return f"(timeout after {timeout}s)"
+        except Exception as e:
+            return f"(error: {e})"
+
+    elif name == "read_file":
+        path = arguments.get("path")
+        if not path:
+            return "(error: read_file requires 'path' argument)"
+        import os
+        path = _rewrite_date_tokens(str(path))
+        # Sanitize: strip shell metacharacters and newlines the model may emit
+        # (e.g. "/home/user/workspace/>\n~/workspace/file.md")
+        path = path.strip()
+        # If path contains newlines, take the last line (often the actual path)
+        if "\n" in path:
+            path = [p.strip() for p in path.split("\n") if p.strip() and not p.strip().endswith(">")][-1]
+        # Strip shell redirect characters that should never be in a file path
+        path = path.lstrip(">").rstrip("<")
+        path = os.path.expanduser(path)
+        if not path.startswith("/"):
+            path = f"{workspace}/{path}"
+        try:
+            with open(path) as f:
+                return f.read()[:3000]
+        except Exception as e:
+            return f"(error reading {path}: {e})"
+
+    elif name == "http_get":
+        if not _HAS_REQUESTS:
+            return "(error: requests library not available)"
+        url = arguments.get("url")
+        if not url:
+            return "(error: http_get requires 'url' argument)"
+        # Guard: if the model passes a local path instead of a URL, reroute to read_file
+        url_str = str(url)
+        if url_str.startswith("/") or url_str.startswith("~") or not (url_str.startswith("http://") or url_str.startswith("https://")):
+            # Sanitize the same way read_file does
+            local_path = url_str.strip()
+            if "\n" in local_path:
+                local_path = [p.strip() for p in local_path.split("\n") if p.strip() and not p.strip().endswith(">")][-1]
+            local_path = local_path.lstrip(">").rstrip("<")
+            local_path = os.path.expanduser(local_path)
+            if not local_path.startswith("/"):
+                local_path = os.path.join(workspace, local_path)
+            try:
+                with open(local_path) as _f:
+                    return _f.read()[:3000]
+            except Exception as _e:
+                return f"(error reading local path {local_path}: {_e})"
+        timeout = arguments.get("timeout", 5)
+        try:
+            r = _requests.get(url_str, timeout=timeout)
+            return r.text[:1000]
+        except Exception as e:
+            return f"(error: {e})"
+
+    elif name == "write_file":
+        path = arguments.get("path")
+        if not path:
+            return "(error: write_file requires 'path' argument)"
+        content = arguments.get("content")
+        if content is None:
+            return "(error: write_file requires 'content' argument)"
+        # Sanitize: strip shell metacharacters and newlines the model may emit
+        path = str(path).strip()
+        if "\n" in path:
+            path = [p.strip() for p in path.split("\n") if p.strip() and not p.strip().endswith(">")][-1]
+        path = path.lstrip(">").rstrip("<")
+        # Expand ~ first, then fall back to workspace-relative only if truly relative
+        path = os.path.expanduser(path)
+        if not path.startswith("/"):
+            path = os.path.join(workspace, path)
+        # Hard workspace guard: redirect /tmp, /var, /root, or any path outside
+        # ~/.kernel-evolving to the kernel-evolving workspace tmp dir.
+        # The model must not write outside its own workspace.
+        _allowed_prefix = os.path.expanduser("~/.kernel-evolving")
+        _tmp_dir = os.path.join(_allowed_prefix, "workspace", "tmp")
+        if not path.startswith(_allowed_prefix):
+            _basename = os.path.basename(path)
+            path = os.path.join(_tmp_dir, _basename)
+            import logging as _log_wf
+            _log_wf.getLogger(__name__).warning(
+                f"[write_file] path outside workspace — redirected to {path}"
+            )
+        # Strip any trailing tool-error lines that the model may have accidentally
+        # appended to the content (e.g. "Error: URL must start with http://")
+        import re as _re_wf
+        _error_tail = _re_wf.compile(
+            r'(\s*(?:Error:\s+URL must start with|\(error[:\s]|error reading|\[model_server error\])[^\n]*)$',
+            _re_wf.IGNORECASE | _re_wf.MULTILINE,
+        )
+        content = _error_tail.sub('', str(content)).rstrip()
+        try:
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "w") as f:
+                f.write(content)
+            return f"Written to {path}"
+        except Exception as e:
+            return f"(error: {e})"
+
+    elif name == "search_skills":
+        # Sanitize: strip newlines and shell redirects Nemotron may emit
+        query = (arguments.get("query") or "").lower().strip()
+        if "\n" in query:
+            query = [p.strip() for p in query.split("\n") if p.strip() and not p.strip().endswith(">")][-1]
+        query = query.lstrip(">").rstrip("<")
+        try:
+            import yaml as _yaml
+            from pathlib import Path as _Path
+            from core.skills import load_all as _load_skills
+            config_path = str(_Path(__file__).parent.parent.parent / "config.yaml")
+            cfg = _yaml.safe_load(open(config_path))
+            skills_dir = cfg.get("skills_dir", "./skills")
+            import os as _os
+            skills_dir = _os.path.expanduser(skills_dir)
+            all_skills = _load_skills(skills_dir)
+            if query:
+                matches = [
+                    s for s in all_skills
+                    if query in s.get("name", "").lower()
+                    or query in s.get("description", "").lower()
+                    or any(query in str(c).lower() for c in s.get("commands", []))
+                ]
+            else:
+                matches = all_skills
+            if not matches:
+                return f"No skills match '{query}'. Try a broader term or empty string to list all."
+            lines = [f"Found {len(matches)} skill(s) matching '{query}':" if query else f"{len(matches)} skills installed:"]
+            for s in matches[:30]:
+                cmds = s.get("commands", [])
+                cmd_str = f" [{', '.join(str(c) for c in cmds)}]" if cmds else ""
+                desc = s.get("description", "")[:120]
+                lines.append(f"- **{s['name']}**{cmd_str}: {desc}")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"(error searching skills: {e})"
+
+    elif name == "list_routines":
+        try:
+            import yaml as _yaml
+            from pathlib import Path as _Path
+            from core.routines import load_all as _load_routines
+            config_path = str(_Path(__file__).parent.parent.parent / "config.yaml")
+            cfg = _yaml.safe_load(open(config_path))
+            routines_dir = cfg.get("routines_dir", "./routines")
+            import os as _os
+            routines_dir = _os.path.expanduser(routines_dir)
+            all_routines = _load_routines(routines_dir)
+            if not all_routines:
+                return "No routines installed."
+            lines = [f"{len(all_routines)} routines available:"]
+            for r in all_routines:
+                trigger = r.get("trigger", {})
+                t_also = trigger.get("also", "") if isinstance(trigger, dict) else ""
+                t_cron = trigger.get("cron", "") if isinstance(trigger, dict) else ""
+                trigger_str = f" (cmd: {t_also})" if t_also else (f" (cron: {t_cron})" if t_cron else "")
+                desc = r.get("description", "")[:120]
+                lines.append(f"- **{r['name']}**{trigger_str}: {desc}")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"(error listing routines: {e})"
+
+    elif name == "recall_memory":
+        query = (arguments.get("query") or "").strip()
+        if not query:
+            return "(error: recall_memory requires a 'query' argument)"
+        try:
+            from long_term_memory import search_memory
+            results = search_memory(query, limit=8, max_chars=400)
+            if not results:
+                return f"No memory entries found for '{query}'."
+            lines = [f"Memory results for '{query}':"]
+            for r in results:
+                lines.append(f"- {r}")
+            return "\n".join(lines)
+        except ImportError:
+            # Fallback: scan memory files for keyword
+            try:
+                import glob as _glob
+                mem_dir = Path.home() / ".kernel-evolving" / "workspace" / "memory"
+                results = []
+                q_lower = query.lower()
+                for f in sorted(_glob.glob(str(mem_dir / "*.md")))[-30:]:
+                    try:
+                        text = open(f).read()
+                        if q_lower in text.lower():
+                            # Extract surrounding context
+                            idx = text.lower().find(q_lower)
+                            snippet = text[max(0, idx-80):idx+200].strip()
+                            results.append(f"[{Path(f).name}] ...{snippet}...")
+                    except Exception:
+                        pass
+                if not results:
+                    return f"No memory entries found for '{query}'."
+                return f"Memory results for '{query}':\n" + "\n".join(results[:8])
+            except Exception as e:
+                return f"(error searching memory: {e})"
+        except Exception as e:
+            return f"(error recalling memory: {e})"
+
+    elif name == "run_skill":
+        # Accept both 'skill_name' (canonical) and 'name' (model alias)
+        skill_name = arguments.get("skill_name") or arguments.get("name")
+        input_text = arguments.get("input")
+        if not skill_name:
+            return "(error: run_skill requires 'skill_name' argument)"
+        # Sanitize: strip newlines and shell redirects Nemotron may emit
+        skill_name = skill_name.strip()
+        if "\n" in skill_name:
+            skill_name = [p.strip() for p in skill_name.split("\n") if p.strip() and not p.strip().endswith(">")][-1]
+        skill_name = skill_name.lstrip(">").rstrip("<")
+        if not input_text:
+            return "(error: run_skill requires 'input' argument)"
+        try:
+            import yaml as _yaml
+            from pathlib import Path as _Path
+            from core.skills import load_all as _load_skills, find as _find_skill, run as _run_skill
+            from core.inference.model import infer as _infer
+            config_path = str(_Path(__file__).parent.parent.parent / "config.yaml")
+            cfg = _yaml.safe_load(open(config_path))
+            skills_dir = cfg.get("skills_dir", "./skills")
+            import os as _os
+            skills_dir = _os.path.expanduser(skills_dir)
+            all_skills = _load_skills(skills_dir)
+            skill = _find_skill(skill_name, all_skills)
+            if not skill:
+                # Try partial match
+                skill = next((s for s in all_skills if skill_name.lower() in s["name"].lower()), None)
+            if not skill:
+                available = [s["name"] for s in all_skills]
+                return f"(error: skill '{skill_name}' not found. Available: {', '.join(available)})"
+            return _run_skill(skill, input_text, _infer)
+        except Exception as e:
+            return f"(error running skill '{skill_name}': {e})"
+
+    elif name == "run_routine":
+        routine_name = arguments.get("routine_name")
+        if not routine_name:
+            return "(error: run_routine requires 'routine_name' argument)"
+        try:
+            import yaml as _yaml
+            from pathlib import Path as _Path
+            from core.routines import load_all as _load_routines, find as _find_routine, run as _run_routine
+            from core.inference.model import infer as _infer
+            config_path = str(_Path(__file__).parent.parent.parent / "config.yaml")
+            cfg = _yaml.safe_load(open(config_path))
+            routines_dir = cfg.get("routines_dir", "./routines")
+            import os as _os
+            routines_dir = _os.path.expanduser(routines_dir)
+            all_routines = _load_routines(routines_dir)
+            routine = _find_routine(routine_name, all_routines)
+            if not routine:
+                routine = next((r for r in all_routines if routine_name.lower() in r["name"].lower()), None)
+            if not routine:
+                available = [r["name"] for r in all_routines]
+                return f"(error: routine '{routine_name}' not found. Available: {', '.join(available)})"
+            return _run_routine(routine, _infer)
+        except Exception as e:
+            return f"(error running routine '{routine_name}': {e})"
+
+    elif name == "send_file":
+        file_path = arguments.get("file_path", "")
+        caption = arguments.get("caption", "")
+        if not file_path:
+            return "(error: send_file requires 'file_path' argument)"
+        import os as _os
+        file_path = _os.path.expanduser(file_path)
+        if not _os.path.isfile(file_path):
+            return f"(error: file not found: {file_path})"
+        try:
+            import services.channels.telegram_bot as _tb
+            chat_id = _tb.ALLOWED_CHAT_ID
+            if not chat_id:
+                return "(error: no Telegram chat_id configured)"
+            ok = _tb.send_file(str(chat_id), file_path, caption=caption)
+            return f"✅ File sent: {_os.path.basename(file_path)}" if ok else "(error: Telegram sendDocument failed)"
+        except Exception as e:
+            return f"(error sending file: {e})"
+
+    elif name == "web_search":
+        query = arguments.get("query", "")
+        save_to = arguments.get("save_to", "")
+        if not query:
+            return "(error: web_search requires 'query' argument)"
+        try:
+            # Use browse.py from the browser-automation skill directly — it's the
+            # canonical search/fetch implementation for this system (DDG → Bing fallback).
+            import importlib.util as _ilu, os as _os
+            _browse_path = _os.path.expanduser(
+                "~/.kernel-evolving/ecosystem/private/skills/browser-automation/browse.py"
+            )
+            _spec = _ilu.spec_from_file_location("browse", _browse_path)
+            _browse = _ilu.module_from_spec(_spec)
+            _spec.loader.exec_module(_browse)
+
+            if query.startswith("http"):
+                result = _browse.fetch_url(query)
+            else:
+                result = _browse.ddg_search(query)  # ddg_search auto-falls-back to Bing
+
+            if save_to:
+                p = _os.path.expanduser(save_to)
+                _os.makedirs(_os.path.dirname(p) or ".", exist_ok=True)
+                open(p, "w").write(result)
+                return f"Search result saved to {p}\n\n{result[:500]}"
+            return result[:3000]
+        except Exception as e:
+            return f"(error: web_search failed: {e})"
+
+    return f"Unknown tool: {name}"

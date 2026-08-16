@@ -1,0 +1,7 @@
+Please consider the following once you are ready:
+Don't forget to consider that the kernel-evolving agent will be installed via the desktop app during the initial setup screens so we get to decide where the models are saved and can reference them properly on any user's machine. Also we should ensure once you are done with the current tasks that the desktop app actually installs kernel-evolving as expected letting the user decide if it will be installed directly on the machine or in a docker sandbox for evaluation.  Also our kernel-mobile-v2 app has paired (almost entirely) the telegram bot so that the user can pair the desktop app, the mobile app to interface with kernel-evolving when on the LAN without using telegram and when outsire the network connect via our kernel-central server (kernel-central repo) or via dedicated telegram bot the user will be guided to create and connect to kernel evolving from the kernel-desktop-v1 app. 
+Also, kernel-evolving has providers that should be configurable via the desktop app by inserting its own api key for those cloud providers we currenltly support. 
+
+The collective memory multiagent (https://github.com/fabiopacifici-bot/multi-agent-collective-memory) should be installable via the kernel-desktop so the user can connect its agents across the lan if desired. Look the repository to have an undertanding.
+
+Each repository involved has its own ADR in case you need to see the big picture.

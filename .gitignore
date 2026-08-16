@@ -1,0 +1,59 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.log
+data/d3.v7.min.js
+
+# Environment files (always gitignore, use .env.example for defaults)
+.env
+.env.local
+*.env
+.env.old
+# Local workspace symlinks � not for repo
+/skills
+/routines
+
+# Runtime & session data � never commit
+*.db
+*.sqlite
+*.sqlite3
+/tmp/
+.kernel_memory.json
+.kernel_evolving_memory.json
+*.offset
+memory.json
+sessions/
+conversations/
+chat_history/
+evolution_log.db
+evolution.db
+
+# Bug: Path("~/...") without expanduser created a literal ~ directory
+src/~/
+
+# IDE and system files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Poetry/pip
+poetry.lock
+dist/
+build/
+*.egg-info/
+
+# Workspace runtime pollution
+*.bak
+tmp/
+*.tmp
+
+startup.log
+*.py.bak
+
+# npm artifacts (not part of this project)
+package.json
+package-lock.json

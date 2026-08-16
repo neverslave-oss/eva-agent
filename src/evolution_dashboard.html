@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Kernel — Evolution Monitor</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #0d1117; color: #c9d1d9; font-family: -apple-system, 'Segoe UI', monospace; }
+.header { display: flex; align-items: center; gap: 16px; padding: 16px 24px;
+          background: #161b22; border-bottom: 1px solid #30363d; }
+.header h1 { font-size: 1.2em; color: #58a6ff; }
+.header .sub { font-size: 0.75em; color: #8b949e; }
+.live-dot { width: 8px; height: 8px; background: #3fb950; border-radius: 50%;
+            animation: pulse 2s infinite; margin-left: auto; }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
+
+/* Controls */
+.controls { display: flex; gap: 8px; align-items: center; padding: 10px 24px;
+            background: #0d1117; border-bottom: 1px solid #21262d; flex-wrap: wrap; }
+.ctrl-btn { padding: 6px 14px; border-radius: 6px; border: 1px solid #30363d;
+            background: #161b22; color: #c9d1d9; cursor: pointer; font-size: 0.78em;
+            font-family: monospace; transition: all .15s; }
+.ctrl-btn:hover { border-color: #58a6ff; color: #58a6ff; }
+.ctrl-btn.danger:hover { border-color: #f85149; color: #f85149; }
+.ctrl-btn.success:hover { border-color: #3fb950; color: #3fb950; }
+.ctrl-btn.warn:hover { border-color: #d29922; color: #d29922; }
+.ctrl-btn:disabled { opacity: .35; cursor: not-allowed; }
+.iter-badge { background: #161b22; border: 1px solid #30363d; border-radius: 6px;
+              padding: 5px 12px; font-size: 0.78em; color: #8b949e; }
+.iter-badge span { color: #58a6ff; font-weight: 700; }
+.state-badge { padding: 4px 10px; border-radius: 10px; font-size: 0.75em; font-weight: 700;
+               text-transform: uppercase; letter-spacing: .08em; }
+.state-running { background: #1a3f2b; color: #3fb950; }
+.state-paused  { background: #3a2a10; color: #d29922; }
+.state-stopped { background: #3a1a1a; color: #f85149; }
+.task-input { flex: 1; min-width: 200px; background: #161b22; border: 1px solid #30363d;
+              color: #c9d1d9; padding: 5px 10px; border-radius: 6px; font-size: 0.78em;
+              font-family: monospace; }
+.task-input:focus { outline: none; border-color: #58a6ff; }
+.cap-input { width: 60px; background: #161b22; border: 1px solid #30363d;
+             color: #c9d1d9; padding: 5px 8px; border-radius: 6px; font-size: 0.78em;
+             font-family: monospace; text-align: center; }
+.stats { display: flex; gap: 12px; padding: 16px 24px; flex-wrap: wrap; }
+.stat { background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+        padding: 14px 20px; min-width: 120px; text-align: center; }
+.stat .num { font-size: 2em; font-weight: 700; }
+.stat .lbl { font-size: 0.7em; color: #8b949e; margin-top: 2px; text-transform: uppercase; letter-spacing: .05em; }
+.stat.green .num { color: #3fb950; }
+.stat.blue  .num { color: #58a6ff; }
+.stat.orange .num { color: #d29922; }
+.stat.red   .num { color: #f85149; }
+.stat.purple .num { color: #bc8cff; }
+.main { display: grid; grid-template-columns: 1fr 380px; height: calc(100vh - 162px); gap: 0; }
+#graph-panel { position: relative; border-right: 1px solid #21262d; overflow: hidden; }
+#graph { width: 100%; height: 100%; }
+.graph-title { position: absolute; top: 12px; left: 16px; font-size: 0.75em;
+               color: #8b949e; text-transform: uppercase; letter-spacing: .1em; }
+.legend { position: absolute; bottom: 16px; left: 16px; display: flex; flex-direction: column; gap: 6px; }
+.leg-item { display: flex; align-items: center; gap: 6px; font-size: 0.7em; color: #8b949e; }
+.leg-dot { width: 10px; height: 10px; border-radius: 50%; }
+.tooltip { position: absolute; background: #1f2937; border: 1px solid #374151;
+           border-radius: 6px; padding: 8px 12px; font-size: 0.75em; pointer-events: none;
+           opacity: 0; transition: opacity .15s; max-width: 260px; line-height: 1.5; z-index: 100; }
+.right-panel { display: flex; flex-direction: column; overflow: hidden; }
+#timeline-panel { padding: 12px 16px; border-bottom: 1px solid #21262d; flex: 0 0 auto; }
+.panel-title { font-size: 0.7em; color: #8b949e; text-transform: uppercase; letter-spacing: .1em; margin-bottom: 8px; }
+#log-panel { flex: 1; overflow-y: auto; padding: 12px 16px; }
+.log-entry { display: flex; gap: 8px; align-items: flex-start; padding: 6px 0;
+             border-bottom: 1px solid #21262d; font-size: 0.72em; }
+.log-entry:last-child { border-bottom: none; }
+.log-icon { flex: 0 0 18px; }
+.log-time { color: #8b949e; flex: 0 0 80px; }
+.log-text { color: #c9d1d9; }
+.log-badge { display: inline-block; padding: 1px 6px; border-radius: 10px;
+             font-size: 0.85em; margin-left: 4px; }
+.badge-green  { background: #1a3f2b; color: #3fb950; }
+.badge-blue   { background: #1a2b4a; color: #58a6ff; }
+.badge-orange { background: #3a2a10; color: #d29922; }
+.badge-red    { background: #3a1a1a; color: #f85149; }
+.badge-purple { background: #2a1a3f; color: #bc8cff; }
+#gaps-panel { padding: 12px 16px; border-top: 1px solid #21262d; flex: 0 0 auto; max-height: 140px; overflow-y: auto; }
+.gap-item { font-size: 0.7em; color: #8b949e; padding: 3px 0; border-bottom: 1px solid #21262d; }
+.gap-item span { color: #f85149; margin-right: 6px; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div>
+    <h1>🧬 Kernel — Evolution Monitor</h1>
+    <div class="sub">Skill acquisition network · proactive goal discovery · live SSE</div>
+  </div>
+  <div class="live-dot" title="Live — auto-refreshes via SSE"></div>
+</div>
+
+<!-- Evolution controls -->
+<div class="controls" id="ctrl-bar">
+  <div class="state-badge state-stopped" id="state-badge">stopped</div>
+  <div class="iter-badge">Iterations: <span id="iter-count">0</span> / <span id="iter-cap">10</span></div>
+  <button class="ctrl-btn success" id="btn-start"  onclick="ctrlAction('start')">▶ Start</button>
+  <button class="ctrl-btn warn"    id="btn-pause"  onclick="ctrlAction('pause')"  disabled>⏸ Pause</button>
+  <button class="ctrl-btn success" id="btn-resume" onclick="ctrlAction('resume')" disabled>▶ Resume</button>
+  <button class="ctrl-btn danger"  id="btn-stop"   onclick="ctrlAction('stop')"   disabled>⏹ Stop</button>
+  <button class="ctrl-btn"         id="btn-reset"  onclick="ctrlAction('reset')">↺ Reset</button>
+  <span style="color:#30363d">│</span>
+  <label style="font-size:.75em;color:#8b949e">Cap:</label>
+  <input class="cap-input" id="cap-input" type="number" min="1" max="100" value="10" title="Max evolution iterations">
+  <span style="color:#30363d">│</span>
+  <input class="task-input" id="task-input" placeholder="Enter a task to evolve… e.g. convert PDF to markdown" type="text">
+  <button class="ctrl-btn success" onclick="triggerEvolution()">🧬 Evolve</button>
+  <div id="ctrl-msg" style="font-size:.75em;color:#8b949e"></div>
+</div>
+
+<div class="stats" id="stats-bar">
+  <div class="stat blue">  <div class="num" id="s-total">0</div>    <div class="lbl">Total Events</div></div>
+  <div class="stat green"> <div class="num" id="s-resolved">0</div> <div class="lbl">Resolved</div></div>
+  <div class="stat purple"><div class="num" id="s-synth">0</div>    <div class="lbl">Synthesised</div></div>
+  <div class="stat red">   <div class="num" id="s-gaps">0</div>     <div class="lbl">Open Gaps</div></div>
+  <div class="stat orange"><div class="num" id="s-provider">—</div> <div class="lbl">Provider(s)</div></div>
+</div>
+
+<div class="main">
+  <div id="graph-panel">
+    <div class="graph-title">Skill Acquisition Network</div>
+    <svg id="graph"></svg>
+    <div class="legend">
+      <div class="leg-item"><div class="leg-dot" style="background:#3fb950"></div>Kernel core</div>
+      <div class="leg-item"><div class="leg-dot" style="background:#58a6ff"></div>Acquired (Tier 1)</div>
+      <div class="leg-item"><div class="leg-dot" style="background:#bc8cff"></div>Synthesised (Tier 2)</div>
+      <div class="leg-item"><div class="leg-dot" style="background:#f85149"></div>Gap (unresolved)</div>
+    </div>
+    <div class="tooltip" id="tooltip"></div>
+  </div>
+
+  <div class="right-panel">
+    <div id="timeline-panel">
+      <div class="panel-title">Timeline</div>
+      <svg id="timeline-svg" height="70"></svg>
+    </div>
+    <div id="log-panel">
+      <div class="panel-title">Event Log</div>
+      <div id="log-entries"></div>
+    </div>
+    <div id="gaps-panel">
+      <div class="panel-title" style="color:#f85149">Open Gaps</div>
+      <div id="gap-entries"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+// Data injected server-side
+const EVENTS = __EVENTS__;
+const GAPS   = __GAPS__;
+const STATS  = __STATS__;
+
+// ── Stat cards ──────────────────────────────────────────────────────────────
+function updateStats(stats, gapsArr) {
+  document.getElementById('s-total').textContent    = stats.total    || 0;
+  document.getElementById('s-resolved').textContent = stats.resolved || 0;
+  document.getElementById('s-synth').textContent    = stats.synthesised || 0;
+  document.getElementById('s-gaps').textContent     = (gapsArr||[]).length;
+  const prov = (stats.providers||[]).filter(Boolean);
+  document.getElementById('s-provider').textContent = prov.length ? prov.join(', ') : '—';
+}
+updateStats(STATS, GAPS);
+
+// ── Event log ───────────────────────────────────────────────────────────────
+function renderLog(events) {
+  const el = document.getElementById('log-entries');
+  el.innerHTML = '';
+  [...events].reverse().slice(0,100).forEach(e => {
+    const icon  = e.found ? '✅' : (e.escalated ? '⬆️' : '❌');
+    const badge = e.found
+      ? (e.escalated
+          ? '<span class="log-badge badge-purple">T2 synth</span>'
+          : '<span class="log-badge badge-green">T1 acquire</span>')
+      : (e.escalated
+          ? '<span class="log-badge badge-orange">escalated</span>'
+          : '<span class="log-badge badge-red">gap</span>');
+    const prov      = e.provider_used ? `<span class="log-badge badge-blue">${e.provider_used}</span>` : '';
+    const installed = (e.installed||[]).join(', ');
+    const row = document.createElement('div');
+    row.className = 'log-entry';
+    row.innerHTML = `
+      <span class="log-icon">${icon}</span>
+      <span class="log-time">${(e.timestamp||'').substring(11,19)}</span>
+      <span class="log-text">${(e.task||'').substring(0,50)}${badge}${prov}${
+        installed ? `<br><span style="color:#58a6ff">+${installed}</span>` : ''}</span>`;
+    el.appendChild(row);
+  });
+}
+renderLog(EVENTS);
+
+// ── Gap list ─────────────────────────────────────────────────────────────────
+function renderGaps(gaps) {
+  const el = document.getElementById('gap-entries');
+  if (!gaps.length) {
+    el.innerHTML = '<div class="gap-item" style="color:#3fb950">No open gaps ✔</div>';
+    return;
+  }
+  el.innerHTML = '';
+  gaps.forEach(g => {
+    const d = document.createElement('div');
+    d.className = 'gap-item';
+    d.innerHTML = `<span>⚠️</span>${(g.task||'').substring(0,70)}`;
+    el.appendChild(d);
+  });
+}
+renderGaps(GAPS);
+
+// ── D3 Force graph ───────────────────────────────────────────────────────────
+(function buildGraph() {
+  const panel = document.getElementById('graph-panel');
+  const W = panel.clientWidth, H = panel.clientHeight;
+  const svg = d3.select('#graph').attr('viewBox', `0 0 ${W} ${H}`);
+  const tip  = document.getElementById('tooltip');
+
+  const nodeMap = {};
+  const links   = [];
+  nodeMap['kernel'] = { id:'kernel', label:'Kernel', type:'core', r:18 };
+
+  EVENTS.forEach(e => {
+    (e.installed||[]).forEach(skill => {
+      if (!nodeMap[skill]) {
+        nodeMap[skill] = {
+          id: skill, label: skill,
+          type: (e.escalated && e.found) ? 'synthesised' : 'acquired',
+          confidence: e.confidence, provider: e.provider_used,
+          task: e.task, timestamp: e.timestamp, r: 12
+        };
+      }
+      links.push({ source:'kernel', target:skill, value:1 });
+    });
+    if (!e.found) {
+      const gid = 'gap:' + (e.task||'').substring(0,20);
+      if (!nodeMap[gid]) {
+        nodeMap[gid] = { id:gid, label:(e.task||'').substring(0,20)+'…', type:'gap', r:8 };
+        links.push({ source:'kernel', target:gid, value:0.4 });
+      }
+    }
+  });
+
+  const nodes = Object.values(nodeMap);
+  const color = { core:'#3fb950', acquired:'#58a6ff', synthesised:'#bc8cff', gap:'#f85149' };
+
+  if (nodes.length <= 1) {
+    svg.append('text').attr('x',W/2).attr('y',H/2)
+      .attr('text-anchor','middle').attr('fill','#30363d').attr('font-size',13)
+      .text('No evolution events yet — waiting for Kernel to encounter unknown tasks');
+    return;
+  }
+
+  const sim = d3.forceSimulation(nodes)
+    .force('link',    d3.forceLink(links).id(d=>d.id).distance(100).strength(0.6))
+    .force('charge',  d3.forceManyBody().strength(-220))
+    .force('center',  d3.forceCenter(W/2, H/2))
+    .force('collide', d3.forceCollide(d=>d.r+12));
+
+  const g = svg.append('g');
+
+  svg.call(d3.zoom().scaleExtent([0.3,4]).on('zoom', e => g.attr('transform', e.transform)));
+
+  svg.append('defs').append('marker')
+    .attr('id','arr').attr('viewBox','0 -4 8 8').attr('refX',22)
+    .attr('markerWidth',6).attr('markerHeight',6).attr('orient','auto')
+    .append('path').attr('d','M0,-4L8,0L0,4').attr('fill','#30363d');
+
+  const link = g.append('g').selectAll('line').data(links).join('line')
+    .attr('stroke','#30363d')
+    .attr('stroke-width', d => d.value > 0.7 ? 1.5 : 0.7)
+    .attr('stroke-dasharray', d => d.value < 0.7 ? '4,3' : null)
+    .attr('marker-end','url(#arr)');
+
+  const node = g.append('g').selectAll('g').data(nodes).join('g')
+    .attr('cursor','pointer')
+    .call(d3.drag()
+      .on('start',(e,d)=>{ if(!e.active) sim.alphaTarget(0.3).restart(); d.fx=d.x; d.fy=d.y; })
+      .on('drag', (e,d)=>{ d.fx=e.x; d.fy=e.y; })
+      .on('end',  (e,d)=>{ if(!e.active) sim.alphaTarget(0); d.fx=null; d.fy=null; }))
+    .on('mouseover',(event,d)=>{
+      let h = `<strong>${d.label}</strong><br>`;
+      if (d.type!=='core') h += `Type: ${d.type}<br>`;
+      if (d.confidence)    h += `Confidence: ${d.confidence}<br>`;
+      if (d.provider)      h += `Provider: ${d.provider}<br>`;
+      if (d.task)          h += `Task: ${d.task.substring(0,60)}<br>`;
+      if (d.timestamp)     h += `<span style="color:#8b949e">${d.timestamp.substring(0,19)}</span>`;
+      tip.innerHTML=h; tip.style.opacity=1;
+    })
+    .on('mousemove', event=>{
+      const r=panel.getBoundingClientRect();
+      tip.style.left=(event.clientX-r.left+14)+'px';
+      tip.style.top =(event.clientY-r.top +14)+'px';
+    })
+    .on('mouseleave',()=>tip.style.opacity=0);
+
+  // Glow filter
+  const defs = svg.select('defs');
+  const filt = defs.append('filter').attr('id','glow');
+  filt.append('feGaussianBlur').attr('stdDeviation',3).attr('result','blur');
+  const merge = filt.append('feMerge');
+  merge.append('feMergeNode').attr('in','blur');
+  merge.append('feMergeNode').attr('in','SourceGraphic');
+
+  node.append('circle')
+    .attr('r', d=>d.r)
+    .attr('fill', d=>color[d.type]||'#58a6ff')
+    .attr('fill-opacity', 0.85)
+    .attr('stroke', d=>color[d.type]||'#58a6ff')
+    .attr('stroke-width',1.5).attr('stroke-opacity',0.4)
+    .filter(d=>d.type==='core')
+    .attr('filter','url(#glow)');
+
+  // Outer ring for core node
+  node.filter(d=>d.type==='core').append('circle')
+    .attr('r',26).attr('fill','none')
+    .attr('stroke','#3fb950').attr('stroke-width',1).attr('stroke-opacity',0.25);
+
+  node.append('text')
+    .attr('dy', d=>d.r+12).attr('text-anchor','middle')
+    .attr('font-size',9).attr('fill','#8b949e')
+    .text(d=>d.label.substring(0,18));
+
+  sim.on('tick',()=>{
+    link.attr('x1',d=>d.source.x).attr('y1',d=>d.source.y)
+        .attr('x2',d=>d.target.x).attr('y2',d=>d.target.y);
+    node.attr('transform',d=>`translate(${d.x},${d.y})`);
+  });
+})();
+
+// ── Timeline ─────────────────────────────────────────────────────────────────
+(function buildTimeline() {
+  if (!EVENTS.length) return;
+  const panel = document.getElementById('timeline-panel');
+  const W = panel.clientWidth - 32, H = 60;
+  const svg = d3.select('#timeline-svg').attr('width',W).attr('height',H);
+  const times = EVENTS.map(e=>new Date(e.timestamp));
+  const xScale = d3.scaleTime()
+    .domain([d3.min(times), d3.max(times)||new Date()])
+    .range([20, W-20]);
+
+  svg.append('g').attr('transform',`translate(0,${H-14})`)
+    .call(d3.axisBottom(xScale).ticks(5).tickSize(3))
+    .call(g=>{ g.select('.domain').attr('stroke','#30363d');
+               g.selectAll('text').attr('fill','#8b949e').attr('font-size',8);
+               g.selectAll('.tick line').attr('stroke','#30363d'); });
+
+  const yLane = { acquired:10, synthesised:27, gap:44 };
+  const col   = { acquired:'#58a6ff', synthesised:'#bc8cff', gap:'#f85149' };
+
+  EVENTS.forEach((e,i)=>{
+    const type = !e.found ? 'gap' : (e.escalated ? 'synthesised' : 'acquired');
+    svg.append('circle')
+      .attr('cx', xScale(times[i])).attr('cy', yLane[type]||27)
+      .attr('r',4).attr('fill',col[type]||'#58a6ff').attr('opacity',0.85);
+  });
+
+  [['T1',10,'#58a6ff'],['T2',27,'#bc8cff'],['gap',44,'#f85149']].forEach(([l,y,c])=>{
+    svg.append('text').attr('x',0).attr('y',y+3).attr('font-size',7).attr('fill',c).text(l);
+  });
+})();
+
+// ── Live SSE updates ─────────────────────────────────────────────────────────
+const es = new EventSource('/evolution/stream');
+let totalEvents = EVENTS.length;
+es.onmessage = ev => {
+  try {
+    const event = JSON.parse(ev.data);
+    EVENTS.unshift(event);
+    totalEvents++;
+    renderLog(EVENTS);
+    // Update counters
+    document.getElementById('s-total').textContent    = totalEvents;
+    document.getElementById('s-resolved').textContent = EVENTS.filter(e=>e.found).length;
+    document.getElementById('s-synth').textContent    = EVENTS.filter(e=>e.escalated&&e.found).length;
+    // Note: force graph doesn't auto-update (reload to see new nodes)
+  } catch(_) {}
+};
+
+// ── Evolution state controls ───────────────────────────────────────────────────────────
+function updateStateUI(s) {
+  const badge = document.getElementById('state-badge');
+  badge.textContent = s.state;
+  badge.className = 'state-badge state-' + s.state;
+  document.getElementById('iter-count').textContent = s.iterations;
+  document.getElementById('iter-cap').textContent   = s.cap;
+  const running = s.state === 'running';
+  const paused  = s.state === 'paused';
+  const stopped = s.state === 'stopped';
+  document.getElementById('btn-start').disabled  = running;
+  document.getElementById('btn-pause').disabled  = !running;
+  document.getElementById('btn-resume').disabled = !paused;
+  document.getElementById('btn-stop').disabled   = stopped;
+  document.querySelector('.live-dot').style.background =
+    running ? '#3fb950' : (paused ? '#d29922' : '#f85149');
+}
+
+async function ctrlAction(action) {
+  const cap = parseInt(document.getElementById('cap-input').value) || 10;
+  const msg = document.getElementById('ctrl-msg');
+  msg.textContent = '⏳ ' + action + '...';
+  try {
+    const r = await fetch('/evolution/control', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({action, cap: (action==='start'||action==='reset') ? cap : null})
+    });
+    const s = await r.json();
+    updateStateUI(s);
+    msg.textContent = '✅ ' + action + ' — ' + s.iterations + '/' + s.cap + ' iterations';
+    setTimeout(()=>msg.textContent='', 4000);
+  } catch(e) { msg.textContent = '❌ ' + e.message; }
+}
+
+async function triggerEvolution() {
+  const task = document.getElementById('task-input').value.trim();
+  if (!task) { alert('Enter a task first'); return; }
+  const cap = parseInt(document.getElementById('cap-input').value) || 10;
+  const msg = document.getElementById('ctrl-msg');
+  msg.textContent = '🧬 Evolving…';
+  try {
+    const r = await fetch('/evolution/trigger', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({task, cap})
+    });
+    const d = await r.json();
+    if (d.error) { msg.textContent = '❌ ' + d.error; return; }
+    const res = d.result || {};
+    if (d.state) updateStateUI(d.state);
+    if (res.found)
+      msg.textContent = '✅ Acquired: ' + (res.installed||[]).join(', ') + ' [' + res.confidence + ']';
+    else if (d.triggered === false)
+      msg.textContent = '⏸ ' + (d.reason || 'Paused or cap reached');
+    else
+      msg.textContent = '⚠️ Gap: ' + (res.gap||'not resolved').substring(0,60);
+    setTimeout(()=>msg.textContent='', 6000);
+  } catch(e) { msg.textContent = '❌ ' + e.message; }
+}
+
+async function pollState() {
+  try {
+    const r = await fetch('/evolution/state');
+    const s = await r.json();
+    updateStateUI(s);
+  } catch(_) {}
+}
+pollState();
+setInterval(pollState, 3000);
+</script>
+</body>
+</html>

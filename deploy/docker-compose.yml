@@ -1,0 +1,156 @@
+services:
+  kernel-evolving:
+    build: .
+    container_name: kernel-evolving
+    restart: unless-stopped
+    ports:
+      - 8779:8779
+    volumes:
+      - ${MODELS_PATH:-~/.cache/huggingface}:/models
+      - ${KERNEL_WORKSPACE_PATH:-~/.kernel-evolving/workspace}:/app/workspace
+      - kernel-memory:/root
+      - kernel-ecosystem:/data/ecosystem
+    env_file:
+      - .env
+    environment:
+      - HF_HOME=/models
+      - TRANSFORMERS_CACHE=/models
+      - KERNEL_EVO_TELEGRAM_BOT_TOKEN=${KERNEL_EVO_TELEGRAM_BOT_TOKEN}
+      - KERNEL_EVO_TELEGRAM_CHAT_ID=${KERNEL_EVO_TELEGRAM_CHAT_ID}
+      - KERNEL_USER_NAME=${KERNEL_USER_NAME:-KernelEvo}
+      - KERNEL_USER_HANDLE=${KERNEL_USER_HANDLE:-kernelevo}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - HF_TOKEN=${HF_TOKEN:-}
+      - EVOLUTION_ENABLED=true
+      - SKILLS_DIR=${SKILLS_DIR:-/app/skills}
+      - ROUTINES_DIR=${ROUTINES_DIR:-/app/routines}
+      - ECOSYSTEM_CACHE=/data/ecosystem
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities:
+                - gpu
+    command: ["/app/entrypoint.sh"]
+    working_dir: /app/src
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8779/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  kernel-evolving-cli:
+    build: .
+    container_name: kernel-evolving-cli
+    profiles:
+      - cli
+    stdin_open: true
+    tty: true
+    volumes:
+      - ${MODELS_PATH:-~/.cache/huggingface}:/models
+      - kernel-memory:/root
+    environment:
+      - HF_HOME=/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities:
+                - gpu
+    command: ./kernel
+    working_dir: /app/src
+    restart: on-failure
+
+  kernel-hub:
+    build: .
+    container_name: kernel-hub
+    profiles:
+      - docker-model
+    restart: unless-stopped
+    ports:
+      - 8779:8779
+    volumes:
+      - kernel-memory:/root
+    environment:
+      - MODEL_SOURCE=docker-hub
+      - MODEL_ID=${MODEL_ID:-nvidia/Nemotron-Labs-Diffusion-3B}
+      - DOCKER_MODEL_RUNNER_ENDPOINT=http://model-runner:8080
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities:
+                - gpu
+    command: >
+      python -m uvicorn api:app
+      --host 0.0.0.0 --port 8779
+    working_dir: /app/src
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8779/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  kernel-hub-cli:
+    build: .
+    container_name: kernel-hub-cli
+    profiles:
+      - docker-model-cli
+    stdin_open: true
+    tty: true
+    volumes:
+      - kernel-memory:/root
+    environment:
+      - MODEL_SOURCE=docker-hub
+      - MODEL_ID=${MODEL_ID:-nvidia/Nemotron-Labs-Diffusion-3B}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities:
+                - gpu
+    command: ./kernel
+    working_dir: /app/src
+    restart: on-failure
+
+  kernel-evolving-sandbox:
+    build:
+      context: .
+      dockerfile: Dockerfile.sandbox-lite
+    container_name: kernel-evolving-sandbox
+    profiles:
+      - sandbox
+    restart: unless-stopped
+    ports:
+      - 8779:8779
+    env_file:
+      - .env
+    environment:
+      - KERNEL_EVO_TELEGRAM_BOT_TOKEN=${KERNEL_EVO_TELEGRAM_BOT_TOKEN}
+      - KERNEL_EVO_TELEGRAM_CHAT_ID=${KERNEL_EVO_TELEGRAM_CHAT_ID}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - EVOLUTION_ENABLED=true
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8779/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  kernel-memory:
+    driver: local
+  kernel-ecosystem:
+    driver: local

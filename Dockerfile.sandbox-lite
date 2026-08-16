@@ -1,0 +1,40 @@
+FROM python:3.13-slim
+WORKDIR /app
+
+RUN pip install --no-cache-dir \
+    fastapi>=0.110.0 \
+    uvicorn>=0.27.0 \
+    pydantic>=2.0.0 \
+    pyyaml>=6.0 \
+    requests>=2.31.0 \
+    psutil>=5.9.0
+
+COPY src/ ./src/
+COPY config.yaml .
+
+# Write a stub model.py that satisfies imports without torch/GPU
+RUN printf '%s\n' \
+'import sys, types as _t' \
+'for _m in ["torch","transformers","sounddevice","soundfile","accelerate"]:' \
+'    if _m not in sys.modules:' \
+'        _mod = _t.ModuleType(_m)' \
+'        sys.modules[_m] = _mod' \
+'_tc = sys.modules["torch"]' \
+'_tc.cuda = _t.SimpleNamespace(is_available=lambda:False,mem_get_info=lambda:(8*1024**3,8*1024**3))' \
+'_tc.bfloat16 = "bfloat16"; _tc.float16 = "float16"' \
+'_tc.no_grad = lambda: __import__("contextlib").nullcontext()' \
+'_model = None; _processor = None' \
+'def load(config_path="config.yaml"): pass' \
+'def load_config(path="config.yaml"): return {}' \
+'def infer(messages, max_new_tokens=512): return "[sandbox] model stub"' \
+'def infer_with_tools(messages, tools, workspace="~", max_steps=15, step_callback=None): return "[sandbox] model stub"' \
+'def infer_with_image(p, prompt, max_new_tokens=512): return "[sandbox] model stub"' \
+'def infer_with_audio(p, prompt="x", max_new_tokens=512): return "[sandbox] model stub"' \
+'def vram_free_mb(): return 8192' \
+> /app/src/model.py
+
+ENV EVOLUTION_ENABLED=true
+ENV KERNEL_SANDBOX=true
+ENV PYTHONPATH=/app/src
+
+CMD ["uvicorn", "src.api:app", "--host", "0.0.0.0", "--port", "8779", "--log-level", "warning"]

@@ -1,0 +1,681 @@
+#!/usr/bin/env python3
+"""
+eva — CLI for EVA (kernel-evolving), the self-evolving local AI agent.
+
+USAGE:
+  eva                          Interactive chat REPL
+  eva "your message"           One-shot message
+  eva <command> [args]         Run a command directly
+
+COMMANDS (also available as slash commands inside the REPL):
+  status                       System status (VRAM, model, skills)
+  skills                       List skills (core first)
+  routines                     List routines
+  evolve                       Trigger an evolution cycle
+  evolve status                Show evolution state
+  evolve stop                  Stop/pause evolution
+  dash                         Open evolution dashboard in browser
+  model                        Show active model / provider routing
+  model set <provider>         Switch inference provider
+  log                          Tail daemon API log (last 40 lines)
+  memory                       Show recent conversation memory
+  new                          Clear conversation (fresh start)
+  thoughts                     Show today's thought log
+  restart                      Restart EVA daemon
+  update                       Pull latest + restart
+  telegram                     Guided Telegram channel setup (alias: -c telegram)
+  mobile                       Mobile app integration info (placeholder)
+  version                      Show version
+
+OPTIONS:
+  -h, --help                   Show this help and exit
+  -c <channel>                 Configure a channel (e.g. -c telegram)
+  --api <url>                  Override API base URL (env: EVA_API)
+
+EXAMPLES:
+  eva                          Start interactive chat
+  eva "summarise my day"       One-shot prompt
+  eva status                   Quick status check
+  eva dash                     Open evolution dashboard
+  eva -c telegram              Configure Telegram bot
+  eva evolve                   Trigger evolution cycle
+  eva model set openai         Switch to OpenAI provider
+"""
+
+import sys
+import os
+import json
+import readline
+import urllib.request
+import urllib.error
+import subprocess
+import argparse
+from pathlib import Path
+
+# ── Config ──────────────────────────────────────────────────────────────────
+API_BASE     = os.environ.get("EVA_API", "http://localhost:8779")
+HISTORY_FILE = Path.home() / ".eva_history"
+REPO_DIR     = Path(__file__).resolve().parent
+ENV_FILE     = REPO_DIR / ".env"
+CONFIG_PATH  = REPO_DIR / "config.yaml"
+
+BANNER = """\033[96m
+  ╔═══════════════════════════════════╗
+  ║   EVA 🧬  kernel-evolving agent  ║
+  ║   Self-Evolving · Local-First     ║
+  ╚═══════════════════════════════════╝\033[0m"""
+
+REPL_HELP = """
+\033[96mEVA slash commands:\033[0m
+  /status          System status (VRAM, model, skills, version)
+  /skills          List installed skills (core skills first)
+  /routines        List routines
+  /evolve          Trigger evolution cycle
+  /evolve status   Show evolution state
+  /evolve stop     Stop evolution
+  /dash            Open evolution dashboard in browser
+  /model           Show active model / provider routing
+  /model set <p>   Switch provider (local | openai | anthropic | copilot)
+  /thoughts        Today's thought log
+  /log             Tail daemon API log (last 40 lines)
+  /memory          Recent conversation history
+  /new             Clear conversation (fresh start)
+  /restart         Restart EVA daemon
+  /update          Pull latest release + restart
+  /telegram        Configure Telegram channel (guided prompts)
+  /mobile          Mobile integration info
+  /version         Show version
+  /help            Show this help
+  /exit /quit      Exit
+"""
+
+# ── HTTP ─────────────────────────────────────────────────────────────────────
+
+def _get(path: str, timeout: int = 8) -> dict:
+    url = f"{API_BASE}{path}"
+    with urllib.request.urlopen(urllib.request.Request(url), timeout=timeout) as r:
+        return json.loads(r.read())
+
+
+def _post(path: str, body: dict = None, timeout: int = 120) -> dict:
+    url = f"{API_BASE}{path}"
+    data = json.dumps(body or {}).encode()
+    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read())
+
+
+def _alive() -> bool:
+    try:
+        _get("/health", timeout=3)
+        return True
+    except Exception:
+        return False
+
+
+def _require_running():
+    if not _alive():
+        print(f"\033[91m  EVA not running at {API_BASE}\033[0m")
+        print(f"  Start with:  bash {REPO_DIR}/start.sh")
+        print(f"  Or override: EVA_API=http://host:8779 eva\n")
+        return False
+    return True
+
+# ── Commands ─────────────────────────────────────────────────────────────────
+
+def cmd_status():
+    try:
+        h = _get("/health")
+        v = _get("/version", timeout=4).get("version", "?")
+        print(f"\n\033[96m  EVA Status\033[0m  \033[90mv{v}\033[0m")
+        print(f"  API:      \033[92m{API_BASE}\033[0m  (\033[92m●\033[0m online)")
+        print(f"  VRAM:     {h.get('vram_free_mb', '?')} MB free")
+        print(f"  Skills:   {h.get('skills', '?')}")
+        print(f"  Routines: {h.get('routines', '?')}")
+        if h.get("active_replicas"):
+            print(f"  Replicas: {h['active_replicas']}")
+        try:
+            p = _get("/provider", timeout=4)
+            routing = p.get("routing", {})
+            local_model = routing.get("task_inference", {}).get("model") or "local"
+            synth = routing.get("synthesis", {}).get("provider", "?")
+            print(f"  Inference:{local_model}")
+            print(f"  Synthesis: {synth}")
+        except Exception:
+            pass
+        print()
+    except Exception as e:
+        print(f"\033[91m  EVA not reachable at {API_BASE}\033[0m")
+        print(f"  Start:  bash {REPO_DIR}/start.sh\n")
+
+
+def cmd_skills():
+    if not _require_running():
+        return
+    try:
+        skills = _get("/skills")
+        core = [s for s in skills if s.get("is_core")]
+        rest = [s for s in skills if not s.get("is_core")]
+        print(f"\n\033[96m  Skills ({len(skills)}):\033[0m")
+        if core:
+            print(f"  \033[93m── Core (always pre-installed) ──\033[0m")
+            for s in core:
+                cmds = "  ".join(s.get("commands", []))
+                print(f"  \033[92m★ {s['name']}\033[0m  —  {s.get('description','')[:58]}")
+                if cmds:
+                    print(f"    \033[90mcommands: {cmds}\033[0m")
+        if rest:
+            tiers = {}
+            for s in rest:
+                t = s.get("tier", "installed")
+                tiers.setdefault(t, []).append(s)
+            for tier, ss in sorted(tiers.items()):
+                label = {"community":"Community","private":"Private","third-party":"3rd-party"}.get(tier, tier.title())
+                print(f"  \033[90m── {label} ({len(ss)}) ──\033[0m")
+                for s in ss[:25]:
+                    print(f"    \033[92m{s['name']}\033[0m  —  {s.get('description','')[:58]}")
+                if len(ss) > 25:
+                    print(f"    \033[90m… and {len(ss)-25} more\033[0m")
+        print()
+    except Exception as e:
+        print(f"\033[91m  Error: {e}\033[0m\n")
+
+
+def cmd_routines():
+    if not _require_running():
+        return
+    try:
+        routines = _get("/routines")
+        print(f"\n\033[96m  Routines ({len(routines)}):\033[0m")
+        for r in routines:
+            t = r.get("trigger", {})
+            trigger_hint = ""
+            if isinstance(t, dict):
+                trigger_hint = t.get("also", t.get("cron", t.get("type", "")))
+            print(f"  \033[93m{r['name']}\033[0m  —  {r.get('description','')[:60]}  \033[90m{trigger_hint}\033[0m")
+        print()
+    except Exception as e:
+        print(f"\033[91m  Error: {e}\033[0m\n")
+
+
+def cmd_evolve(subcmd: str = ""):
+    if not _require_running():
+        return
+    sub = subcmd.strip().lower()
+    try:
+        if sub == "status":
+            resp = _get("/evolution/state", timeout=8)
+            print(f"\n\033[96m  Evolution state:\033[0m")
+            for k, v in resp.items():
+                print(f"  {k}: {v}")
+        elif sub in ("stop", "pause"):
+            resp = _post("/evolution/control", {"action": "stop"}, timeout=10)
+            print(f"\n\033[93m  Evolution stopped.\033[0m  {resp}")
+        elif sub == "":
+            resp = _post("/evolution/trigger", {}, timeout=30)
+            print(f"\n\033[92m  Evolution triggered.\033[0m")
+            for k, v in resp.items():
+                print(f"  {k}: {v}")
+        else:
+            print(f"  Unknown evolve sub-command: '{sub}'. Use: evolve | evolve status | evolve stop")
+        print()
+    except Exception as e:
+        print(f"\033[91m  Evolve error: {e}\033[0m\n")
+
+
+def cmd_dash():
+    """Open evolution dashboard in browser."""
+    url = f"{API_BASE}/evolution/dashboard"
+    print(f"\033[96m  Opening dashboard:\033[0m {url}")
+    try:
+        # Check it's available first
+        import urllib.request as _ur
+        _ur.urlopen(_ur.Request(url), timeout=4).read()
+    except Exception:
+        if not _require_running():
+            return
+    # Try to open in browser
+    opened = False
+    for cmd in [
+        ["xdg-open", url],
+        ["wslview", url],
+        ["explorer.exe", url],
+        ["open", url],
+    ]:
+        try:
+            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            opened = True
+            break
+        except FileNotFoundError:
+            continue
+    if not opened:
+        print(f"  Could not auto-open. Navigate to:  \033[92m{url}\033[0m")
+    else:
+        print(f"  \033[92m✓ Opened in browser\033[0m")
+    print()
+
+
+def cmd_model(subcmd: str = ""):
+    if not _require_running():
+        return
+    parts = subcmd.strip().split()
+    if parts and parts[0] == "set":
+        if len(parts) < 2:
+            print("  Usage: model set <provider>  (local | openai | anthropic | copilot)\n")
+            return
+        provider = parts[1]
+        try:
+            resp = _post("/provider/set", {"provider": provider}, timeout=10)
+            print(f"\n\033[92m  Provider set to: {provider}\033[0m  {resp}\n")
+        except Exception as e:
+            print(f"\033[91m  Error: {e}\033[0m\n")
+        return
+    try:
+        p = _get("/provider", timeout=6)
+        avail = _get("/provider/available", timeout=6)
+        routing = p.get("routing", {})
+        print(f"\n\033[96m  Model / Provider Routing:\033[0m")
+        for role, cfg in routing.items():
+            prov = cfg.get("provider", "?")
+            model = cfg.get("model") or "(default)"
+            streaming = "stream" if cfg.get("streaming") else "batch"
+            print(f"  {role:<22} {prov:<12} {model:<30} {streaming}")
+        providers = avail if isinstance(avail, list) else avail.get("providers", [])
+        if providers:
+            print(f"\n  \033[90mAvailable providers: {', '.join(str(p) for p in providers)}\033[0m")
+            print(f"  To switch:  eva model set <provider>  or  /model set <provider>")
+        print()
+    except Exception as e:
+        print(f"\033[91m  Error: {e}\033[0m\n")
+
+
+def cmd_thoughts():
+    if not _require_running():
+        return
+    try:
+        resp = _get("/thoughts/today", timeout=8)
+        entries = resp.get("entries", [])
+        date = resp.get("date", "today")
+        print(f"\n\033[96m  Thoughts for {date} ({len(entries)} entries):\033[0m")
+        for e in entries[-20:]:
+            ts = e.get("timestamp", "")[:16]
+            text = str(e.get("content", e.get("thought", str(e))))[:100]
+            print(f"  \033[90m{ts}\033[0m  {text}")
+        print()
+    except Exception as e:
+        print(f"\033[91m  Error: {e}\033[0m\n")
+
+
+def cmd_log():
+    log_path = Path("/tmp/kernel_evolving_api.log")
+    if not log_path.exists():
+        print(f"\033[91m  Log not found: {log_path}\033[0m\n")
+        return
+    lines = log_path.read_text(errors="replace").splitlines()
+    print(f"\n\033[96m  EVA API log (last 40 lines):\033[0m")
+    for line in lines[-40:]:
+        # Colour ERROR/WARNING lines
+        if "ERROR" in line or "error" in line.lower():
+            print(f"  \033[91m{line}\033[0m")
+        elif "WARNING" in line or "WARN" in line:
+            print(f"  \033[93m{line}\033[0m")
+        else:
+            print(f"  \033[90m{line}\033[0m")
+    print()
+
+
+def cmd_memory():
+    if not _require_running():
+        return
+    try:
+        resp = _get("/system", timeout=8)
+        history = resp.get("recent_history", [])
+        print(f"\n\033[96m  Recent memory ({len(history)} entries):\033[0m")
+        for e in history[-12:]:
+            role = e.get("role", "?")
+            content = str(e.get("content", ""))[:90]
+            color = "\033[92m" if role == "user" else "\033[96m"
+            print(f"  {color}{role:<10}\033[0m {content}")
+        print()
+    except Exception as e:
+        print(f"\033[91m  Error: {e}\033[0m\n")
+
+
+def cmd_new():
+    try:
+        sys.path.insert(0, str(REPO_DIR / "src"))
+        from memory import clear as mem_clear
+        mem_clear()
+        print("\033[90m  Conversation cleared — fresh start.\033[0m\n")
+    except Exception as e:
+        print(f"\033[91m  Could not clear memory: {e}\033[0m\n")
+
+
+def cmd_version():
+    try:
+        v = _get("/version", timeout=4).get("version", "?")
+        print(f"\n  EVA  v{v}  —  {REPO_DIR}\n")
+    except Exception:
+        # Read from local version.py
+        try:
+            sys.path.insert(0, str(REPO_DIR / "src"))
+            from version import __version__
+            print(f"\n  EVA  v{__version__}  (daemon offline)  —  {REPO_DIR}\n")
+        except Exception:
+            print(f"  Version unknown — daemon offline and version.py not found.\n")
+
+
+def cmd_restart():
+    print("\033[93m  Restarting EVA daemon...\033[0m")
+    proc = subprocess.Popen(
+        ["bash", str(REPO_DIR / "start.sh")],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        cwd=str(REPO_DIR), text=True
+    )
+    for line in proc.stdout:
+        print(f"  {line}", end="")
+    code = proc.wait()
+    if code == 0:
+        print("\033[92m  ✓ Daemon started.\033[0m\n")
+    else:
+        print(f"\033[91m  start.sh exited with code {code} (API may still be starting)\033[0m\n")
+
+
+def cmd_update():
+    print("\033[93m  Pulling latest release...\033[0m")
+    r = subprocess.run(["git", "pull", "origin", "main"], cwd=str(REPO_DIR), capture_output=True, text=True)
+    output = (r.stdout + r.stderr).strip()
+    print(f"  {output[:300]}\n")
+    cmd_restart()
+
+
+# ── Telegram channel setup ────────────────────────────────────────────────────
+
+def cmd_telegram():
+    """Guided Telegram bot configuration."""
+    print(f"\n\033[96m  Telegram Channel Setup\033[0m")
+    print(f"  Config file: {ENV_FILE}\n")
+
+    # Read existing values
+    env_vars = {}
+    if ENV_FILE.exists():
+        for line in ENV_FILE.read_text().splitlines():
+            if "=" in line and not line.startswith("#"):
+                k, _, v = line.partition("=")
+                env_vars[k.strip()] = v.strip()
+
+    current_token = env_vars.get("KERNEL_EVO_TELEGRAM_BOT_TOKEN", "")
+    current_chat  = env_vars.get("KERNEL_EVO_TELEGRAM_CHAT_ID", "")
+
+    token_hint = f"(current: ...{current_token[-8:]})" if current_token else "(not set)"
+    chat_hint  = f"(current: {current_chat})" if current_chat else "(not set)"
+
+    print(f"  \033[90mYou need a Telegram bot token and your chat ID.\033[0m")
+    print(f"  \033[90mCreate a bot at https://t.me/BotFather → /newbot\033[0m")
+    print(f"  \033[90mGet your chat ID by messaging @userinfobot\033[0m\n")
+
+    try:
+        new_token = input(f"  Bot token {token_hint}: ").strip()
+        new_chat  = input(f"  Chat ID   {chat_hint}: ").strip()
+    except (KeyboardInterrupt, EOFError):
+        print("\n  Cancelled.\n")
+        return
+
+    if not new_token and not current_token:
+        print("  \033[91mNo token provided — nothing saved.\033[0m\n")
+        return
+
+    # Use existing values if blank
+    final_token = new_token or current_token
+    final_chat  = new_chat  or current_chat
+
+    # Validate token by calling Telegram getMe
+    print(f"\n  Validating token...")
+    try:
+        url = f"https://api.telegram.org/bot{final_token}/getMe"
+        with urllib.request.urlopen(url, timeout=8) as r:
+            data = json.loads(r.read())
+        if data.get("ok"):
+            bot = data["result"]
+            print(f"  \033[92m✓ Bot verified: @{bot['username']} ({bot['first_name']})\033[0m")
+        else:
+            print(f"  \033[91m✗ Token invalid: {data}\033[0m")
+            confirm = input("  Save anyway? [y/N]: ").strip().lower()
+            if confirm != "y":
+                return
+    except Exception as e:
+        print(f"  \033[93m⚠ Could not validate (no internet?): {e}\033[0m")
+        confirm = input("  Save anyway? [y/N]: ").strip().lower()
+        if confirm != "y":
+            return
+
+    # Write .env
+    env_vars["KERNEL_EVO_TELEGRAM_BOT_TOKEN"] = final_token
+    if final_chat:
+        env_vars["KERNEL_EVO_TELEGRAM_CHAT_ID"] = final_chat
+
+    lines = []
+    keys_written = set()
+    if ENV_FILE.exists():
+        for line in ENV_FILE.read_text().splitlines():
+            if "=" in line and not line.startswith("#"):
+                k = line.partition("=")[0].strip()
+                if k in env_vars:
+                    lines.append(f"{k}={env_vars[k]}")
+                    keys_written.add(k)
+                else:
+                    lines.append(line)
+            else:
+                lines.append(line)
+    for k, v in env_vars.items():
+        if k not in keys_written:
+            lines.append(f"{k}={v}")
+
+    ENV_FILE.write_text("\n".join(lines) + "\n")
+    print(f"\n  \033[92m✓ Saved to {ENV_FILE}\033[0m")
+    print(f"  Restart EVA to apply:  eva restart  or  /restart\n")
+
+
+def cmd_mobile():
+    print(f"""
+\033[96m  EVA Mobile Integration\033[0m  \033[90m(Olly app)\033[0m
+
+  EVA exposes a REST API that the Olly mobile app connects to.
+
+  API endpoint:  {API_BASE}
+  Health check:  {API_BASE}/health
+  Chat:          POST {API_BASE}/message  {{"message": "..."}}
+  Voice chat:    POST {API_BASE}/voice/chat
+
+  \033[90mTo configure the mobile app:\033[0m
+  1. Open the Olly app → Settings → Agent Connections
+  2. Add endpoint:  http://<your-host-ip>:8779
+  3. The app will auto-discover EVA and connect.
+
+  \033[90mTo expose EVA externally (tunnel):\033[0m
+    ngrok http 8779
+    cloudflared tunnel --url http://localhost:8779
+
+  \033[93m/mobile full configuration coming in a future release.\033[0m
+""")
+
+
+# ── Chat ──────────────────────────────────────────────────────────────────────
+
+def chat(message: str) -> str:
+    try:
+        resp = _post("/message", {"message": message}, timeout=120)
+        return resp.get("reply", resp.get("response", resp.get("result", str(resp))))
+    except urllib.error.URLError as e:
+        return f"\033[91m[EVA unreachable: {e}]\033[0m"
+    except Exception as e:
+        return f"\033[91m[error: {e}]\033[0m"
+
+
+def dispatch(cmd: str, rest: str = "") -> bool:
+    """Dispatch a slash command or sub-command. Returns True if handled."""
+    c = cmd.lstrip("/").lower().strip()
+    if c in ("exit", "quit"):
+        return "exit"
+    elif c == "help":
+        print(REPL_HELP)
+    elif c == "status":
+        cmd_status()
+    elif c == "skills":
+        cmd_skills()
+    elif c == "routines":
+        cmd_routines()
+    elif c == "evolve":
+        cmd_evolve(rest)
+    elif c == "dash":
+        cmd_dash()
+    elif c == "model":
+        cmd_model(rest)
+    elif c == "thoughts":
+        cmd_thoughts()
+    elif c == "log":
+        cmd_log()
+    elif c == "memory":
+        cmd_memory()
+    elif c == "new":
+        cmd_new()
+    elif c == "version":
+        cmd_version()
+    elif c == "restart":
+        cmd_restart()
+    elif c == "update":
+        cmd_update()
+    elif c in ("telegram", "channels telegram"):
+        cmd_telegram()
+    elif c == "mobile":
+        cmd_mobile()
+    else:
+        return False
+    return True
+
+
+# ── REPL ──────────────────────────────────────────────────────────────────────
+
+def load_history():
+    try:
+        readline.read_history_file(str(HISTORY_FILE))
+    except FileNotFoundError:
+        pass
+
+
+def save_history():
+    readline.write_history_file(str(HISTORY_FILE))
+    readline.set_history_length(500)
+
+
+def print_header():
+    print(BANNER)
+    try:
+        h = _get("/health", timeout=3)
+        v = _get("/version", timeout=2).get("version", "?")
+        vram = h.get("vram_free_mb", "?")
+        skills_n = h.get("skills", "?")
+        print(f"\033[90m  v{v} · {skills_n} skills · {vram} MB VRAM free · {API_BASE}\033[0m")
+    except Exception:
+        print(f"\033[91m  ⚠ EVA not running at {API_BASE}\033[0m")
+        print(f"\033[90m  Start with:  bash {REPO_DIR}/start.sh\033[0m")
+    print(f"\033[90m  Type /help for commands · Ctrl+C to exit\033[0m\n")
+
+
+def run_interactive():
+    load_history()
+    print_header()
+
+    while True:
+        try:
+            user_input = input("\033[92mYou:\033[0m ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print("\n\033[90mBye.\033[0m")
+            save_history()
+            break
+
+        if not user_input:
+            continue
+
+        # Slash command or sub-command
+        if user_input.startswith("/") or user_input.split()[0].lower() in (
+            "status", "skills", "routines", "evolve", "dash", "model",
+            "thoughts", "log", "memory", "new", "version", "restart",
+            "update", "telegram", "mobile", "help", "exit", "quit",
+        ):
+            parts = user_input.lstrip("/").split(None, 1)
+            result = dispatch(parts[0], parts[1] if len(parts) > 1 else "")
+            if result == "exit":
+                save_history()
+                break
+            if result is False:
+                # Unknown slash command — send to agent
+                reply = chat(user_input)
+                print(f"\033[96mEVA:\033[0m {reply}\n")
+        else:
+            reply = chat(user_input)
+            print(f"\033[96mEVA:\033[0m {reply}\n")
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="eva",
+        description="EVA — kernel-evolving self-evolving local AI agent CLI",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+        add_help=False,  # We handle -h ourselves for cleaner output
+    )
+    parser.add_argument("-h", "--help", action="store_true", help="Show help and exit")
+    parser.add_argument("-c", "--channel", metavar="CHANNEL", help="Configure a channel (e.g. telegram)")
+    parser.add_argument("--api", metavar="URL", help="Override API base URL")
+    parser.add_argument("args", nargs=argparse.REMAINDER, help="Command or message")
+
+    opts = parser.parse_args()
+
+    # API override
+    global API_BASE
+    if opts.api:
+        API_BASE = opts.api
+
+    # -h / --help
+    if opts.help:
+        print(__doc__)
+        return
+
+    # -c <channel>
+    if opts.channel:
+        ch = opts.channel.lower()
+        if ch == "telegram":
+            cmd_telegram()
+        elif ch == "mobile":
+            cmd_mobile()
+        else:
+            print(f"\033[91m  Unknown channel: {ch}\033[0m")
+            print(f"  Available: telegram, mobile\n")
+        return
+
+    # Positional args
+    args = opts.args
+    if not args:
+        run_interactive()
+        return
+
+    # Join first token + rest
+    first = args[0].lstrip("/").lower()
+    rest = " ".join(args[1:])
+
+    result = dispatch(first, rest)
+    if result is False:
+        # Not a command — treat as one-shot chat
+        message = " ".join(opts.args)
+        if not _alive():
+            print(f"\033[91mEVA not running at {API_BASE}. Start with: bash {REPO_DIR}/start.sh\033[0m")
+            sys.exit(1)
+        reply = chat(message)
+        print(reply)
+
+
+if __name__ == "__main__":
+    main()

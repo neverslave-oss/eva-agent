@@ -1,0 +1,16 @@
+[Unit]
+Description=Kernel Evo — Self Evolving local AI agent (Gemma 4 E2B-it + Drafter)
+After=network.target
+
+[Service]
+Type=forking
+WorkingDirectory=~/.openclaw/workspace/repositories/kernel-evolving
+ExecStart=/bin/bash ~/.openclaw/workspace/repositories/kernel-evolving/start.sh
+EnvironmentFile=-~/.openclaw/workspace/repositories/kernel-evolving/.env
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,157 @@
+api:
+  host: 0.0.0.0
+  port: 8779
+  openclaw_endpoint: ${OPENCLAW_ENDPOINT:-http://host.docker.internal:18789}
+
+kernel_workspace: /app/workspace
+workspace: /app/workspace
+
+model:
+  device: auto
+  dtype: bfloat16
+  quantize: 4bit
+  name: nvidia/Nemotron-Labs-Diffusion-3B
+  path: null   # null = auto-download via HF_HOME on first inference
+  drafter_path: ""
+  speculative_decoding: false
+  adapter_path: null
+  max_context_length: 65536
+
+model_context_lengths:
+  gemma-4-e2b:  32768
+  gemma-4-e4b:  32768
+  qwen3-vl:     32768
+  nemotron:     65536
+
+model_server:
+  socket: /tmp/kernel_evolving_model.sock
+  log: /tmp/kernel_evolving_model_server.log
+
+inference:
+  backend: transformers
+  gpu_memory_utilization: 0.65
+  max_model_len: 65536
+  speculative_decoding: false
+  speculative_drafter: ""
+  speculative_num_speculative_tokens: 5
+
+stt_model:
+  name: nvidia/Nemotron-Labs-Diffusion-3B
+  path: null
+  dtype: bfloat16
+  quantize: 4bit
+  device: auto
+
+ecosystem:
+  bootstrap_on_startup: true
+  branch: main
+  cache_dir: /data/ecosystem
+  community: fabiopacifici-bot/microclaw_community_ecosystem
+  private: fabiopacifici-bot/microclaw_private_ecosystem
+  routines_dir: /app/routines
+  skills_dir: /app/skills
+
+skills_dir: /app/skills
+routines_dir: /app/routines
+private_skills_dir: /app/skills/private
+
+memory:
+  context_budget_mb: 512
+  max_replicas: 3
+  replica_depth_limit: 1
+
+logging:
+  file: /tmp/kernel.log
+  level: INFO
+
+embedding_backend: "native"
+embedding_model_path: null   # null = auto-detect from HF_HOME on first use
+
+providers:
+  task_inference: local
+  synthesis: openai
+  critic: openai
+  planning: openai
+  trajectory_teacher: openai
+  gpu_temp_critical_c: 85
+  gpu_temp_resume_c: 78
+  fallback_provider: openai
+  models:
+    openai: gpt-4o
+    anthropic: claude-sonnet-4-6
+    local: null
+    copilot: claude-sonnet-4.5
+  streaming:
+    enabled: true
+    task_inference: true
+    synthesis: false
+  collect_trajectories: true
+  trajectory_min_critic_score: 0.7
+  trajectory_require_artifact: true
+
+peers:
+  - id: kernel-base
+    url: http://host.docker.internal:8769
+    role: production
+    description: "Production kernel base on host machine"
+
+discovery:
+  enabled: true
+  interval_s: 60
+  port_scan: true
+  mdns: false   # enable when using --network host or shared bridge
+  coding_agents: true
+  timeout_s: 1
+
+delegation:
+  enabled: false
+  coding_agents: true
+  openclaw: true
+  kernel_peers: true
+  prefer_local: true
+
+olly_workspace: ""
+
+evolution:
+  enabled: true
+  finetune_gate:
+    enabled: false
+    trajectory_threshold: 50
+    min_improvement: 0
+    adapter_output_dir: /app/workspace/artifacts/finetune
+    adapter_active_dir: /app/workspace/artifacts/adapter_active
+    state_file: /app/workspace/data/finetune_gate_state.json
+    shadow_port: 8780
+    shadow_socket: /tmp/kernel_evo_shadow.sock
+
+thinking:
+  enabled: true
+  idle_threshold_s: 300
+  thought_interval_s: 1800
+  min_score: 0.4
+  promote_threshold: 0.7
+  proactive_telegram: true
+  proactive_max_per_day: 4
+  journal_dir: /app/workspace/thoughts
+  ideas_dir: /app/workspace/thoughts/ideas
+
+self_identity:
+  role: agent
+  codename: kernel-evolving
+  version_tag: v1.18.5-evolving
+
+goal_discovery:
+  boot_pattern_cap: 3
+  deferred_drain_per_cycle: 1
+
+planning:
+  enabled: true
+  complexity_threshold: 2
+  max_steps: 5
+  draft_plan: true
+  synthesise_with_draft: true
+
+pipeline:
+  async_enabled: true
+  job_ttl_s: 3600
+  speculative_stages: false
