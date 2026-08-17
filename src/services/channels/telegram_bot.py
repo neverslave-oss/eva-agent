@@ -34,6 +34,79 @@ def _esc(text: str) -> str:
     return str(text).replace("_", "\\_")
 
 
+# ── Tool step display (Telegram) ─────────────────────────────────────
+# Per-tool emoji + verb so tool-call progress messages are informative
+# ("what tool, to do what") instead of a bare "🔧 tool1 → tool2".
+_TOOL_EMOJI = {
+    "read_file": "📄",
+    "write_file": "✍️",
+    "exec_shell": "⚙️",
+    "http_get": "🌐",
+    "web_search": "🔍",
+    "browser_use": "🧭",
+    "run_skill": "🧩",
+    "run_routine": "🔄",
+    "send_file": "📤",
+    "search_skills": "🔎",
+    "list_routines": "📋",
+    "recall_memory": "🧠",
+}
+_TOOL_VERB = {
+    "read_file": "read",
+    "write_file": "write",
+    "exec_shell": "run",
+    "http_get": "fetch",
+    "web_search": "search",
+    "browser_use": "browse",
+    "run_skill": "run skill",
+    "run_routine": "run routine",
+    "send_file": "send file",
+    "search_skills": "find skill",
+    "list_routines": "list routines",
+    "recall_memory": "recall memory",
+}
+# Arg fields to surface first when summarising a tool call.
+_TOOL_ARG_PRIORITY = (
+    "path", "file_path", "query", "url", "command", "content",
+    "skill_name", "routine_name", "input", "caption",
+)
+
+
+def _tool_args_label(name: str, args) -> str:
+    """Return a short human-readable label for a tool call's args."""
+    if args is None:
+        return ""
+    if isinstance(args, dict):
+        for k in _TOOL_ARG_PRIORITY:
+            v = args.get(k)
+            if v:
+                s = str(v).strip()
+                if s:
+                    return s[:80]
+        return ""
+    s = str(args).strip()
+    return s[:80]
+
+
+def _format_tool_step(n, tool_name, args=None, result=None) -> str:
+    """Format one tool-call step as a readable, emoji-tagged Telegram line."""
+    name = str(tool_name or "?")
+    emoji = _TOOL_EMOJI.get(name, "🔧")
+    verb = _TOOL_VERB.get(name, name.replace("_", " "))
+    # Show the tool name in backticks (precise) with a friendly verb prefix.
+    line = f"*Step {n}* {emoji} `{_esc(verb)}` (`{_esc(name)}`)"
+    label = _tool_args_label(name, args)
+    if label:
+        line += f" — `{_esc(label)}`"
+    if result is not None:
+        r = str(result).strip()
+        if r and not r.lower().startswith("(error") and "error:" not in r.lower()[:60]:
+            line += "\n  ✅ ok"
+        else:
+            line += f"\n  ⚠️ {_esc(r[:120])}"
+    return line
+
+
 # GitHub update tracking
 _latest_version: str = ""
 # GitHub URLs now live in src/updater.py
@@ -1061,9 +1134,7 @@ def handle_message(chat_id: str, text: str, sender_name: str = "", photo_file_id
 
                 def _voice_step_cb(n, tool_name, args=None, result=None):
                     step_num[0] = n
-                    args_str = str(args)[:120]
-                    result_str = str(result)[:1200]
-                    log_lines.append(f"*Step {n}* `{tool_name}`\n▸ `{args_str}`\n↳ {result_str}")
+                    log_lines.append(_format_tool_step(n, tool_name, args, result))
                     snippet = f"🎙️ _{_esc(transcript[:60])}_\n\n🔍 " + "\n\n".join(log_lines[-4:])
                     if working_id:
                         edit_message(chat_id, working_id, snippet)
@@ -2707,14 +2778,14 @@ def handle_message(chat_id: str, text: str, sender_name: str = "", photo_file_id
                 # Clear stream buffer — step output takes over display
                 _stream_buf[0] = ""
                 _stream_char_count[0] = 0
-                # Quiet mode: only track steps internally, show a compact single-line progress indicator
-                log_lines.append(tool_name.replace("_", "\\_"))
-                tools_summary = " → ".join(log_lines)
-                snippet = f"🔧 {tools_summary}"
+                # Show an informative, emoji-tagged step line (what tool, to do what).
+                log_lines.append(_format_tool_step(n, tool_name, args, result))
+                # Keep the last few steps so the message stays readable.
+                snippet = "🔍 " + "\n\n".join(log_lines[-4:])
                 if working_id[0]:
-                    edit_message(chat_id, working_id[0], snippet)
+                    edit_message(chat_id, working_id[0], snippet[:4000])
                 else:
-                    working_id[0] = send_message(chat_id, snippet)
+                    working_id[0] = send_message(chat_id, snippet[:4000])
 
             # Inject recent attachment context only when message references a file
             _triage_text = text
