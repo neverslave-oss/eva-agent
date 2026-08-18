@@ -171,6 +171,35 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "browser_use",
+            "description": "Perform an agentic multi-step web task using browser-use (navigate, click, fill forms, log in, extract data, complete workflows in a real browser). Use when a task requires INTERACTING with a web app or multiple coordinated steps (e.g. 'log into X and download the report', 'search for the top result and extract its title'). For simple lookups or single-page reads, prefer web_search instead. Returns a summary of actions taken + extracted data.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "The natural-language web task to complete (e.g. 'Search for the latest news about AI, open the top result, and extract the title')"
+                    },
+                    "url": {
+                        "type": "string",
+                        "description": "Optional starting URL to navigate to first (e.g. 'https://example.com')"
+                    },
+                    "max_steps": {
+                        "type": "integer",
+                        "description": "Optional max agent steps (default from config, e.g. 15). Caps runaway loops."
+                    },
+                    "save_screenshot": {
+                        "type": "boolean",
+                        "description": "Optional: save a final screenshot to the configured screenshot_dir"
+                    }
+                },
+                "required": ["task"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "search_skills",
             "description": "Search installed skills by name or description keyword. Use this to find the right skill before calling run_skill. Returns a list of matching skills with their names, commands, and descriptions.",
             "parameters": {
@@ -679,4 +708,177 @@ def execute_tool(name: str, arguments: dict, workspace: str = WORKSPACE, chat_id
         except Exception as e:
             return f"(error: web_search failed: {e})"
 
+    elif name == "browser_use":
+        return _run_browser_use(arguments)
+
     return f"Unknown tool: {name}"
+
+
+def _load_browser_config() -> dict:
+    """Load the `browser` section from config.yaml (empty dict on any failure)."""
+    try:
+        import yaml as _yaml
+        from pathlib import Path as _Path
+        cfg = _yaml.safe_load(open(str(_Path(__file__).parent.parent.parent / "config.yaml")))
+        return cfg.get("browser", {}) or {}
+    except Exception:
+        return {}
+
+
+def _run_browser_use(arguments: dict) -> str:
+    """Run an agentic multi-step browser task via browser-use.
+
+    Bridges the synchronous tool loop to browser-use's async Agent.run() with
+    asyncio.run(). Builds the driving LLM from the configured inference provider
+    (reuses task_inference routing so it works in cloud/HF-Router mode).
+    """
+    import asyncio
+    task = arguments.get("task")
+    if not task:
+        return "(error: browser_use requires 'task' argument)"
+    task = str(task).strip()
+    url = arguments.get("url") or ""
+    url = str(url).strip()
+
+    browser_cfg = _load_browser_config()
+    if not browser_cfg.get("enabled", True):
+        return "(error: browser_use is disabled in config — use web_search instead)"
+    headless = bool(browser_cfg.get("headless", True))
+    cfg_max_steps = int(browser_cfg.get("max_steps", 15) or 15)
+    timeout_s = float(browser_cfg.get("timeout_s", 120) or 120)
+    screenshot_dir = browser_cfg.get("screenshot_dir", "") or ""
+    import os as _os
+    screenshot_dir = _os.path.expanduser(screenshot_dir)
+
+    # Defensive headless enforcement: browser-use reads BROWSER_USE_HEADLESS from
+    # the environment and applies it to the browser profile, guaranteeing the
+    # browser never opens a visible window on the host desktop regardless of how
+    # the Browser instance is constructed.
+    _os.environ["BROWSER_USE_HEADLESS"] = "true" if headless else "false"
+
+    max_steps = arguments.get("max_steps")
+    if max_steps is None:
+        max_steps = cfg_max_steps
+    try:
+        max_steps = int(max_steps)
+    except (TypeError, ValueError):
+        max_steps = cfg_max_steps
+    max_steps = max(1, min(max_steps, 50))  # hard cap against runaway loops
+
+    save_screenshot = bool(arguments.get("save_screenshot", False))
+
+    try:
+        from browser_use import Agent, Browser, ChatOpenAI
+    except ImportError as e:
+        return (
+            f"(error: browser-use not installed — run `pip install browser-use playwright` "
+            f"and `playwright install chromium`. Detail: {e})"
+        )
+
+    # ── Build the driving LLM from the configured inference provider ──────
+    try:
+        from core.inference.provider import get_provider as _get_prov
+        prov = _get_prov()
+        provider_name = prov.get_provider("task_inference")
+        model = prov.get_model(provider_name, "task_inference")
+        hf_token = _os.environ.get("HF_TOKEN")
+        # The HF Router (OpenAI-compatible) is used when task_inference routes to
+        # a cloud provider OR when no local model is available. Only the HF
+        # provider has a router-based model id (with ":provider" suffix).
+        if provider_name == "hf" and hf_token:
+            llm = ChatOpenAI(
+                model=prov._hf_model(model or "deepseek-ai/DeepSeek-V4-Flash-0731"),
+                base_url=prov._hf_base_url(),
+                api_key=hf_token,
+                temperature=0.1,
+            )
+        else:
+            # Fallback: reuse the HF Router with the task_inference model (cloud
+            # mode), since local model_server is not an OpenAI-compatible endpoint
+            # browser-use can drive directly.
+            if not hf_token:
+                return "(error: browser_use needs HF_TOKEN to drive the browser agent)"
+            llm = ChatOpenAI(
+                model=prov._hf_model(model or "deepseek-ai/DeepSeek-V4-Flash-0731"),
+                base_url=prov._hf_base_url(),
+                api_key=hf_token,
+                temperature=0.1,
+            )
+    except Exception as e:
+        return f"(error: browser_use could not configure LLM: {e})"
+
+    full_task = f"Navigate to {url} and: {task}" if url else task
+
+    async def _run() -> dict:
+        browser = Browser(headless=headless)
+        agent = Agent(task=full_task, llm=llm, browser=browser, max_steps=max_steps)
+        try:
+            history = await agent.run(max_steps=max_steps)
+            return await _summarize(history, save_screenshot, screenshot_dir)
+        finally:
+            try:
+                await browser.close()
+            except Exception:
+                pass
+
+    try:
+        result = asyncio.run(_run())
+    except Exception as e:
+        return f"(error: browser_use failed: {e})"
+
+    final = (result.get("final") or "").strip()
+    urls = result.get("urls", [])
+    steps = result.get("steps", 0)
+    errs = result.get("errors", [])
+    lines = []
+    if final:
+        lines.append(f"Result: {final[:2000]}")
+    else:
+        lines.append("(browser_use completed but returned no final result)")
+    if urls:
+        lines.append(f"Visited: {', '.join(urls[:5])}")
+    if steps:
+        lines.append(f"Steps: {steps}")
+    if errs:
+        lines.append(f"Errors: {'; '.join(str(e)[:200] for e in errs[:3])}")
+    if result.get("screenshot"):
+        lines.append(f"Screenshot: {result['screenshot']}")
+    return "\n".join(lines)[:3000]
+
+
+async def _summarize(history, save_screenshot: bool, screenshot_dir: str) -> dict:
+    """Extract a concise summary + optional screenshot from browser-use history."""
+    out = {"final": "", "urls": [], "steps": 0, "errors": [], "screenshot": ""}
+    try:
+        out["final"] = history.final_result() or ""
+    except Exception:
+        pass
+    try:
+        out["urls"] = history.urls() or []
+    except Exception:
+        pass
+    try:
+        out["steps"] = history.number_of_steps() or 0
+    except Exception:
+        pass
+    try:
+        out["errors"] = [e for e in (history.errors() or []) if e]
+    except Exception:
+        pass
+    if save_screenshot and screenshot_dir:
+        try:
+            import os as _os
+            from datetime import datetime as _dt
+            _os.makedirs(screenshot_dir, exist_ok=True)
+            path = _os.path.join(
+                screenshot_dir, f"browser_use_{_dt.now().strftime('%Y%m%d_%H%M%S')}.png"
+            )
+            # history.screenshot_paths() returns paths of saved screenshots (if
+            # save_screenshots enabled); otherwise take the last one via browser.
+            paths = history.screenshot_paths() or []
+            if paths:
+                _os.rename(str(paths[-1]), path)
+                out["screenshot"] = path
+        except Exception:
+            pass
+    return out

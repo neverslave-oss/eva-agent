@@ -2114,8 +2114,8 @@ def _handle_infer_with_tools(params: dict, send_line) -> dict:
             # and repeated on the next turn.
             _ERROR_PREFIXES = (
                 "(error: skill '", "(error: routine '", "(error: file not found",
-                "(error: write_file", "(error: web_search failed", "(error: exec_shell",
-                "(vllm error:", "(hf generate error:", "(adapter error:",
+                "(error: write_file", "(error: web_search failed", "(error: browser_use",
+                "(error: exec_shell", "(vllm error:", "(hf generate error:", "(adapter error:",
                 "(max steps reached)",
             )
             _ft_lower = final_text.lower().lstrip()

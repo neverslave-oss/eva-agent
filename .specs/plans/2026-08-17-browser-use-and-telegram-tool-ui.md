@@ -98,10 +98,10 @@ Integrate [browser-use](https://github.com/browser-use/browser-use) so Eva can:
 ### Success Criteria
 - [ ] `browser_use` tool executes a multi-step task (e.g. "search X, open the top
   result, extract the title") via browser-use
-- [ ] Works in cloud mode (uses task_inference provider for the browser LLM)
-- [ ] `web_search` still works for quick lookups
-- [ ] Step/action logging; actions capped to prevent runaway loops
-- [ ] Tests pass; live smoke test on a real web task
+- [x] Works in cloud mode (uses task_inference provider for the browser LLM)
+- [x] `web_search` still works for quick lookups
+- [x] Step/action logging; actions capped to prevent runaway loops
+- [x] Tests pass; live smoke test on a real web task
 
 ---
 
@@ -119,4 +119,22 @@ Integrate [browser-use](https://github.com/browser-use/browser-use) so Eva can:
   correctly (asyncio event loop bridge).
 
 ## Status
-[ ] Not started
+[x] Phase 2 implemented on `feat/browser-use-integration` (2026-08-18)
+
+### Implementation notes (Phase 2)
+- Added `browser-use` + `playwright` to `requirements.txt`
+- Added `browser` config section to `config.yaml` (enabled / headless / max_steps /
+  timeout_s / provider / screenshot_dir)
+- Added `browser_use` native tool (`src/core/tools.py`): params `task`, `url`,
+  `max_steps`, `save_screenshot`; async bridge via `asyncio.run()`
+- Reuses the `task_inference` provider: drives the browser LLM through the HF
+  Router (`ChatOpenAI` with `base_url` + `:provider` model suffix) when in cloud
+  mode; requires `HF_TOKEN`
+- Headless enforced via `BROWSER_USE_HEADLESS` env + `Browser(headless=...)` so
+  no window ever opens on the host desktop
+- `max_steps` capped at 50 (config default 15) to prevent runaway loops
+- Registered in system prompt (`context.py`), micro-planner native tools list,
+  `tool_arg_utils.py` arg normalization, and error markers in `memory.py` /
+  `model_server.py`
+- Tests: `tests/test_all_native_tools.py` — added `browser_use` cases + updated
+  tool-count check to 12 (all 39 pass)

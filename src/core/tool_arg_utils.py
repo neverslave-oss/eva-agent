@@ -69,6 +69,13 @@ def normalize_tool_args(tool_name: str, args: dict) -> dict:
         _move("search_query", "query")
         _move("name", "query")
 
+    if tname == "browser_use":
+        _move("objective", "task")
+        _move("goal", "task")
+        _move("prompt", "task")
+        _move("start_url", "url")
+        _move("steps", "max_steps")
+
     if tname == "http_get":
         _move("uri", "url")
         _move("name", "url")

@@ -125,6 +125,7 @@ _ERROR_MARKERS = (
     "(error: file not found:",
     "(error: write_file",
     "(error: web_search failed:",
+    "(error: browser_use",
     "(error: exec_shell",
     "(vLLM error:",
     "(adapter error:",

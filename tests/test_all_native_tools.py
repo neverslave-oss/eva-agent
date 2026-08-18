@@ -190,6 +190,27 @@ class TestWebSearch:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# browser_use
+# ─────────────────────────────────────────────────────────────────────────────
+class TestBrowserUse:
+    def test_missing_task_returns_error(self):
+        result = tools_mod.execute_tool("browser_use", {})
+        assert "error" in result.lower()
+
+    def test_missing_dependency_returns_install_hint(self, tmp_path):
+        # When browser-use isn't importable, the tool returns an install hint.
+        fake_cfg = tmp_path / "config.yaml"
+        fake_cfg.write_text("browser:\n  enabled: true\n  headless: true\n  max_steps: 15\n  timeout_s: 120\n")
+        # Force the config path to the fake config so we don't depend on the real one.
+        with patch("core.tools._load_browser_config", return_value={
+            "enabled": True, "headless": True, "max_steps": 15, "timeout_s": 120,
+            "screenshot_dir": "",
+        }), patch.dict("sys.modules", {"browser_use": None}):
+            result = tools_mod.execute_tool("browser_use", {"task": "search the web"})
+        assert "browser-use not installed" in result.lower() or "install" in result.lower()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # send_file
 # ─────────────────────────────────────────────────────────────────────────────
 class TestSendFile:
@@ -306,11 +327,11 @@ class TestRecallMemory:
 class TestToolsListCompleteness:
     EXPECTED = {
         "exec_shell", "read_file", "write_file", "http_get",
-        "web_search", "send_file", "run_skill", "run_routine",
+        "web_search", "browser_use", "send_file", "run_skill", "run_routine",
         "search_skills", "list_routines", "recall_memory",
     }
 
-    def test_all_11_tools_registered(self):
+    def test_all_12_tools_registered(self):
         names = {t["function"]["name"] for t in tools_mod.TOOLS}
         missing = self.EXPECTED - names
         assert not missing, f"Missing tools in TOOLS list: {missing}"

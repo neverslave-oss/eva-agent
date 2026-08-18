@@ -7,6 +7,21 @@ audio:
   input_device: default
   output_device: default
   wake_word: hey evo
+browser:
+  # Agentic browser automation (browser_use tool) for multi-step web tasks.
+  # The browser runs headless by default; set enabled to false to disable the
+  # browser_use tool entirely (web_search keeps working via the skill).
+  enabled: true
+  headless: true
+  # Max agent steps per task — caps runaway loops. Overridable per call via max_steps.
+  max_steps: 15
+  # Timeout (seconds) for the whole browser_use task.
+  timeout_s: 120
+  # LLM provider used to drive the browser agent. Reuses the task_inference
+  # routing (local or cloud) so it works in cloud mode with HF Router.
+  provider: task_inference
+  # Optional: save a final screenshot to this dir (empty = disabled).
+  screenshot_dir: ~/.kernel-evolving/workspace/tmp
 cluster:
   discovery: mdns
   enabled: false
