@@ -51,9 +51,62 @@ def test_refresh_copies_agents_md(tmp_path):
         _setup.refresh_identity_files()
     agents_dst = workspace / "AGENTS.md"
     assert agents_dst.exists(), "AGENTS.md should have been copied to workspace"
-    if (repo_root / "AGENTS.md").exists():
-        repo_content = (repo_root / "AGENTS.md").read_text(encoding="utf-8")
-        assert agents_dst.read_text(encoding="utf-8") == repo_content
+    # Source is now the canonical template dir, not the repo root.
+    template = repo_root / "src" / "assets" / "agent-templates" / "AGENTS.md"
+    if template.exists():
+        assert agents_dst.read_text(encoding="utf-8") == template.read_text(encoding="utf-8")
+
+
+def test_refresh_repairs_corrupted_agents_md_preserving_learnings(tmp_path):
+    """A corrupted AGENTS.md (learnings only, no template) is repaired on refresh,
+    and existing session learnings are preserved."""
+    import infra.setup as _setup
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True)
+    repo_root = Path(__file__).parent.parent
+    agents_dst = workspace / "AGENTS.md"
+    # Corrupted file: only session learnings, no identity template markers.
+    agents_dst.write_text(
+        "## Session learnings (2026-08-06)\n- Always call tools directly\n",
+        encoding="utf-8",
+    )
+    with (
+        patch.object(_setup, 'WORKSPACE', workspace),
+        patch.object(_setup, 'KERNEL_HOME', tmp_path),
+        patch.object(_setup, '_REPO_ROOT', repo_root),
+    ):
+        _setup.refresh_identity_files()
+    content = agents_dst.read_text(encoding="utf-8")
+    # Template restored
+    assert "## Who you are" in content
+    assert "## How a request flows" in content
+    # Learnings preserved
+    assert "Session learnings (2026-08-06)" in content
+    assert "Always call tools directly" in content
+
+
+def test_refresh_does_not_rewrite_valid_agents_md(tmp_path):
+    """A valid AGENTS.md (with template + learnings) is left untouched on refresh."""
+    import infra.setup as _setup
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True)
+    repo_root = Path(__file__).parent.parent
+    agents_dst = workspace / "AGENTS.md"
+    agents_dst.write_text(
+        "# AGENTS.md\n\n## Who you are\nKernel-Evo.\n\n"
+        "## Session learnings (2026-08-06)\n- Always call tools directly\n",
+        encoding="utf-8",
+    )
+    original = agents_dst.read_text(encoding="utf-8")
+    with (
+        patch.object(_setup, 'WORKSPACE', workspace),
+        patch.object(_setup, 'KERNEL_HOME', tmp_path),
+        patch.object(_setup, '_REPO_ROOT', repo_root),
+    ):
+        _setup.refresh_identity_files()
+    assert agents_dst.read_text(encoding="utf-8") == original, (
+        "Valid AGENTS.md must not be rewritten on refresh"
+    )
 
 
 def test_setup_idempotent(tmp_path):

@@ -1238,6 +1238,28 @@ class ThinkAtRest:
             today = __import__('datetime').date.today().isoformat()
             section = f"\n## Session learnings ({today})\n" + insert
 
+            # Defense in depth: never let the consolidator strip the identity template.
+            # If the runtime AGENTS.md lost its core content, restore it from the
+            # canonical template (preserving any learnings) before appending, so the
+            # file always keeps the template + append-only session learnings.
+            _sentinel_markers = ("## How a request flows", "## Who you are", "## Architecture reference")
+            if not agents_path.exists() or not any(m in existing_agents for m in _sentinel_markers):
+                try:
+                    _tpl = Path(__file__).parent.parent.parent / "src" / "assets" / "agent-templates" / "AGENTS.md"
+                    if _tpl.exists():
+                        _template_text = _tpl.read_text(encoding="utf-8")
+                        _learnings = ""
+                        if "## Session learnings" in existing_agents:
+                            _learnings = existing_agents[existing_agents.find("## Session learnings"):].rstrip() + "\n"
+                        _restored = _template_text.rstrip() + "\n"
+                        if _learnings:
+                            _restored += "\n" + _learnings
+                        agents_path.write_text(_restored, encoding="utf-8")
+                        existing_agents = _restored
+                        logger.info("[IdentityConsolidator] restored AGENTS.md template before append")
+                except Exception as _rexc:
+                    logger.debug(f"[IdentityConsolidator] template restore failed: {_rexc}")
+
             if agents_path.exists():
                 agents_path.write_text(existing_agents.rstrip() + section, encoding="utf-8")
             else:

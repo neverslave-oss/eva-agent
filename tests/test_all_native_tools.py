@@ -100,6 +100,28 @@ class TestWriteFile:
         assert "error" in result.lower()
         assert "content" in result
 
+    def test_protected_identity_files_are_rejected(self, tmp_path):
+        """write_file must refuse to overwrite AGENTS.md / SOUL.md / IDENTITY.md."""
+        fake_home = tmp_path
+        original_expanduser = os.path.expanduser
+
+        def fake_expanduser(p):
+            if p.startswith("~"):
+                return p.replace("~", str(fake_home), 1)
+            return p
+
+        for fname in ("AGENTS.md", "SOUL.md", "IDENTITY.md"):
+            with patch("os.path.expanduser", side_effect=fake_expanduser):
+                result = tools_mod.execute_tool("write_file", {
+                    "path": f"~/.kernel-evolving/workspace/{fname}",
+                    "content": "clobber attempt",
+                })
+            assert "protected" in result.lower(), f"{fname} write should be rejected, got: {result}"
+            # Ensure nothing was written to the real workspace file
+            real = Path(os.path.expanduser(f"~/.kernel-evolving/workspace/{fname}"))
+            if real.exists():
+                assert "clobber attempt" not in real.read_text(encoding="utf-8")
+
     def test_path_outside_workspace_is_redirected(self, tmp_path):
         """Paths outside ~/.kernel-evolving must be redirected to workspace/tmp/, not written verbatim."""
         # Patch expanduser so ~/.kernel-evolving resolves to tmp_path

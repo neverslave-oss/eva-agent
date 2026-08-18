@@ -35,6 +35,26 @@ CONFIG_DIRS = [
 # Repo root — two levels up from this file (src/setup.py → repo root)
 _REPO_ROOT = Path(__file__).parent.parent.parent
 
+# Sentinel markers that must be present for the runtime AGENTS.md to be considered
+# a valid identity template. If none of these are found, the file has lost its core
+# content (e.g. overwritten by session learnings) and needs repair.
+_AGENTS_SENTINELS = ("## How a request flows", "## Who you are", "## Architecture reference")
+
+# Marker that delimits the appended session-learnings region so it can be preserved
+# across a template repair.
+_LEARNINGS_MARKER = "## Session learnings"
+
+
+def _templates_dir() -> Path:
+    """Return the canonical identity-template directory.
+
+    Canonical templates live under src/assets/agent-templates/. The repo-root
+    AGENTS.md is the agent file used to work on the repository itself and must NOT
+    be used as the Kernel-Evolving runtime identity source. Computed from the current
+    _REPO_ROOT so tests that patch _REPO_ROOT get a consistent path.
+    """
+    return _REPO_ROOT / "src" / "assets" / "agent-templates"
+
 
 def setup_workspace() -> bool:
     """Create the workspace on first boot. Idempotent — returns False if already exists."""
@@ -177,6 +197,49 @@ def _ensure_user_profile() -> None:
         logger.info("[setup] user.json updated with missing fields")
 
 
+def _repair_agents_md(agents_dst: Path) -> bool:
+    """Restore a corrupted runtime AGENTS.md from the template, preserving learnings.
+
+    A file is considered corrupted when it exists but contains none of the identity
+    sentinel markers (e.g. it was overwritten by session learnings only). On repair we
+    write the full template and re-append any existing `## Session learnings` sections
+    so no accumulated learnings are lost. Returns True if a repair happened.
+    """
+    if not agents_dst.exists():
+        return False
+    try:
+        existing = agents_dst.read_text(encoding="utf-8")
+    except Exception:
+        return False
+
+    # Not corrupted → leave it alone.
+    if any(marker in existing for marker in _AGENTS_SENTINELS):
+        return False
+
+    template = _templates_dir() / "AGENTS.md"
+    if not template.exists():
+        logger.warning("[setup] AGENTS.md template missing at %s — cannot repair", template)
+        return False
+
+    # Preserve any session-learnings region present in the corrupted file.
+    learnings = ""
+    if _LEARNINGS_MARKER in existing:
+        idx = existing.find(_LEARNINGS_MARKER)
+        learnings = existing[idx:].rstrip() + "\n"
+
+    merged = template.read_text(encoding="utf-8").rstrip() + "\n"
+    if learnings:
+        merged += "\n" + learnings
+
+    try:
+        agents_dst.write_text(merged, encoding="utf-8")
+        logger.info("[setup] Repaired AGENTS.md from template (preserved session learnings)")
+        return True
+    except Exception as exc:
+        logger.warning("[setup] Could not repair AGENTS.md: %s", exc)
+        return False
+
+
 def refresh_identity_files() -> None:
     """
     Called on every boot — sync AGENTS.md and SOUL.md from the repo into the workspace.
@@ -192,22 +255,26 @@ def refresh_identity_files() -> None:
     # Fix stale IDENTITY.md if present
     _fix_stale_identity_md()
 
-    # Copy AGENTS.md from repo root → workspace (first boot only)
-    agents_src = _REPO_ROOT / "AGENTS.md"
+    # AGENTS.md: source from the canonical templates dir, not the repo root.
+    agents_src = _templates_dir() / "AGENTS.md"
     agents_dst = WORKSPACE / "AGENTS.md"
     copied = _copy_file_if_absent(agents_src, agents_dst)
     if copied:
-        logger.info("[setup] Copied AGENTS.md from repo to workspace")
+        logger.info("[setup] Copied AGENTS.md from template to workspace")
+    else:
+        # Self-heal: if the runtime file lost its template content, restore it while
+        # preserving any appended session learnings.
+        _repair_agents_md(agents_dst)
 
-    # Copy SOUL.md from repo root → workspace (first boot only)
-    soul_src = _REPO_ROOT / "SOUL.md"
+    # Copy SOUL.md from template dir → workspace (first boot only)
+    soul_src = _templates_dir() / "SOUL.md"
     soul_dst = WORKSPACE / "SOUL.md"
     if soul_src.exists():
         copied_soul = _copy_file_if_absent(soul_src, soul_dst)
         if copied_soul:
-            logger.info("[setup] Copied SOUL.md from repo to workspace")
+            logger.info("[setup] Copied SOUL.md from template to workspace")
     else:
-        # Write minimal stub if no repo SOUL.md and workspace copy absent
+        # Write minimal stub if no template SOUL.md and workspace copy absent
         if not soul_dst.exists() or soul_dst.stat().st_size < 20:
             soul_dst.write_text(
                 "# Kernel-Evolving Soul\n\nYou are a self-evolving local AI agent.\n",

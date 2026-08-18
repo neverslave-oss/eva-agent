@@ -19,6 +19,15 @@ except ImportError:
 KERNEL_WORKSPACE = str(WORKSPACE_ROOT)
 WORKSPACE = os.environ.get("KERNEL_WORKSPACE", KERNEL_WORKSPACE)
 
+# Identity files the model must never overwrite via write_file. These carry the
+# agent's core persona/architecture and are managed by setup.py (template copy +
+# self-healing repair) and the identity consolidator (append-only learnings).
+_PROTECTED_IDENTITY_FILES = (
+    "AGENTS.md",
+    "SOUL.md",
+    "IDENTITY.md",
+)
+
 # ── Authorization gate: current chat_id for exec_shell auth ──────────────
 # Only a same-process fallback for in-process callers (e.g. model.py's
 # in-process tool loop, which shares memory with agent.py's triage()).
@@ -482,6 +491,15 @@ def execute_tool(name: str, arguments: dict, workspace: str = WORKSPACE, chat_id
             import logging as _log_wf
             _log_wf.getLogger(__name__).warning(
                 f"[write_file] path outside workspace — redirected to {path}"
+            )
+        # Protected identity files: refuse to overwrite AGENTS.md / SOUL.md /
+        # IDENTITY.md. These carry the agent's core persona and are managed by
+        # setup.py + the identity consolidator — the model must never clobber them.
+        if os.path.basename(path) in _PROTECTED_IDENTITY_FILES:
+            return (
+                f"(error: '{os.path.basename(path)}' is a protected identity file and "
+                f"cannot be overwritten via write_file. If you want to record a session "
+                f"learning, mention it and it will be appended to the Session learnings section.)"
             )
         # Strip any trailing tool-error lines that the model may have accidentally
         # appended to the content (e.g. "Error: URL must start with http://")
