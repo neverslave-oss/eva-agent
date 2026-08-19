@@ -11,7 +11,7 @@ from core.memory.embedding_client import EmbeddingClient
 from core.routines import load_all as load_routines, find as find_routine, run as run_routine
 from core.replica.replica import spawn, active as active_replicas, can_spawn
 from core.tools import WORKSPACE as _DEFAULT_WORKSPACE
-from runtime_paths import NOTES_DIR, ARTIFACTS_DIR
+from runtime_paths import NOTES_DIR, ARTIFACTS_DIR, load_config as _load_config
 from core.memory.context import build_system_prompt
 from database.agent.prompt_log import PromptLogRepository
 
@@ -87,8 +87,10 @@ def _provider_infer_fn():
 
 def init(config_path="config.yaml"):
     global _config, _skills, _routines, _embedding_client
-    with open(config_path) as f:
-        _config = yaml.safe_load(f)
+    # Use the env-expanding loader so ${VAR} references in config.yaml (e.g.
+    # collective_memory.url: ${KERNEL_EVO_COLLECTIVE_MEMORY_URL}) resolve from
+    # the environment instead of leaking the literal placeholder.
+    _config = _load_config(config_path)
     # Initialise provider singleton with config (ADR-013)
     from core.inference.provider import get_provider as _gp
     _gp(_config)

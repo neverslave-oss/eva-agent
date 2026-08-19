@@ -4,16 +4,17 @@ describe.py — Semantic scene description for the `look` tool.
 Given a captured JPEG frame, produce a natural-language description of the
 scene. Backends, in priority order:
 
-1. **private-ai-server (:8005)** — vLLM Ollama drop-in (Ollama `/api/generate`
-   with an image). This is the PRIMARY configured vision brain.
-2. **Local Gemma E2B (native)** — kernel-evolving's own multimodal slot via
+1. **Local Gemma E2B (native)** — kernel-evolving's own multimodal slot via
    `model_client.infer_with_image` (JSON-RPC over the model-server Unix
-   socket). This is the FALLBACK: it is loaded on demand (model server spawned
-   if not running) only when the Ollama brain is offline.
+   socket). This is the PRIMARY vision backend: it describes the scene with the
+   onboard model, loaded on demand (model server spawned if not running).
+2. **private-ai-server (:8005)** — vLLM Ollama drop-in (Ollama `/api/generate`
+   with an image). This is the FALLBACK when the local Gemma E2B slot is
+   unavailable/offline.
 
 Design intent: inference runs on cloud (hf); vision is directed at the local
-model in parallel. The Ollama brain at :8005 is the primary vision backend;
-the native local Gemma E2B is the configured fallback, NOT the other way round.
+model in parallel. The native local Gemma E2B is the primary vision backend;
+the Ollama brain at :8005 is the configured fallback.
 
 All endpoints/backends are config-driven (never hardcoded), so EVA stays
 portable across installs.
@@ -145,20 +146,21 @@ def describe_image(image_path: str, prompt: str = DEFAULT_PROMPT,
     """Describe a scene from a JPEG frame.
 
     Returns a dict describing the backend used and the description text (or an
-    error). Priority: Ollama-compatible :8005 (PRIMARY), then local Gemma E2B
-    native (FALLBACK, loaded on demand).
+    error). Priority: local Gemma E2B native (PRIMARY), then Ollama-compatible
+    :8005 (FALLBACK).
     """
     base = base or DEFAULT_DESCRIBE_BASE
     model = model or DEFAULT_DESCRIBE_MODEL
 
-    # 1) Ollama-compatible brain (:8005) — PRIMARY configured vision backend.
-    remote = _ollama_describe(base, model, image_path, prompt, max_new_tokens)
-    if remote:
-        return {"backend": "ollama", "description": remote}
-
-    # 2) Local Gemma E2B (native) — FALLBACK, spawned on demand if offline.
+    # 1) Local Gemma E2B (native) — PRIMARY: describe with the onboard model,
+    #    spawning the model server on demand if it isn't running.
     local = _local_gemma_describe(image_path, prompt, max_new_tokens)
     if local:
         return {"backend": "local_gemma_e2b", "description": local}
+
+    # 2) Ollama-compatible brain (:8005) — FALLBACK when local Gemma is offline.
+    remote = _ollama_describe(base, model, image_path, prompt, max_new_tokens)
+    if remote:
+        return {"backend": "ollama", "description": remote}
 
     return {"backend": "none", "error": "no describe backend available"}

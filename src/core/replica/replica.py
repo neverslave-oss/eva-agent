@@ -6,7 +6,7 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
-from core.inference.model import vram_free_mb, infer
+from core.inference.model import vram_free_mb, infer, infer_with_tools as _model_infer_with_tools
 
 CONTEXT_BUDGET_MB = 512
 MAX_REPLICAS = 4  # increased from 3 to support named meeting agents
@@ -14,6 +14,40 @@ MAX_PERSISTENT_REPLICAS = 32
 
 _replicas: dict[str, "Replica"] = {}  # name → Replica (was a list)
 _lock = threading.Lock()
+
+
+def _provider_infer(messages, max_new_tokens=8192, adapter_path=None):
+    """Route replica inference through the configured provider.
+
+    In cloud mode (task_inference != local) the local model is not loaded, so
+    calling core.inference.model.infer() directly crashes ('NoneType' processor).
+    Routing through the provider sends the call to the configured cloud provider
+    (e.g. HF Router) instead. Falls back to the local wrapper if the provider is
+    unavailable.
+    """
+    try:
+        from core.inference.provider import get_provider as _gp
+        _prov = _gp()
+        return _prov.infer(messages, max_new_tokens=max_new_tokens, call_type="task_inference")
+    except Exception:
+        return infer(messages, max_new_tokens=max_new_tokens, adapter_path=adapter_path)
+
+
+def _provider_infer_with_tools(messages, tools, workspace, adapter_path=None):
+    """Route replica tool-calling inference through the configured provider.
+
+    Same rationale as _provider_infer: works in cloud mode where the local model
+    is not loaded. Falls back to the local model wrapper if the provider is
+    unavailable.
+    """
+    try:
+        from core.inference.provider import get_provider as _gp
+        _prov = _gp()
+        return _prov.infer_with_tools(
+            messages, tools, workspace=workspace, call_type="task_inference"
+        )
+    except Exception:
+        return _model_infer_with_tools(messages, tools, workspace=workspace, adapter_path=adapter_path)
 
 BUILTIN_ROLES = {
     "researcher": "You are a research specialist. Gather information, search for facts, and synthesise findings clearly.",
@@ -84,12 +118,11 @@ class Replica:
             {"role": "user",   "content": self.task},
         ]
         if self.tools_enabled:
-            from core.inference.model import infer_with_tools
             from core.tools import TOOLS
             ws = self.workspace or "~/.openclaw/workspace"
-            self.result = infer_with_tools(messages, TOOLS, workspace=ws, adapter_path=self.adapter_path)
+            self.result = _provider_infer_with_tools(messages, TOOLS, workspace=ws, adapter_path=self.adapter_path)
         else:
-            self.result = infer(messages, max_new_tokens=8192, adapter_path=self.adapter_path)
+            self.result = _provider_infer(messages, max_new_tokens=8192, adapter_path=self.adapter_path)
         if self.output_path:
             try:
                 p = Path(self.output_path).expanduser()
@@ -115,12 +148,11 @@ class Replica:
         self.history.append({"role": "user", "content": user_text})
         messages = [{"role": "system", "content": self.system_prompt}] + self.history[-20:]
         if self.tools_enabled:
-            from core.inference.model import infer_with_tools
             from core.tools import TOOLS
             ws = self.workspace or "~/.openclaw/workspace"
-            reply = infer_with_tools(messages, TOOLS, workspace=ws, adapter_path=self.adapter_path)
+            reply = _provider_infer_with_tools(messages, TOOLS, workspace=ws, adapter_path=self.adapter_path)
         else:
-            reply = infer(messages, max_new_tokens=8192, adapter_path=self.adapter_path)
+            reply = _provider_infer(messages, max_new_tokens=8192, adapter_path=self.adapter_path)
         self.history.append({"role": "assistant", "content": reply})
         if self.output_path:
             try:
@@ -300,12 +332,11 @@ def pipeline(stages: list, config: dict = None) -> dict:
 
         if not reply:
             if tools_enabled:
-                from core.inference.model import infer_with_tools
                 from core.tools import TOOLS
                 ws = workspace or "~/.openclaw/workspace"
-                reply = infer_with_tools(messages, TOOLS, workspace=ws, adapter_path=s.get("adapter_path"))
+                reply = _provider_infer_with_tools(messages, TOOLS, workspace=ws, adapter_path=s.get("adapter_path"))
             else:
-                reply = infer(messages, max_new_tokens=8192, adapter_path=s.get("adapter_path"))
+                reply = _provider_infer(messages, max_new_tokens=8192, adapter_path=s.get("adapter_path"))
 
         if output_path:
             try:

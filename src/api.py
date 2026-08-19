@@ -14,7 +14,7 @@ import infra.bootstrap as _bootstrap
 import asyncio
 import os, json, time, uuid
 import logging as _logging
-from runtime_paths import LOGS_DIR
+from runtime_paths import LOGS_DIR, load_config as _load_config
 from core.voice_activity import voice_activity
 _logging.basicConfig(
     level=_logging.INFO,
@@ -212,8 +212,9 @@ async def startup():
     rep = _rep
     mdl = _mdl
 
-    with open(os.path.join(_BASE, "config.yaml")) as f:
-        _cfg = yaml.safe_load(f)
+    # Use the env-expanding loader so ${VAR} references in config.yaml resolve
+    # from the environment (e.g. collective_memory.url, vision eye bases).
+    _cfg = _load_config(os.path.join(_BASE, "config.yaml"))
     # Expand ~ in well-known path keys so config stays portable
     for _key in ("olly_workspace", "workspace", "skills_dir", "private_skills_dir",
                  "routines_dir", "embedding_model_path"):

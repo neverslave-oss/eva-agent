@@ -23,21 +23,23 @@ from core.vision import capture
 # describe_image — backend selection
 # ─────────────────────────────────────────────────────────────────────────────
 class TestDescribeImage:
-    def test_ollama_wins_when_available(self):
-        with patch.object(describe, "_ollama_describe", return_value="A plant on a desk") as m_remote, \
-             patch.object(describe, "_local_gemma_describe", return_value="should not be used") as m_local:
-            result = describe.describe_image("/tmp/frame.jpg")
-        m_remote.assert_called_once()
-        m_local.assert_not_called()
-        assert result["backend"] == "ollama"
-        assert result["description"] == "A plant on a desk"
-
-    def test_falls_back_to_local_gemma_when_ollama_offline(self):
-        with patch.object(describe, "_ollama_describe", return_value=None), \
-             patch.object(describe, "_local_gemma_describe", return_value="A cat on a sofa") as m_local:
+    def test_local_gemma_wins_when_available(self):
+        # Local Gemma E2B (native) is the PRIMARY backend.
+        with patch.object(describe, "_local_gemma_describe", return_value="A plant on a desk") as m_local, \
+             patch.object(describe, "_ollama_describe", return_value="should not be used") as m_remote:
             result = describe.describe_image("/tmp/frame.jpg")
         m_local.assert_called_once()
+        m_remote.assert_not_called()
         assert result["backend"] == "local_gemma_e2b"
+        assert result["description"] == "A plant on a desk"
+
+    def test_falls_back_to_ollama_when_gemma_offline(self):
+        # Ollama :8005 is the FALLBACK when local Gemma is unavailable.
+        with patch.object(describe, "_local_gemma_describe", return_value=None), \
+             patch.object(describe, "_ollama_describe", return_value="A cat on a sofa") as m_remote:
+            result = describe.describe_image("/tmp/frame.jpg")
+        m_remote.assert_called_once()
+        assert result["backend"] == "ollama"
         assert result["description"] == "A cat on a sofa"
 
     def test_error_when_no_backend_available(self):
@@ -48,8 +50,9 @@ class TestDescribeImage:
         assert "error" in result
 
     def test_uses_configured_base_and_model(self):
-        with patch.object(describe, "_ollama_describe", return_value="x") as m_remote, \
-             patch.object(describe, "_local_gemma_describe", return_value=None):
+        # When local Gemma is offline, the configured base/model go to Ollama.
+        with patch.object(describe, "_local_gemma_describe", return_value=None), \
+             patch.object(describe, "_ollama_describe", return_value="x") as m_remote:
             describe.describe_image("/tmp/frame.jpg", base="http://custom:9999", model="my/model")
         args = m_remote.call_args.args
         assert args[0] == "http://custom:9999"

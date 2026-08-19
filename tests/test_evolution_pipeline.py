@@ -129,11 +129,12 @@ def test_pipeline_programmatic_api(monkeypatch):
     """core.replica.replica.pipeline() returns results dict without HTTP."""
     import core.replica.replica as replica
 
-    def fake_infer(messages, max_new_tokens=1024, **kwargs):
+    def fake_infer(messages, max_new_tokens=1024, adapter_path=None, **kwargs):
         return "mocked reply"
 
-    # replica.py imports infer directly, so patch on the replica module
-    monkeypatch.setattr(replica, "infer", fake_infer)
+    # pipeline() routes through the provider (cloud-safe) via _provider_infer,
+    # so patch that helper on the replica module to avoid any real inference.
+    monkeypatch.setattr(replica, "_provider_infer", fake_infer)
 
     stages = [
         {"name": "writer", "role": "custom", "brief": "Write stuff", "task": "Do task A"},
