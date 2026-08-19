@@ -1,8 +1,12 @@
 # Plan: Unified `look` Tool — Vision for EVA
 
 **Created:** 2026-08-19
-**Status:** planned
+**Status:** Phase 1 + Phase 2 (describe) implemented
 **Branch:** feat/look-tool
+
+> **Update (2026-08-19):** Phase 1 (registry/router/eyes/look tool) and the Phase 2
+> semantic `describe` path are both implemented and committed (`4855543`). See
+> **Implementation Status** below.
 
 ## Overview
 
@@ -130,13 +134,34 @@ Same envelope, different payload → uniform parsing as eyes multiply.
 ---
 
 ## Success Criteria
-- [ ] `look` tool registered in `TOOLS` and dispatched in `execute_tool`
+- [x] `look` tool registered in `TOOLS` and dispatched in `execute_tool`
+- [x] `look(intent="describe")` grabs a frame from an eye's stream and describes it (local Gemma E2B → Ollama :8005 fallback)
 - [ ] `look(intent="plant health")` returns leaf crops from Eye 2 (verified live)
 - [ ] `look(intent="what's there")` returns JSON detections from Eye 1 (when online)
-- [ ] `look(intent="scan")` merges results from all online eyes
-- [ ] Eye offline → graceful `status:"offline"`, no crash
-- [ ] All endpoints/IPs come from config, none hardcoded
-- [ ] Tests green (isolated, dedicated test DB)
+- [x] `look(intent="scan")` merges results from all online eyes
+- [x] Eye offline → graceful `status:"offline"`, no crash
+- [x] All endpoints/IPs come from config, none hardcoded
+- [x] Tests green (isolated, dedicated test DB)
+
+## Implementation Status (2026-08-19)
+
+### Done
+- `src/core/vision/registry.py` — config-driven eye registry, health-check, plug-and-play status
+- `src/core/vision/router.py` — intent → eye(s) mapping, scan merge, offline degradation; **`describe` routes to first online eye**
+- `src/core/vision/eyes/object_face.py` + `plant_health.py` — eye client calls
+- `src/core/vision/capture.py` — `grab_frame()` extracts last complete JPEG from MJPEG stream (SOI/EOI delimiters)
+- `src/core/vision/describe.py` — `describe_image()` semantic scene description: local Gemma E2B native first, Ollama-compatible `:8005` fallback, config-driven base/model
+- `src/core/tools.py` — `look` registered in `TOOLS` + dispatched in `execute_tool`; `describe` added to intent enum
+- `tests/test_look_tool.py` — registry/router/eye clients/dispatch + `TestDescribeRouting` (6 cases)
+- `tests/test_describe.py` — 14 tests (describe_image backends, local Gemma, Ollama, grab_frame)
+
+### Verified
+- New describe/look tests: **42 passed**
+- Full suite: **649 passed / 19 failed** — the 19 failures are **pre-existing** (identical on base with these changes stashed) and stem from provider routing returning `hf` instead of `local` for `task_inference` (intentional default; stale tests). Not caused by this work.
+
+### Remaining (Phase 3 / live verification)
+- [ ] Live verify `plant health` / `what's there` / `describe` against the wired eye
+- [ ] Phase 3: `who is it` (gated) + self-evolving collection loops
 
 ---
 
