@@ -23,33 +23,33 @@ from core.vision import capture
 # describe_image — backend selection
 # ─────────────────────────────────────────────────────────────────────────────
 class TestDescribeImage:
-    def test_local_gemma_wins_when_available(self):
-        with patch.object(describe, "_local_gemma_describe", return_value="A cat on a sofa") as m_local, \
-             patch.object(describe, "_ollama_describe", return_value="should not be used") as m_remote:
-            result = describe.describe_image("/tmp/frame.jpg")
-        m_local.assert_called_once()
-        m_remote.assert_not_called()
-        assert result["backend"] == "local_gemma_e2b"
-        assert result["description"] == "A cat on a sofa"
-
-    def test_falls_back_to_ollama_when_local_unavailable(self):
-        with patch.object(describe, "_local_gemma_describe", return_value=None), \
-             patch.object(describe, "_ollama_describe", return_value="A plant on a desk") as m_remote:
+    def test_ollama_wins_when_available(self):
+        with patch.object(describe, "_ollama_describe", return_value="A plant on a desk") as m_remote, \
+             patch.object(describe, "_local_gemma_describe", return_value="should not be used") as m_local:
             result = describe.describe_image("/tmp/frame.jpg")
         m_remote.assert_called_once()
+        m_local.assert_not_called()
         assert result["backend"] == "ollama"
         assert result["description"] == "A plant on a desk"
 
+    def test_falls_back_to_local_gemma_when_ollama_offline(self):
+        with patch.object(describe, "_ollama_describe", return_value=None), \
+             patch.object(describe, "_local_gemma_describe", return_value="A cat on a sofa") as m_local:
+            result = describe.describe_image("/tmp/frame.jpg")
+        m_local.assert_called_once()
+        assert result["backend"] == "local_gemma_e2b"
+        assert result["description"] == "A cat on a sofa"
+
     def test_error_when_no_backend_available(self):
-        with patch.object(describe, "_local_gemma_describe", return_value=None), \
-             patch.object(describe, "_ollama_describe", return_value=None):
+        with patch.object(describe, "_ollama_describe", return_value=None), \
+             patch.object(describe, "_local_gemma_describe", return_value=None):
             result = describe.describe_image("/tmp/frame.jpg")
         assert result["backend"] == "none"
         assert "error" in result
 
     def test_uses_configured_base_and_model(self):
-        with patch.object(describe, "_local_gemma_describe", return_value=None), \
-             patch.object(describe, "_ollama_describe", return_value="x") as m_remote:
+        with patch.object(describe, "_ollama_describe", return_value="x") as m_remote, \
+             patch.object(describe, "_local_gemma_describe", return_value=None):
             describe.describe_image("/tmp/frame.jpg", base="http://custom:9999", model="my/model")
         args = m_remote.call_args.args
         assert args[0] == "http://custom:9999"
@@ -62,11 +62,22 @@ class TestDescribeImage:
 class TestLocalGemmaDescribe:
     def test_skips_when_server_not_running(self):
         with patch("core.inference.model_client.is_server_running", return_value=False) as m_run, \
+             patch.object(describe, "_ensure_local_server", return_value=False) as m_ensure, \
              patch("core.inference.model_client.infer_with_image") as m_infer:
             out = describe._local_gemma_describe("/tmp/f.jpg", "desc", 512)
         m_run.assert_called_once()
+        m_ensure.assert_called_once()
         m_infer.assert_not_called()
         assert out is None
+
+    def test_spawns_server_when_not_running(self):
+        with patch("core.inference.model_client.is_server_running", return_value=False) as m_run, \
+             patch.object(describe, "_ensure_local_server", return_value=True) as m_ensure, \
+             patch("core.inference.model_client.infer_with_image", return_value="A cat on a sofa") as m_infer:
+            out = describe._local_gemma_describe("/tmp/f.jpg", "desc", 512)
+        m_ensure.assert_called_once()
+        m_infer.assert_called_once_with("/tmp/f.jpg", "desc", max_new_tokens=512)
+        assert out == "A cat on a sofa"
 
     def test_returns_text_when_server_responds(self):
         with patch("core.inference.model_client.is_server_running", return_value=True), \

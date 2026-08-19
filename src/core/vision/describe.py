@@ -4,11 +4,16 @@ describe.py — Semantic scene description for the `look` tool.
 Given a captured JPEG frame, produce a natural-language description of the
 scene. Backends, in priority order:
 
-1. **Local Gemma E2B (native)** — kernel-evolving's own multimodal slot via
+1. **private-ai-server (:8005)** — vLLM Ollama drop-in (Ollama `/api/generate`
+   with an image). This is the PRIMARY configured vision brain.
+2. **Local Gemma E2B (native)** — kernel-evolving's own multimodal slot via
    `model_client.infer_with_image` (JSON-RPC over the model-server Unix
-   socket). Runs in parallel with cloud chat inference, no external deps.
-2. **private-ai-server (:8005)** — vLLM Ollama drop-in (Ollama `/api/generate`
-   with an image) as a fallback when the local model server is unavailable.
+   socket). This is the FALLBACK: it is loaded on demand (model server spawned
+   if not running) only when the Ollama brain is offline.
+
+Design intent: inference runs on cloud (hf); vision is directed at the local
+model in parallel. The Ollama brain at :8005 is the primary vision backend;
+the native local Gemma E2B is the configured fallback, NOT the other way round.
 
 All endpoints/backends are config-driven (never hardcoded), so EVA stays
 portable across installs.
@@ -40,13 +45,60 @@ DEFAULT_PROMPT = (
 )
 
 
-def _local_gemma_describe(image_path: str, prompt: str, max_new_tokens: int) -> Optional[str]:
-    """Describe via kernel-evolving's own Gemma E2B multimodal slot (native)."""
+def _ensure_local_server(timeout_s: float = 120.0) -> bool:
+    """Ensure the local model server is running, spawning it on demand.
+
+    Used by the native fallback: if the Ollama brain is offline and the local
+    Gemma E2B slot is the configured fallback, start the model server (lazy) if
+    it isn't already up, then wait for the socket.
+    """
     try:
         from core.inference import model_client
 
-        if not model_client.is_server_running():
-            logger.info("[describe] local model server not running — skipping local backend")
+        if model_client.is_server_running():
+            return True
+
+        import subprocess as _sp
+        import sys as _sys
+        import time as _time
+        from pathlib import Path as _Path
+
+        # Reuse the established spawn pattern (same as telegram_bot.py): launch
+        # model_server.py with --lazy so the multimodal slot loads on first use.
+        _cfg = os.environ.get(
+            "KERNEL_EVO_CONFIG",
+            str(_Path(__file__).resolve().parent.parent.parent.parent / "config.yaml"),
+        )
+        logger.info("[describe] local model server not running — spawning on demand")
+        _sp.Popen(
+            [_sys.executable,
+             str(_Path(__file__).resolve().parent.parent / "inference" / "model_server.py"),
+             "--config", _cfg, "--lazy"],
+            stdout=open("/tmp/kernel_evolving_model_server.log", "a"),
+            stderr=_sp.STDOUT,
+            start_new_session=True,
+        )
+        for _ in range(int(timeout_s)):
+            _time.sleep(1)
+            if model_client.is_server_running():
+                return True
+        logger.warning("[describe] local model server did not come up within %.0fs", timeout_s)
+        return False
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("[describe] failed to ensure local model server: %s", exc)
+        return False
+
+
+def _local_gemma_describe(image_path: str, prompt: str, max_new_tokens: int) -> Optional[str]:
+    """Describe via kernel-evolving's own Gemma E2B multimodal slot (native).
+
+    Falls back to spawning the model server on demand if it isn't running.
+    """
+    try:
+        from core.inference import model_client
+
+        if not model_client.is_server_running() and not _ensure_local_server():
+            logger.info("[describe] local model server unavailable — skipping local backend")
             return None
         out = model_client.infer_with_image(
             image_path, prompt, max_new_tokens=max_new_tokens
@@ -93,19 +145,20 @@ def describe_image(image_path: str, prompt: str = DEFAULT_PROMPT,
     """Describe a scene from a JPEG frame.
 
     Returns a dict describing the backend used and the description text (or an
-    error). Priority: local Gemma E2B native, then Ollama-compatible :8005.
+    error). Priority: Ollama-compatible :8005 (PRIMARY), then local Gemma E2B
+    native (FALLBACK, loaded on demand).
     """
     base = base or DEFAULT_DESCRIBE_BASE
     model = model or DEFAULT_DESCRIBE_MODEL
 
-    # 1) Local Gemma E2B (native, parallel with cloud chat).
-    local = _local_gemma_describe(image_path, prompt, max_new_tokens)
-    if local:
-        return {"backend": "local_gemma_e2b", "description": local}
-
-    # 2) Ollama-compatible brain (:8005).
+    # 1) Ollama-compatible brain (:8005) — PRIMARY configured vision backend.
     remote = _ollama_describe(base, model, image_path, prompt, max_new_tokens)
     if remote:
         return {"backend": "ollama", "description": remote}
+
+    # 2) Local Gemma E2B (native) — FALLBACK, spawned on demand if offline.
+    local = _local_gemma_describe(image_path, prompt, max_new_tokens)
+    if local:
+        return {"backend": "local_gemma_e2b", "description": local}
 
     return {"backend": "none", "error": "no describe backend available"}
