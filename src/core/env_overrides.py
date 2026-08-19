@@ -42,6 +42,15 @@ ALLOWED_ENV_KEYS = {
     "KERNEL_EVO_TELEGRAM_CHAT_ID",
     "KERNEL_USER_NAME",
     "KERNEL_USER_HANDLE",
+    # Vision / eye wiring (look tool): eye endpoints + semantic describe brain.
+    # Config-driven via config.yaml ${VAR} placeholders; settable from the
+    # desktop app settings screen through /config/env.
+    "KERNEL_EVO_EYE_LEFT_BASE",
+    "KERNEL_EVO_EYE_LEFT_STREAM",
+    "KERNEL_EVO_EYE_RIGHT_BASE",
+    "KERNEL_EVO_EYE_RIGHT_STREAM",
+    "KERNEL_EVO_DESCRIBE_BASE",
+    "KERNEL_EVO_DESCRIBE_MODEL",
 }
 
 
