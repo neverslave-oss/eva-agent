@@ -527,17 +527,33 @@ class TestVoicePipeline(unittest.TestCase):
         model_path = os.path.expanduser(stt["path"])
         # If the path still contains an unresolved ${VAR} (env not loaded),
         # pull the value from the local .env so the check stays meaningful.
+        # IMPORTANT: never leak .env vars into the global os.environ — snapshot
+        # prior values and restore them so later tests are not polluted.
         if "${" in model_path:
             _env_path = os.path.join(os.path.dirname(__file__), "..", ".env")
+            _prior = {}
             if os.path.isfile(_env_path):
                 with open(_env_path) as _ef:
                     for _line in _ef:
                         _line = _line.strip()
                         if _line and not _line.startswith("#") and "=" in _line:
                             _k, _v = _line.split("=", 1)
-                            os.environ.setdefault(_k.strip(), _v.strip())
-            cfg = load_config(os.path.join(os.path.dirname(__file__), "..", "config.yaml"))
-            model_path = os.path.expanduser(cfg.get("stt_model", {}).get("path", model_path))
+                            _k = _k.strip()
+                            if _k not in os.environ:
+                                _prior[_k] = None  # absent before — remove after
+                            else:
+                                _prior[_k] = os.environ[_k]
+                            os.environ.setdefault(_k, _v.strip())
+                try:
+                    cfg = load_config(os.path.join(os.path.dirname(__file__), "..", "config.yaml"))
+                    model_path = os.path.expanduser(cfg.get("stt_model", {}).get("path", model_path))
+                finally:
+                    # Restore prior env state so we never pollute other tests.
+                    for _k, _old in _prior.items():
+                        if _old is None:
+                            os.environ.pop(_k, None)
+                        else:
+                            os.environ[_k] = _old
         self.assertTrue(
             os.path.exists(model_path),
             f"stt_model path does not exist: {model_path}"

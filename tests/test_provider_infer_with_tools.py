@@ -70,8 +70,11 @@ class TestLocalFallbackToOpenai:
     def test_local_fail_falls_back_to_openai(self):
         p = _make_provider(task_inference="local", fallback="openai")
 
-        # local raises; openai returns a result
-        with patch("core.inference.model_client.infer_with_tools", side_effect=Exception("socket error")), \
+        # local raises; openai returns a result. A dummy API key is set so the
+        # provider's key-guard does not skip the (mocked) OpenAI path — no real
+        # key or network call is used.
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}), \
+             patch("core.inference.model_client.infer_with_tools", side_effect=Exception("socket error")), \
              patch.object(p, "_openai_tool_loop", return_value="openai result") as mock_oa:
             result = p.infer_with_tools(
                 messages=[{"role": "user", "content": "test"}],
@@ -105,7 +108,9 @@ class TestChunkCallbackForwarded:
         chunks = []
         cb = lambda t: chunks.append(t)
 
-        with patch.object(p, "_openai_tool_loop", return_value="result") as mock_oa:
+        # Dummy key so the key-guard doesn't skip the (mocked) OpenAI path.
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}), \
+             patch.object(p, "_openai_tool_loop", return_value="result") as mock_oa:
             p.infer_with_tools(
                 messages=[{"role": "user", "content": "go"}],
                 tools=[],
@@ -121,7 +126,9 @@ class TestChunkCallbackForwarded:
         chunks = []
         cb = lambda t: chunks.append(t)
 
-        with patch("core.inference.model_client.infer_with_tools", side_effect=Exception("fail")), \
+        # Dummy key so the key-guard doesn't skip the (mocked) OpenAI fallback.
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}), \
+             patch("core.inference.model_client.infer_with_tools", side_effect=Exception("fail")), \
              patch.object(p, "_openai_tool_loop", return_value="fallback result") as mock_oa:
             result = p.infer_with_tools(
                 messages=[{"role": "user", "content": "go"}],
