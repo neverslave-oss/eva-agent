@@ -128,4 +128,28 @@ learnings**, while still allowing the agent to accumulate session learnings in a
 
 ## Status
 
-[ ] Not started
+[x] Implemented on `fix/agent-identity-override` (2026-08-18/19)
+
+### Implementation notes
+- `src/infra/setup.py`: templates now sourced from `src/assets/agent-templates/`
+  (added `_templates_dir()` helper); added `_repair_agents_md()` which restores a
+  corrupted runtime AGENTS.md from the template while preserving any appended
+  `## Session learnings` sections; `refresh_identity_files()` calls the repair on
+  boot when the file lacks the identity sentinels.
+- `src/core/tools.py`: added `_PROTECTED_IDENTITY_FILES` (`AGENTS.md`, `SOUL.md`,
+  `IDENTITY.md`); `write_file` now rejects writes to these paths so the model can
+  never clobber the identity file.
+- `src/services/thought_engine.py`: `_run_identity_consolidator()` now restores the
+  template (preserving learnings) before appending if the runtime file lost its
+  core content — append-only session learnings guaranteed.
+- Tests: `test_setup.py` (repair-merge + no-rewrite-of-valid), `test_all_native_tools.py`
+  (protected identity write). All pass.
+
+### Additional issues observed in live log (not part of this fix)
+- Vision "eye" tool: camera endpoints returning 400/500/timeouts (hardware/network).
+- Replica spawn crashes in cloud mode: `AttributeError: 'NoneType' object has no
+  attribute 'apply_chat_template'` (`replica.py:92` → `model.py:110`) because
+  `task_inference='hf'` skips loading the local model but replica spawn calls local
+  `infer()`. Separate bug.
+- `collective_memory` search fails: unset `${KERNEL_EVO_COLLECTIVE_MEMORY_URL}`
+  placeholder leaks into URL. Pre-existing.
