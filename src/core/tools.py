@@ -255,13 +255,13 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "look",
-            "description": "Perceive the world through connected cameras (eyes). Acts by intent and opens one eye or all. Intents: 'what's there' (objects), 'who is it' (faces, gated), 'plant health' (leaf detection), 'scan' (all eyes). Endpoints are config-driven via the eye registry.",
+            "description": "Perceive the world through connected cameras (eyes). Acts by intent and opens one eye or all. Intents: 'what's there' (objects), 'who is it' (faces, gated), 'plant health' (leaf detection), 'describe' (semantic scene description via local Gemma E2B / Ollama brain), 'scan' (all eyes). Endpoints are config-driven via the eye registry.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "intent": {
                         "type": "string",
-                        "enum": ["what's there", "who is it", "plant health", "scan"],
+                        "enum": ["what's there", "who is it", "plant health", "describe", "scan"],
                         "description": "What the agent wants to perceive."
                     },
                     "target": {

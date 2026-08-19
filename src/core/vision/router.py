@@ -14,6 +14,8 @@ from typing import Any, Dict, List, Optional
 
 from .registry import EyeRegistry, EyeStatus
 from .eyes import object_face, plant_health
+from .capture import grab_frame
+from .describe import describe_image
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +26,7 @@ INTENT_EYE_KIND = {
     "plant health": "plant_health",
 }
 
-VALID_INTENTS = ("what's there", "who is it", "plant health", "scan")
+VALID_INTENTS = ("what's there", "who is it", "plant health", "scan", "describe")
 
 
 def _envelope(eye_id: str, intent: str, status: str, observations: Any = None,
@@ -40,10 +42,51 @@ def _envelope(eye_id: str, intent: str, status: str, observations: Any = None,
     }
 
 
+def _run_describe(eye, intent: str = "describe") -> Dict[str, Any]:
+    """Grab a frame from the eye's stream and describe the scene semantically.
+
+    Uses the eye's `stream` URL (e.g. the right eye's `/video_feed` MJPJPEG).
+    The captured JPEG is written to a temp file and passed to `describe_image`,
+    which prefers the local Gemma E2B slot and falls back to the Ollama brain.
+    """
+    if not eye.stream:
+        return _envelope(eye.id, intent, EyeStatus.OFFLINE,
+                         error="eye has no stream configured for describe")
+    try:
+        frame = grab_frame(eye.stream, timeout_s=eye.timeout_s)
+        if not frame:
+            return _envelope(eye.id, intent, EyeStatus.OFFLINE,
+                             error="could not grab a frame from stream")
+        import tempfile
+        import os
+        fd, path = tempfile.mkstemp(suffix=".jpg", prefix="look_describe_")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(frame)
+            result = describe_image(path)
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+        if result.get("error"):
+            return _envelope(eye.id, intent, EyeStatus.OFFLINE, error=result["error"])
+        return _envelope(
+            eye.id, intent, EyeStatus.ONLINE,
+            observations={"description": result.get("description", "")},
+            raw=str(result),
+        )
+    except Exception as exc:  # pragma: no cover - network/parse errors
+        logger.warning("[vision] describe failed for eye %s: %s", eye.id, exc)
+        return _envelope(eye.id, intent, EyeStatus.OFFLINE, error=str(exc))
+
+
 def _run_eye(eye, intent: str) -> Dict[str, Any]:
     """Run a single eye for the given intent. Returns a response envelope."""
     base = eye.base
     try:
+        if intent == "describe":
+            return _run_describe(eye, intent)
         if eye.kind == "plant_health":
             result = plant_health.capture_and_detect(base, timeout_s=eye.timeout_s)
             crops = result.get("crops", [])
@@ -105,6 +148,15 @@ def route_look(intent: str, registry: EyeRegistry,
         }
 
     # Intent-based routing.
+    # `describe` is eye-agnostic: any online eye with a stream can describe the
+    # scene, so route to the first online eye regardless of kind.
+    if intent == "describe":
+        online = registry.online()
+        if not online:
+            return _envelope("?", intent, EyeStatus.OFFLINE,
+                             error="no online eye for intent 'describe'")
+        return _run_eye(online[0], intent)
+
     kind = INTENT_EYE_KIND.get(intent)
     candidates = [e for e in registry.by_kind(kind) if registry.is_online(e.id)]
     if not candidates:

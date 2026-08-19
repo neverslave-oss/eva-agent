@@ -24,6 +24,8 @@ from core.vision.registry import EyeRegistry, Eye, EyeStatus
 from core.vision.router import route_look, VALID_INTENTS
 from core.vision import eyes as eyes_pkg
 from core.vision.eyes import object_face, plant_health
+from core.vision import capture as capture_mod
+from core.vision import describe as describe_mod
 
 import core.tools as tools_mod
 
@@ -165,6 +167,79 @@ class TestRouter:
             result = route_look("scan", reg)
         assert result["status"] == EyeStatus.OFFLINE
         assert "no eyes online" in result["error"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Describe intent (semantic scene description)
+# ─────────────────────────────────────────────────────────────────────────────
+class TestDescribeRouting:
+    def _reg(self, with_stream=True):
+        cfg = {
+            "vision": {
+                "eyes": {
+                    "right": {
+                        "kind": "plant_health",
+                        "base": "http://hub:5000",
+                        "stream": "http://hub:5000/video_feed" if with_stream else "",
+                        "health": "/",
+                    }
+                }
+            }
+        }
+        return EyeRegistry(config=cfg)
+
+    def test_describe_is_valid_intent(self):
+        assert "describe" in VALID_INTENTS
+
+    def test_describe_routes_to_online_eye_and_describes(self):
+        reg = self._reg()
+        fake_frame = b"\xff\xd8frame\xff\xd9"
+        with patch("requests.get", return_value=MagicMock(status_code=200)):
+            with patch("core.vision.router.grab_frame", return_value=fake_frame) as m_grab, \
+                 patch("core.vision.router.describe_image", return_value={
+                     "backend": "local_gemma_e2b", "description": "A tidy desk"
+                 }) as m_desc:
+                result = route_look("describe", reg)
+        m_grab.assert_called_once()
+        m_desc.assert_called_once()
+        assert result["eye"] == "right"
+        assert result["status"] == EyeStatus.ONLINE
+        assert result["observations"]["description"] == "A tidy desk"
+
+    def test_describe_no_stream_returns_offline(self):
+        reg = self._reg(with_stream=False)
+        with patch("requests.get", return_value=MagicMock(status_code=200)):
+            with patch.object(capture_mod, "grab_frame") as m_grab:
+                result = route_look("describe", reg)
+        assert result["status"] == EyeStatus.OFFLINE
+        assert "no stream" in result["error"]
+
+    def test_describe_frame_grab_failure_returns_offline(self):
+        reg = self._reg()
+        with patch("requests.get", return_value=MagicMock(status_code=200)):
+            with patch("core.vision.router.grab_frame", return_value=None):
+                result = route_look("describe", reg)
+        assert result["status"] == EyeStatus.OFFLINE
+        assert "could not grab a frame" in result["error"]
+
+    def test_describe_backend_error_returns_offline(self):
+        reg = self._reg()
+        fake_frame = b"\xff\xd8frame\xff\xd9"
+        with patch("requests.get", return_value=MagicMock(status_code=200)):
+            with patch("core.vision.router.grab_frame", return_value=fake_frame), \
+                 patch("core.vision.router.describe_image", return_value={
+                     "backend": "none", "error": "no describe backend available"
+                 }):
+                result = route_look("describe", reg)
+        assert result["status"] == EyeStatus.OFFLINE
+        assert "no describe backend" in result["error"]
+
+    def test_describe_offline_eye_returns_offline(self):
+        reg = self._reg()
+        with patch("requests.get", side_effect=Exception("down")):
+            result = route_look("describe", reg)
+        assert result["status"] == EyeStatus.OFFLINE
+        assert "no online eye" in result["error"]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
