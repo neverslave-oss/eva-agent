@@ -148,14 +148,23 @@ def route_look(intent: str, registry: EyeRegistry,
         }
 
     # Intent-based routing.
-    # `describe` is eye-agnostic: any online eye with a stream can describe the
-    # scene, so route to the first online eye regardless of kind.
+    # `describe` is eye-agnostic: any online eye with a working stream can
+    # describe the scene. Try each online eye in turn and use the first one
+    # whose stream actually yields a frame (an eye may be "online" health-wise
+    # but have a dead/unreachable stream — e.g. an ESP32 camera that's not
+    # streaming). Only fall through to the next eye if the current one fails.
     if intent == "describe":
         online = registry.online()
         if not online:
             return _envelope("?", intent, EyeStatus.OFFLINE,
                              error="no online eye for intent 'describe'")
-        return _run_eye(online[0], intent)
+        last_err = ""
+        for eye in online:
+            result = _run_eye(eye, intent)
+            if result.get("status") == EyeStatus.ONLINE or result.get("observations"):
+                return result
+            last_err = result.get("error") or "could not describe scene"
+        return _envelope("?", intent, EyeStatus.OFFLINE, error=last_err)
 
     kind = INTENT_EYE_KIND.get(intent)
     candidates = [e for e in registry.by_kind(kind) if registry.is_online(e.id)]

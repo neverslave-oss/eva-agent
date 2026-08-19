@@ -2243,19 +2243,24 @@ def _handle_infer_with_image(params: dict) -> dict:
     image_path = params["image_path"]
     prompt = params["prompt"]
     max_new_tokens = params.get("max_new_tokens", 1024)
+    # force_local: the native eyes (look/describe) always use the local Gemma
+    # E2B vision slot, ignoring the cloud-vision config (which is for Telegram
+    # images). When True, skip cloud routing entirely.
+    force_local = bool(params.get("force_local", False))
 
-    # ── Cloud vision routing ──────────────────────────────────────────────────
-    if _config is None:
-        _load_config(_lazy_config_path)
-    provider_cfg = (_config or {}).get("providers", {})
-    vision_provider = provider_cfg.get("vision", "local")
-    if vision_provider != "local":
-        vision_model = provider_cfg.get("model_overrides", {}).get("vision",
-                          provider_cfg.get("models", {}).get(vision_provider, "google/gemma-4-26b-a4b-it"))
-        print(f"[model_server] infer_with_image: routing to cloud ({vision_provider}/{vision_model})", flush=True)
-        return _cloud_multimodal_infer("vision", vision_provider, vision_model,
-                                        image_path=image_path, prompt=prompt,
-                                        max_new_tokens=max_new_tokens)
+    # ── Cloud vision routing (only when NOT forced local) ─────────────────────
+    if not force_local:
+        if _config is None:
+            _load_config(_lazy_config_path)
+        provider_cfg = (_config or {}).get("providers", {})
+        vision_provider = provider_cfg.get("vision", "local")
+        if vision_provider != "local":
+            vision_model = provider_cfg.get("model_overrides", {}).get("vision",
+                              provider_cfg.get("models", {}).get(vision_provider, "google/gemma-4-26b-a4b-it"))
+            print(f"[model_server] infer_with_image: routing to cloud ({vision_provider}/{vision_model})", flush=True)
+            return _cloud_multimodal_infer("vision", vision_provider, vision_model,
+                                            image_path=image_path, prompt=prompt,
+                                            max_new_tokens=max_new_tokens)
 
     from PIL import Image
     img = Image.open(image_path).convert("RGB")

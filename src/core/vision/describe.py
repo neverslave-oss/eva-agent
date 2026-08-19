@@ -101,8 +101,11 @@ def _local_gemma_describe(image_path: str, prompt: str, max_new_tokens: int) -> 
         if not model_client.is_server_running() and not _ensure_local_server():
             logger.info("[describe] local model server unavailable — skipping local backend")
             return None
+        # force_local=True: the native eyes always describe with the onboard
+        # Gemma E2B slot, ignoring the cloud-vision config (which is for Telegram
+        # images).
         out = model_client.infer_with_image(
-            image_path, prompt, max_new_tokens=max_new_tokens
+            image_path, prompt, max_new_tokens=max_new_tokens, force_local=True
         )
         if not out or out.startswith("[model_server"):
             logger.warning("[describe] local Gemma returned: %r", out)

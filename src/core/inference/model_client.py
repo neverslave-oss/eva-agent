@@ -247,8 +247,15 @@ def infer_with_tools(
         return f"[model_client error] {e}"
 
 
-def infer_with_image(image_path: str, prompt: str, max_new_tokens: int = 8192) -> str:
-    """Multimodal image inference via model server."""
+def infer_with_image(image_path: str, prompt: str, max_new_tokens: int = 8192,
+                     force_local: bool = False) -> str:
+    """Multimodal image inference via model server.
+
+    `force_local`: when True, the model server skips cloud vision routing
+    (providers.vision) and uses the local Gemma E2B vision slot. Used by the
+    native `look`/describe flow so the eyes always describe with the onboard
+    model regardless of the cloud-vision config (which is for Telegram images).
+    """
     try:
         resp_lines = _call({
             "method": "infer_with_image",
@@ -256,6 +263,7 @@ def infer_with_image(image_path: str, prompt: str, max_new_tokens: int = 8192) -
                 "image_path": image_path,
                 "prompt": prompt,
                 "max_new_tokens": max_new_tokens,
+                "force_local": force_local,
             },
         })
         if resp_lines:

@@ -79,14 +79,14 @@ class TestLocalGemmaDescribe:
              patch("core.inference.model_client.infer_with_image", return_value="A cat on a sofa") as m_infer:
             out = describe._local_gemma_describe("/tmp/f.jpg", "desc", 512)
         m_ensure.assert_called_once()
-        m_infer.assert_called_once_with("/tmp/f.jpg", "desc", max_new_tokens=512)
+        m_infer.assert_called_once_with("/tmp/f.jpg", "desc", max_new_tokens=512, force_local=True)
         assert out == "A cat on a sofa"
 
     def test_returns_text_when_server_responds(self):
         with patch("core.inference.model_client.is_server_running", return_value=True), \
              patch("core.inference.model_client.infer_with_image", return_value="Two people walking") as m_infer:
             out = describe._local_gemma_describe("/tmp/f.jpg", "desc", 512)
-        m_infer.assert_called_once_with("/tmp/f.jpg", "desc", max_new_tokens=512)
+        m_infer.assert_called_once_with("/tmp/f.jpg", "desc", max_new_tokens=512, force_local=True)
         assert out == "Two people walking"
 
     def test_rejects_model_server_error_prefix(self):
@@ -129,15 +129,16 @@ class TestOllamaDescribe:
 # grab_frame — MJPEG frame extraction
 # ─────────────────────────────────────────────────────────────────────────────
 class TestGrabFrame:
-    def test_returns_last_complete_jpeg(self):
-        # Two complete JPEG frames in the stream; grab_frame returns the last.
+    def test_returns_first_complete_jpeg(self):
+        # Two complete JPEG frames in the stream; grab_frame returns the first
+        # (we grab a live frame and return immediately, not wait for the last).
         frame1 = b"\xff\xd8AAA\xff\xd9"
         frame2 = b"\xff\xd8BBB\xff\xd9"
         chunks = iter([frame1 + frame2])
         with patch("requests.get") as m_get:
             m_get.return_value = MagicMock(status_code=200, iter_content=lambda chunk_size: chunks)
             out = capture.grab_frame("http://eye/video_feed")
-        assert out == frame2
+        assert out == frame1
 
     def test_returns_none_on_non_200(self):
         with patch("requests.get") as m_get:
