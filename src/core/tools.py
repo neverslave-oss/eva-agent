@@ -250,6 +250,28 @@ TOOLS = [
                 "required": ["query"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "look",
+            "description": "Perceive the world through connected cameras (eyes). Acts by intent and opens one eye or all. Intents: 'what's there' (objects), 'who is it' (faces, gated), 'plant health' (leaf detection), 'scan' (all eyes). Endpoints are config-driven via the eye registry.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "intent": {
+                        "type": "string",
+                        "enum": ["what's there", "who is it", "plant health", "scan"],
+                        "description": "What the agent wants to perceive."
+                    },
+                    "target": {
+                        "type": "string",
+                        "description": "Optional eye id hint (e.g. 'left', 'right'). Router falls back to intent mapping if omitted."
+                    }
+                },
+                "required": ["intent"]
+            }
+        }
     }
 ]
 
@@ -352,6 +374,26 @@ def classify_tool_result(name: str, result_text: str) -> dict:
         "failure_reason": "",
         "backend": _extract_backend_hint(text),
     }
+
+
+def _run_look(arguments: dict) -> str:
+    """Run the unified `look` tool: route an intent to the configured eyes.
+
+    Endpoints/IPs are config-driven (config.yaml `vision.eyes`), never hardcoded,
+    so EVA is portable across installs. Returns a compact JSON envelope.
+    """
+    intent = arguments.get("intent")
+    if not intent:
+        return "(error: look requires 'intent' argument)"
+    target = arguments.get("target") or None
+    try:
+        from core.vision.registry import EyeRegistry
+        from core.vision.router import route_look
+        registry = EyeRegistry()
+        result = route_look(intent, registry, target=target)
+        return json.dumps(result, ensure_ascii=False)
+    except Exception as exc:
+        return f"(error: look failed: {exc})"
 
 
 def execute_tool_with_meta(name: str, arguments: dict, workspace: str = WORKSPACE, chat_id: str = "") -> dict:
@@ -728,6 +770,9 @@ def execute_tool(name: str, arguments: dict, workspace: str = WORKSPACE, chat_id
 
     elif name == "browser_use":
         return _run_browser_use(arguments)
+
+    elif name == "look":
+        return _run_look(arguments)
 
     return f"Unknown tool: {name}"
 

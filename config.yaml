@@ -272,3 +272,24 @@ thinking:
   startup_grace_s: 600
   thought_interval_s: 1800
 workspace: ~/.kernel-evolving/workspace
+
+# ── Vision: unified `look` tool eye registry ──────────────────────────────
+# All endpoints/IPs are config-driven (set via the companion desktop app), never
+# hardcoded — portable across installs. Eyes register/unregister as they come
+# online (plug-and-play, health-checked by the registry).
+vision:
+  eyes:
+    left:
+      kind: object_face
+      base: "${KERNEL_EVO_EYE_LEFT_BASE:-}"        # e.g. http://<hub-ip>:5010
+      stream: "${KERNEL_EVO_EYE_LEFT_STREAM:-}"   # e.g. http://<xiao-ip>:80/stream
+      health: /health
+      status: unknown
+      timeout_s: 5.0
+    right:
+      kind: plant_health
+      base: "${KERNEL_EVO_EYE_RIGHT_BASE:-}"      # e.g. http://<hub-ip>:5000
+      stream: "${KERNEL_EVO_EYE_RIGHT_STREAM:-}" # e.g. http://<hub-ip>:5000/video_feed
+      health: /
+      status: unknown
+      timeout_s: 5.0
