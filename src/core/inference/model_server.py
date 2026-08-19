@@ -988,7 +988,13 @@ def _ensure_multimodal_slot():
         print("[model_server] Multimodal slot already loaded", flush=True)
         return
     print("[model_server] Multimodal slot not yet loaded, initializing...", flush=True)
-    _ensure_model()  # config must be loaded first
+    # Ensure config is loaded (the multimodal slot path comes from stt_model).
+    # Do NOT call _ensure_model() here — that loads the main (text-only) model,
+    # which is unnecessary for vision/STT and can fail if the main model path
+    # is a cloud-only config (e.g. ${KERNEL_EVO_HF_HUB} unexpanded in a spawned
+    # on-demand server). The multimodal slot is loaded independently below.
+    if _config is None:
+        _load_config(_lazy_config_path)
     stt_cfg = (_config or {}).get("stt_model", {})
     stt_path = stt_cfg.get("path") or stt_cfg.get("name")
     if not stt_path:
