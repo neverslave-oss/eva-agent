@@ -1,7 +1,7 @@
 # Spec: `sensors` Tool — Environment Sensing for EVA
 
 **Created:** 2026-08-19
-**Status:** SPEC (design + implementation detail)
+**Status:** IMPLEMENTED (2026-08-20) — read-only `sensors(action="read")` wired and tested. Pump override (`water on/off`) + Pi display deferred to hardware phase.
 **Branch:** feat/sensors-tool (from dev)
 **Author:** Fabio (pacificDev) + Copilot
 **Scope:** Design + implementation spec for a unified `sensors` tool so EVA can read the Pi's sensor data (temperature, humidity, soil moisture) and, in a later hardware phase, control the water pump.

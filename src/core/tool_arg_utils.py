@@ -76,6 +76,12 @@ def normalize_tool_args(tool_name: str, args: dict) -> dict:
         _move("start_url", "url")
         _move("steps", "max_steps")
 
+    if tname == "sensors":
+        _move("intent", "action")
+        _move("command", "action")
+        _move("device", "target")
+        _move("which", "target")
+
     if tname == "http_get":
         _move("uri", "url")
         _move("name", "url")

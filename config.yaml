@@ -293,3 +293,12 @@ vision:
       health: /
       status: unknown
       timeout_s: 5.0
+
+# ── Sensors: unified `sensors` tool registry ─────────────────────────────
+# Config-driven Pi sensor endpoints (set via the companion desktop app), never
+# hardcoded — portable across installs. Each entry is a read source (temp/humi/
+# moisture). The registry scales to N devices like the eye registry.
+sensors:
+  pi:
+    base: "${KERNEL_EVO_SENSORS_PI_BASE:-}"   # e.g. http://<hub-ip>:5000
+    timeout_s: 5.0

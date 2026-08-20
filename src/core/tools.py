@@ -272,6 +272,28 @@ TOOLS = [
                 "required": ["intent"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "sensors",
+            "description": "Read environmental sensor data from connected devices (e.g. the Pi: temperature, humidity, soil moisture). Actions: 'read' returns the latest sensor readings (temp/humi/moisture/moisture_percent). 'water on' / 'water off' (pump override) are reserved for a later phase and currently return a 'deferred' note. Endpoints are config-driven via the sensor registry.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["read", "water on", "water off"],
+                        "description": "What to do: 'read' fetches current sensor readings."
+                    },
+                    "target": {
+                        "type": "string",
+                        "description": "Optional device id hint (default 'pi'). Router falls back to the default device if omitted."
+                    }
+                },
+                "required": ["action"]
+            }
+        }
     }
 ]
 
@@ -394,6 +416,26 @@ def _run_look(arguments: dict) -> str:
         return json.dumps(result, ensure_ascii=False)
     except Exception as exc:
         return f"(error: look failed: {exc})"
+
+
+def _run_sensors(arguments: dict) -> str:
+    """Run the unified `sensors` tool: route an action to the configured devices.
+
+    Endpoints/IPs are config-driven (config.yaml `sensors`), never hardcoded, so
+    EVA is portable across installs. Returns a compact JSON envelope.
+    """
+    action = arguments.get("action")
+    if not action:
+        return "(error: sensors requires 'action' argument)"
+    target = arguments.get("target") or None
+    try:
+        from core.sensors.registry import SensorRegistry
+        from core.sensors.router import route_sensors
+        registry = SensorRegistry()
+        result = route_sensors(action, registry, target=target)
+        return json.dumps(result, ensure_ascii=False)
+    except Exception as exc:
+        return f"(error: sensors failed: {exc})"
 
 
 def execute_tool_with_meta(name: str, arguments: dict, workspace: str = WORKSPACE, chat_id: str = "") -> dict:
@@ -773,6 +815,9 @@ def execute_tool(name: str, arguments: dict, workspace: str = WORKSPACE, chat_id
 
     elif name == "look":
         return _run_look(arguments)
+
+    elif name == "sensors":
+        return _run_sensors(arguments)
 
     return f"Unknown tool: {name}"
 

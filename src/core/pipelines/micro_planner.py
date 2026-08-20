@@ -94,6 +94,8 @@ class MicroPlanner:
             "  http_get(url)             → HTTP GET request\n"
             "  web_search(query)         → search the web\n"
             "  browser_use(task)         → agentic multi-step browser task\n"
+            "  look(intent)              → perceive the world through connected cameras\n"
+            "  sensors(action)           → read environmental sensor data\n"
             "  send_file(path)           → send a file to the user via Telegram\n"
             "  run_skill(name, input)    → execute a named skill\n"
             "  run_routine(name)         → execute a named routine\n"
