@@ -2264,9 +2264,17 @@ def _handle_infer_with_image(params: dict) -> dict:
             vision_model = provider_cfg.get("model_overrides", {}).get("vision",
                               provider_cfg.get("models", {}).get(vision_provider, "google/gemma-4-26b-a4b-it"))
             print(f"[model_server] infer_with_image: routing to cloud ({vision_provider}/{vision_model})", flush=True)
-            return _cloud_multimodal_infer("vision", vision_provider, vision_model,
-                                            image_path=image_path, prompt=prompt,
-                                            max_new_tokens=max_new_tokens)
+            cloud_resp = _cloud_multimodal_infer("vision", vision_provider, vision_model,
+                                                  image_path=image_path, prompt=prompt,
+                                                  max_new_tokens=max_new_tokens)
+            # Fallback: if the cloud provider failed (HTTP 402 out-of-credit,
+            # missing key, network error), route natively to the local Gemma E2B
+            # vision slot instead of erroring out.
+            if "error" in cloud_resp:
+                print(f"[model_server] infer_with_image: cloud vision failed ({cloud_resp['error']}); "
+                      f"falling back to native vision slot", flush=True)
+            else:
+                return cloud_resp
 
     from PIL import Image
     img = Image.open(image_path).convert("RGB")
@@ -2397,9 +2405,17 @@ def _handle_infer_with_audio(params: dict) -> dict:
         print(f"[model_server] infer_with_audio: routing to cloud STT ({audio_provider}/{audio_model})", flush=True)
         prompt = params.get("prompt", "Transcribe this audio.")
         max_new_tokens = params.get("max_new_tokens", 1024)
-        return _cloud_multimodal_infer("audio", audio_provider, audio_model,
-                                        audio_path=params["audio_path"], prompt=prompt,
-                                        max_new_tokens=max_new_tokens)
+        cloud_resp = _cloud_multimodal_infer("audio", audio_provider, audio_model,
+                                              audio_path=params["audio_path"], prompt=prompt,
+                                              max_new_tokens=max_new_tokens)
+        # Fallback: if the cloud STT provider failed (HTTP 402 out-of-credit,
+        # missing key, network error), route natively to the local Gemma E2B
+        # multimodal slot (native STT) instead of erroring out.
+        if "error" in cloud_resp:
+            print(f"[model_server] infer_with_audio: cloud STT failed ({cloud_resp['error']}); "
+                  f"falling back to native STT slot", flush=True)
+        else:
+            return cloud_resp
 
     import torch
     import soundfile as sf
