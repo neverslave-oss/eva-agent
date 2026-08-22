@@ -50,7 +50,7 @@ def infer(messages, max_new_tokens=8192):
         return f"[model error] {e}"
 
 
-def infer_with_tools(messages, tools, workspace=_DEFAULT_WORKSPACE, max_steps=15, step_callback=None, chat_id=""):
+def infer_with_tools(messages, tools, workspace=_DEFAULT_WORKSPACE, max_steps=30, step_callback=None, chat_id=""):
     _ensure_model_funcs()
     return _model_infer_with_tools_func(
         messages,

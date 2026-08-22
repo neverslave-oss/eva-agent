@@ -1460,7 +1460,7 @@ def _run_two_stage_if_available(params: dict, send_line) -> dict | None:
         return None
 
     workspace = os.path.expanduser(params.get("workspace", "~/.kernel-evolving/workspace"))
-    max_steps = params.get("max_steps", 15)
+    max_steps = params.get("max_steps", 30)
     # Passed explicitly (not read from core.tools._current_chat_id) since
     # model_server runs in a separate, multi-threaded process from the
     # caller that knows the real chat_id (R5/T4).
@@ -1830,7 +1830,7 @@ def _handle_infer_with_tools(params: dict, send_line) -> dict:
     messages = params["messages"]
     raw_tools = params.get("tools", [])
     workspace = os.path.expanduser(params.get("workspace", "~/.kernel-evolving/workspace"))
-    max_steps = params.get("max_steps", 15)
+    max_steps = params.get("max_steps", 30)
     enable_thinking = params.get("enable_thinking", False)
     adapter_path = params.get("adapter_path")
     # Passed explicitly to execute_tool_with_meta below — see R5/T4.

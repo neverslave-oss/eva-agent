@@ -166,7 +166,7 @@ class InferenceProvider:
         return "(inference unavailable)"
 
     def infer_with_tools(self, messages: list, tools: list, workspace: str = _DEFAULT_WORKSPACE,
-                         max_steps: int = 15, step_callback=None, call_type: str = "task_inference",
+                         max_steps: int = 30, step_callback=None, call_type: str = "task_inference",
                          chunk_callback=None, chat_id: str = "") -> str:
         """Route an agentic tool-calling inference call with ordered fallback chain.
         chunk_callback(text: str): called with each streamed text chunk on the final answer.
