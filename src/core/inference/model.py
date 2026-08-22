@@ -65,6 +65,11 @@ def load(config_path="config.yaml"):
         pass
 
     cfg = load_config(config_path)
+    # No local model section (e.g. task_inference routed to a cloud provider, or
+    # a config that only defines cloud providers) → nothing to load in-process.
+    if "model" not in (cfg or {}):
+        print("[model] No local 'model' config — skipping in-process load")
+        return None, None
     model_source = os.environ.get("MODEL_SOURCE", "local")
 
     if model_source == "docker-hub":
@@ -390,9 +395,14 @@ def infer_with_image(image_path: str, prompt: str, max_new_tokens: int = 8192) -
     # Ensure the model/processor are loaded before touching them (vision may be
     # the very first request, before any text inference). If load is skipped
     # (model server present / cloud-routed task) and still no processor, return
-    # a clean error instead of crashing on apply_chat_template.
+    # a clean error instead of crashing on apply_chat_template. Guard load()
+    # against config errors (missing 'model' section, etc.) so it degrades to
+    # the readable message instead of raising KeyError.
     if _processor is None or _model is None:
-        load()
+        try:
+            load()
+        except Exception as _e:
+            print(f"[model] in-process vision load failed: {_e}", flush=True)
     if _processor is None or _model is None:
         return "Vision unavailable: no in-process model loaded (model server running or task routed to cloud)."
 
@@ -439,9 +449,14 @@ def infer_with_audio(audio_path: str, prompt: str = "The user sent you a voice m
     # Ensure the model/processor are loaded before touching them (audio may be
     # the very first request, before any text inference). If load is skipped
     # (model server present / cloud-routed task) and still no processor, return
-    # a clean error instead of crashing on apply_chat_template.
+    # a clean error instead of crashing on apply_chat_template. Guard load()
+    # against config errors (missing 'model' section, etc.) so it degrades to
+    # the readable message instead of raising KeyError.
     if _processor is None or _model is None:
-        load()
+        try:
+            load()
+        except Exception as _e:
+            print(f"[model] in-process audio load failed: {_e}", flush=True)
     if _processor is None or _model is None:
         return "Audio unavailable: no in-process model loaded (model server running or task routed to cloud)."
 

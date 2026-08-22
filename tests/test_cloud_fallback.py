@@ -212,6 +212,37 @@ class TestInProcessAudioNoneTypeGuard:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+class TestInProcessLoadRaisesKeyError:
+    """Regression: when the in-process fallback calls load() and load() raises
+    (e.g. KeyError: 'model' when the config has no local model section because
+    task_inference is cloud-routed), the audio/vision handlers must degrade to
+    a clean 'unavailable' message instead of propagating the KeyError to the
+    /transcribe or /describe endpoint (HTTP 500)."""
+
+    def test_audio_returns_clean_error_when_load_raises_keyerror_model(self):
+        import core.inference.model as m
+        with patch.object(m, "_processor", None), \
+             patch.object(m, "_model", None), \
+             patch.object(m, "load", side_effect=KeyError("model")), \
+             patch("core.inference.model_client.is_server_running", return_value=False):
+            result = m.infer_with_audio("/tmp/nonexistent.wav", mode="stt")
+        assert isinstance(result, str)
+        assert "Audio unavailable" in result
+        assert "KeyError" not in result
+
+    def test_vision_returns_clean_error_when_load_raises_keyerror_model(self):
+        import core.inference.model as m
+        with patch.object(m, "_processor", None), \
+             patch.object(m, "_model", None), \
+             patch.object(m, "load", side_effect=KeyError("model")), \
+             patch("core.inference.model_client.is_server_running", return_value=False):
+            result = m.infer_with_image("/tmp/nonexistent.jpg", "Describe this")
+        assert isinstance(result, str)
+        assert "Vision unavailable" in result
+        assert "KeyError" not in result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # STT must NOT load the main (text-only) model — route straight to Gemma slot
 # ─────────────────────────────────────────────────────────────────────────────
 class TestAudioSttSkipsMainModelLoad:
