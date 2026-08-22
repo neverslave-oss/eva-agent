@@ -387,6 +387,15 @@ def infer_with_image(image_path: str, prompt: str, max_new_tokens: int = 8192) -
     from PIL import Image
     import torch
 
+    # Ensure the model/processor are loaded before touching them (vision may be
+    # the very first request, before any text inference). If load is skipped
+    # (model server present / cloud-routed task) and still no processor, return
+    # a clean error instead of crashing on apply_chat_template.
+    if _processor is None or _model is None:
+        load()
+    if _processor is None or _model is None:
+        return "Vision unavailable: no in-process model loaded (model server running or task routed to cloud)."
+
     img = Image.open(image_path).convert("RGB")
     messages = [
         {"role": "user", "content": [
@@ -426,6 +435,15 @@ def infer_with_audio(audio_path: str, prompt: str = "The user sent you a voice m
     import torch
     import soundfile as sf
     import numpy as np
+
+    # Ensure the model/processor are loaded before touching them (audio may be
+    # the very first request, before any text inference). If load is skipped
+    # (model server present / cloud-routed task) and still no processor, return
+    # a clean error instead of crashing on apply_chat_template.
+    if _processor is None or _model is None:
+        load()
+    if _processor is None or _model is None:
+        return "Audio unavailable: no in-process model loaded (model server running or task routed to cloud)."
 
     # Load audio — convert OGG/MP3/etc to PCM via soundfile or ffmpeg fallback
     try:

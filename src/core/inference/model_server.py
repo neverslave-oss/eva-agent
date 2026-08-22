@@ -2288,13 +2288,16 @@ def _handle_infer_with_image(params: dict) -> dict:
 
     if not _audio_capable:
         # Main model is text-only — ensure Gemma 4 vision slot is loaded
-        _ensure_multimodal_slot()
-        if _mm_model is not None:
+        try:
+            _ensure_multimodal_slot()
+        except Exception as e:
+            print(f"[model_server] infer_with_image: multimodal slot load failed ({e}) — falling back to main model", flush=True)
+        if _mm_model is not None and _mm_processor is not None:
             print("[model_server] infer_with_image: routing to audio/vision slot (Gemma 4)", flush=True)
             active_model = _mm_model
             active_processor = _mm_processor
             use_hf_path = True
-    elif _mm_model is not None:
+    elif _mm_model is not None and _mm_processor is not None:
         # Main model IS audio-capable but we still have a warm slot — prefer it
         active_model = _mm_model
         active_processor = _mm_processor
@@ -2303,6 +2306,17 @@ def _handle_infer_with_image(params: dict) -> dict:
     if active_model is None:
         # Main model handles vision (or nothing else is available)
         _ensure_model()
+        # If the main model is loaded, use it as the processor fallback (it may
+        # have a processor even when the dedicated multimodal slot is absent).
+        if active_processor is None and _model is not None and _processor is not None:
+            active_model = _model
+            active_processor = _processor
+            use_hf_path = False
+
+    # Guard: if we are heading into the HF/slot path but no processor is
+    # available, return a clean error instead of crashing on apply_chat_template.
+    if active_processor is None:
+        return {"error": "no vision processor available (multimodal slot failed to load)"}
 
     # If we have a dedicated vision model (audio slot / Gemma 4), always use HF path
     if use_hf_path and active_model is not None:
@@ -2445,10 +2459,18 @@ def _handle_infer_with_audio(params: dict) -> dict:
         active_processor = _processor
         print(f"[model_server] infer_with_audio: using main model (HF, audio_capable)", flush=True)
     else:
-        _ensure_multimodal_slot()
+        try:
+            _ensure_multimodal_slot()
+        except Exception as e:
+            print(f"[model_server] infer_with_audio: multimodal slot load failed ({e}) — falling back to main model", flush=True)
         active_model = _mm_model
         active_processor = _mm_processor
         print(f"[model_server] infer_with_audio: using multimodal slot (HF)", flush=True)
+
+    # Guard: if we are heading into the HF path but no processor is available,
+    # return a clean error instead of crashing on apply_chat_template.
+    if active_processor is None:
+        return {"error": "no audio processor available (multimodal slot failed to load)"}
 
     # Normalise to 16kHz mono float32 WAV via ffmpeg
     tmp_wav = tempfile.mktemp(suffix=".wav")

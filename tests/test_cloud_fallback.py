@@ -188,3 +188,24 @@ class TestAudioCloudFallback:
         m_cloud.assert_called_once()
         assert result == {"result": "transcribed text"}
         model.generate.assert_not_called()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# In-process infer_with_audio NoneType guard (model.py)
+# ─────────────────────────────────────────────────────────────────────────────
+class TestInProcessAudioNoneTypeGuard:
+    """Regression: infer_with_audio (in-process fallback) must not crash with
+    'NoneType' object has no attribute 'apply_chat_template' when no model is
+    loaded (model server running / task routed to cloud). It must return a
+    clean error string instead."""
+
+    def test_returns_clean_error_when_no_processor(self):
+        import core.inference.model as m
+        with patch.object(m, "_processor", None), \
+             patch.object(m, "_model", None), \
+             patch.object(m, "load", lambda: None), \
+             patch("core.inference.model_client.is_server_running", return_value=False):
+            result = m.infer_with_audio("/tmp/nonexistent.wav", mode="stt")
+        assert isinstance(result, str)
+        assert "Audio unavailable" in result
+        assert "apply_chat_template" not in result
