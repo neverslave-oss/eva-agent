@@ -209,3 +209,78 @@ class TestInProcessAudioNoneTypeGuard:
         assert isinstance(result, str)
         assert "Audio unavailable" in result
         assert "apply_chat_template" not in result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STT must NOT load the main (text-only) model — route straight to Gemma slot
+# ─────────────────────────────────────────────────────────────────────────────
+class TestAudioSttSkipsMainModelLoad:
+    """Regression: _handle_infer_with_audio must not call _ensure_model() up
+    front when the main model is text-only (e.g. Nemotron, not audio-capable).
+    Loading Nemotron fails with the VRAM guard when the Gemma multimodal slot
+    is already resident. STT must route directly to the Gemma slot."""
+
+    def test_stt_routes_to_gemma_slot_without_loading_main_model(self):
+        """With a non-audio-capable main model, STT uses the Gemma slot and
+        _ensure_model() is never called (Nemotron not loaded)."""
+        cfg = {"providers": {"stt": "local", "vision": "local"},
+               "model_overrides": {}, "models": {}}
+        model = _mock_model()
+        proc = _mock_processor(model)
+        import numpy as np
+        audio_array = np.zeros(16000, dtype=np.float32)
+
+        with patch.object(ms, "_config", cfg), \
+             patch.object(ms, "_ensure_model", MagicMock()) as m_ensure, \
+             patch.object(ms, "_slot_registry", None), \
+             patch.object(ms, "_audio_capable", False), \
+             patch.object(ms, "_vllm_enabled", False), \
+             patch.object(ms, "_mm_model", model), \
+             patch.object(ms, "_mm_processor", proc), \
+             patch.object(ms, "_ensure_multimodal_slot", lambda: None), \
+             patch("subprocess.run", return_value=MagicMock(returncode=0)), \
+             patch("soundfile.read", return_value=(audio_array, 16000)), \
+             patch("os.path.exists", return_value=True), \
+             patch("os.path.getsize", return_value=100), \
+             patch("os.unlink", lambda p: None):
+            result = ms._handle_infer_with_audio(
+                {"audio_path": "/tmp/voice.wav", "prompt": "Transcribe.",
+                 "mode": "stt", "max_new_tokens": 64})
+
+        # Main model (Nemotron) must NOT be loaded for STT.
+        m_ensure.assert_not_called()
+        assert "error" not in result, f"Unexpected error: {result}"
+        assert result.get("result") is not None
+        # Gemma slot actually generated.
+        model.generate.assert_called_once()
+
+    def test_stt_loads_main_model_only_when_audio_capable(self):
+        """When the main model IS audio-capable, _ensure_model() is still called
+        (it is the audio model in that config)."""
+        cfg = {"providers": {"stt": "local", "vision": "local"},
+               "model_overrides": {}, "models": {}}
+        model = _mock_model()
+        proc = _mock_processor(model)
+        import numpy as np
+        audio_array = np.zeros(16000, dtype=np.float32)
+
+        with patch.object(ms, "_config", cfg), \
+             patch.object(ms, "_ensure_model", MagicMock()) as m_ensure, \
+             patch.object(ms, "_slot_registry", None), \
+             patch.object(ms, "_audio_capable", True), \
+             patch.object(ms, "_vllm_enabled", False), \
+             patch.object(ms, "_model", model), \
+             patch.object(ms, "_processor", proc), \
+             patch("subprocess.run", return_value=MagicMock(returncode=0)), \
+             patch("soundfile.read", return_value=(audio_array, 16000)), \
+             patch("os.path.exists", return_value=True), \
+             patch("os.path.getsize", return_value=100), \
+             patch("os.unlink", lambda p: None):
+            result = ms._handle_infer_with_audio(
+                {"audio_path": "/tmp/voice.wav", "prompt": "Transcribe.",
+                 "mode": "stt", "max_new_tokens": 64})
+
+        m_ensure.assert_called_once()
+        assert "error" not in result, f"Unexpected error: {result}"
+        assert result.get("result") is not None
+        model.generate.assert_called_once()

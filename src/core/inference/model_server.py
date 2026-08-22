@@ -2405,9 +2405,14 @@ def _handle_infer_with_audio(params: dict) -> dict:
     NOTE: Uses HF transformers for audio tensor inference (stable path).
     vLLM 0.21.0 supports Gemma4ForConditionalGeneration but multimodal audio
     input via vLLM API is deferred — HF path is simpler and well-tested.
-    """
-    _ensure_model()
 
+    IMPORTANT: do NOT call _ensure_model() up front here. That loads the main
+    text model (e.g. Nemotron), which is NOT audio-capable and fails with the
+    VRAM guard when the Gemma multimodal slot is already resident. STT/audio
+    routes to the Gemma multimodal slot (or a named audio slot) instead; the
+    main model is only loaded in the branch where it is actually the
+    audio-capable model.
+    """
     # ── Cloud audio routing ──────────────────────────────────────────────────
     if _config is None:
         _load_config(_lazy_config_path)
@@ -2454,7 +2459,9 @@ def _handle_infer_with_audio(params: dict) -> dict:
         active_processor = _slot_state.processor
         print(f"[model_server] infer_with_audio: using named slot {_use_slot_name!r}", flush=True)
     elif _audio_capable and not _vllm_enabled:
-        # Legacy: main model is audio-capable on HF path
+        # Legacy: main model is audio-capable on HF path. Only now do we load
+        # the main model — it is the audio-capable model in this config.
+        _ensure_model()
         active_model = _model
         active_processor = _processor
         print(f"[model_server] infer_with_audio: using main model (HF, audio_capable)", flush=True)
