@@ -49,6 +49,7 @@ _IDLE_BYPASS_PATHS = {
     "/evolution/dashboard", "/", "/peers",
     "/skills", "/routines", "/replica/active", "/evolution/trajectories",
     "/debug/prompt-logs", "/debug/prompt-log", "/debug/trajectories", "/debug/chat-history",
+    "/debug/fields",
     "/provider", "/provider/available",
     "/memory/files", "/memory/file", "/memory/stats", "/workspace/tree",
     "/memory/file/rename", "/memory/file/new",
@@ -618,6 +619,27 @@ def debug_chat_history(limit: int = 80, chat_id: str = "", include_all: bool = T
         "include_all": bool(include_all),
     }
 
+
+@app.get("/debug/fields")
+def debug_fields(chat_id: str = "", query: str = ""):
+    """(ADR-015, decision #4) Inspect the expertise-field module state.
+
+    Exposes whether the sidecar is loaded, the active field registry, per-chat
+    hot-field state, and optional routing results for a sample `query`.
+
+    Degrades to a safe no-op JSON if the module is absent or errors.
+    """
+    try:
+        from core.expansions.expertise_field_bridge import debug_snapshot
+        return debug_snapshot(chat_id=chat_id, query=query)
+    except Exception as e:
+        return {
+            "available": False,
+            "reason": f"/debug/fields handler error: {e}",
+            "registry": None,
+            "hot_fields": {},
+            "routed": None,
+        }
 
 # ── Memory & Workspace endpoints ────────────────────────────────────────────
 

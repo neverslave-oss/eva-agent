@@ -188,3 +188,66 @@ def reorder_matches(query: str, matches: list[dict], chat_id: str = "") -> list[
     def _score(s: dict) -> int:
         return 0 if s.get("name") in bias else 1
     return sorted(matches, key=_score)
+
+def debug_snapshot(chat_id: str = "", query: str = ""):
+    """Return a JSON-serializable snapshot of the expertise-field module for
+    the /debug/fields endpoint (decision #4).
+
+    Exposes:
+        * available          — whether the sidecar loaded
+        * registry           — active fields + their skills
+        * hot_fields         — per-chat hot-field state snapshot
+        * routed             — candidate fields + narrowed skills for `query`
+
+    Safe no-op dict if the sidecar is unavailable.
+    """
+    if not _ensure_loaded():
+        return {
+            "available": False,
+            "reason": "expertise-field sidecar not loaded",
+            "registry": None,
+            "hot_fields": {},
+            "routed": None,
+        }
+    try:
+        reg_dict = _registry.to_dict()
+        hot = _state.snapshot(chat_id) if _state else {}
+        routed = None
+        if query:
+            if chat_id:
+                hot_ids, cands = _sidecar.router.choose_fields(
+                    query, _registry, _state, chat_id=chat_id
+                )
+            else:
+                hot_ids, cands = _sidecar.router.choose_fields(
+                    query, _registry, _state
+                )
+            routed = {
+                "hot": hot_ids,
+                "candidate_skills": list(cands),
+                "matched_triggers": [
+                    f["id"] for f in _sidecar.router.match_by_triggers(query, _registry)
+                ],
+            }
+        return {
+            "available": True,
+            "registry": reg_dict,
+            "hot_fields": hot,
+            "routed": routed,
+            "sidecar_dir": str(_SIDECAR_DIR),
+        }
+    except Exception as e:
+        try:
+            import logging
+            logging.getLogger("kernel.evo").warning(
+                "expertise-field debug_snapshot failed (%s); no-op", e
+            )
+        except Exception:
+            pass
+        return {
+            "available": False,
+            "reason": f"debug_snapshot error: {e}",
+            "registry": None,
+            "hot_fields": {},
+            "routed": None,
+        }

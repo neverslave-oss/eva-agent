@@ -79,3 +79,19 @@ def test_reorder_matches_noop_without_bias():
     matches = [a, b]
     out = bridge.reorder_matches("zzzqqq", matches, chat_id="chat-none")
     assert [s["name"] for s in out] == ["github", "soil-analyzer"]
+
+def test_debug_snapshot_reports_registry_and_routing():
+    """/debug/fields backing snapshot returns available registry + routed.
+    (ADR-015, decision #4)."""
+    snap = bridge.debug_snapshot(chat_id="chat-dbg", query="analyze my investment portfolio")
+    assert snap["available"] is True
+    assert snap["registry"] is not None
+    # Registry carries active + fields list
+    assert "active" in snap["registry"]
+    assert isinstance(snap["registry"]["fields"], list)
+    # Routing for the finance query resolves to the finance field
+    assert snap["routed"] is not None
+    assert snap["routed"]["hot"] == ["finance"]
+    assert "open-agentic-investor" in snap["routed"]["candidate_skills"]
+    # Per-chat hot state snapshot
+    assert isinstance(snap["hot_fields"], dict)
