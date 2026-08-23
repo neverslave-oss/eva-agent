@@ -1,0 +1,57 @@
+{
+  "id": "engineering",
+  "name": "Engineering & Systems",
+  "version": "1.0.0",
+  "description": "Software development, code review, systems infrastructure, security, automation, deployment, and platform engineering.",
+  "trigger_terms": [
+    "code", "coding", "software", "program", "debug", "debugging", "api",
+    "github", "git", "repo", "repository", "build", "deploy", "deployment",
+    "server", "system", "infrastructure", "devops", "container", "security",
+    "vuln", "vulnerability", "scan", "auth", "database", "postgres", "python",
+    "automation", "script", "kubernetes", "linux", "architecture", "test"
+  ],
+  "skills": [
+    "github",
+    "code-review-diff-analysis",
+    "repository-vulnerability-scan",
+    "security-scanner",
+    "prioritize-security-checks",
+    "realtime-security-checks",
+    "rest-api-authentication",
+    "openapi-python-client",
+    "postgres-cli-csv-export",
+    "db-backup-s3",
+    "github-pages-deploy",
+    "notion-markdown-sync",
+    "python-static-unit-test-generator",
+    "json-schema-validate",
+    "microclaw",
+    "opencode-controller",
+    "hugging-face-model-trainer",
+    "kernel-doc-retrieval",
+    "kernel-doc-semantic-search",
+    "enhance-kernel-documentation-retrieval",
+    "stop-processes-and-services",
+    "rotate-old-logs-cron",
+    "website-change-monitor-telegram",
+    "ecosystem-skill-discovery",
+    "ecosystem-skill-filler",
+    "ecosystem-skill-synthesizer"
+  ],
+  "knowledge_base": [
+    {"type": "memory", "namespace": "engineering"},
+    {"type": "workspace", "path": "workspace"},
+    {"type": "doc", "path": "docs/engineering/"}
+  ],
+  "acquisition_plan": {
+    "on_gap": [
+      "Use web_search to research the technology topic",
+      "Read authoritative docs via kernel-doc-retrieval / browser_use",
+      "Read local source and memory",
+      "Synthesize a dedicated skill and register it under this field",
+      "Validate the new skill on a representative task"
+    ],
+    "preferred_slot": "primary",
+    "learn_on_idle": true
+  }
+}

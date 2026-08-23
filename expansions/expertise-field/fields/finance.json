@@ -1,0 +1,34 @@
+{
+  "id": "finance",
+  "name": "Finance & Investment",
+  "version": "1.0.0",
+  "description": "Portfolio management, stock/market analysis, financial reasoning, position sizing, and investment decision support.",
+  "trigger_terms": [
+    "invest", "investment", "portfolio", "stock", "market", "trading", "trade",
+    "finance", "financial", "position", "equity", "dividend", "share", "asset",
+    "roi", "risk", "macro", "crypto", "etf", "fund", "rebalance", "allocation"
+  ],
+  "skills": [
+    "open-agentic-investor",
+    "timeseries-anomaly-detector",
+    "extract-gdp-table-to-json",
+    "rss-email-digest",
+    "db-backup-s3"
+  ],
+  "knowledge_base": [
+    {"type": "memory", "namespace": "finance"},
+    {"type": "workspace", "path": "workspace-invest"},
+    {"type": "doc", "path": "docs/finance/"}
+  ],
+  "acquisition_plan": {
+    "on_gap": [
+      "Use web_search to research market/financial topics",
+      "Fetch authoritative financial data via http_get / browser_use",
+      "Read local investment notes and portfolio memory",
+      "Synthesize a dedicated financial skill and register it under this field",
+      "Validate the new skill on a representative task"
+    ],
+    "preferred_slot": "primary",
+    "learn_on_idle": true
+  }
+}

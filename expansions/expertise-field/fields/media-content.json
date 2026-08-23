@@ -1,0 +1,41 @@
+{
+  "id": "media-content",
+  "name": "Media, Content & Branding",
+  "version": "1.0.0",
+  "description": "Content creation, image generation and processing, branding, narrative craft, and multimedia production.",
+  "trigger_terms": [
+    "content", "marketing", "brand", "branding", "write", "writing", "blog",
+    "article", "image", "imagegen", "picture", "poster", "logo", "video",
+    "youtube", "transcript", "story", "narrative", "media", "design", "webp",
+    "watermark", "social"
+  ],
+  "skills": [
+    "open-fantasia-imagegen",
+    "expand-open-fantasia-image-generation",
+    "blog-intro-and-clarity-critique",
+    "images-to-webp",
+    "image-batch-resize-watermark",
+    "youtube-transcript-summarizer",
+    "csv-to-markdown-table",
+    "html-table-to-json",
+    "tsv-to-json-array",
+    "tsv-to-toml-array-of-tables",
+    "extract-markdown-headings-to-bullets",
+    "summarize-article-key-points"
+  ],
+  "knowledge_base": [
+    {"type": "memory", "namespace": "media-content"},
+    {"type": "workspace", "path": "workspace-marketing"},
+    {"type": "doc", "path": "docs/media-content/"}
+  ],
+  "acquisition_plan": {
+    "on_gap": [
+      "Sketch the content/branding need and research via web_search",
+      "Generate or process media via local imagegen skills",
+      "Synthesize an optimized content skill and register it under this field",
+      "Validate the new skill on a representative task"
+    ],
+    "preferred_slot": "primary",
+    "learn_on_idle": true
+  }
+}
