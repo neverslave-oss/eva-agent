@@ -99,6 +99,10 @@ GET /health                                  — model loaded + slot status
 | [020](#adr-020) | User-Request-Anchored Evolution | Proposed | Evolution anchored to user requests with human-confirmation reward |
 | [021](#adr-021) | Tier 2 Approval Gate | Accepted | Human-approval gate before Tier 2 skill synthesis install |
 | [022](#adr-022) | Unified Tool-First Pipeline | Proposed | Unified tool-first pipeline for task execution |
+| [023](#adr-023) | Unified Look Tool | Implemented | Vision for EVA — registry, router, eyes, dispatch |
+| [024](#adr-024) | Unified Sensors Tool | Implemented | Read Pi sensor data (temp/humidity/moisture), read-only phase |
+| [025](#adr-025) | Agentic Browser-Use Tool | Implemented | Multi-step web tasks via browser-use, headless |
+| [026](#adr-026) | Tools Loop Cap 60 | Implemented | Max tools call loop steps 30 → 60 |
 
 ---
 
