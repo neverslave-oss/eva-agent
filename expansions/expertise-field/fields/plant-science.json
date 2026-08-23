@@ -1,0 +1,30 @@
+{
+  "id": "plant-science",
+  "name": "Plant Science & Greenhouse Ops",
+  "version": "1.0.0",
+  "description": "Understanding and managing the indoor growing environment, plant health, and environmental sensing.",
+  "trigger_terms": [
+    "plant", "cannabis", "greenhouse", "grow", "leaf", "crop", "yield",
+    "LED", "photoperiod", "nutrient", "soil moisture", "VPD"
+  ],
+  "skills": [
+    "open-workspace-tracker",
+    "timeseries-anomaly-detector"
+  ],
+  "knowledge_base": [
+    {"type": "memory", "namespace": "plant-science"},
+    {"type": "doc",   "path": "docs/plant-science/"},
+    {"type": "sensor", "device": "pi"}
+  ],
+  "acquisition_plan": {
+    "on_gap": [
+      "Use web_search to research the missing topic",
+      "Fetch authoritative docs via browser_use / http_get",
+      "Read local docs and memory",
+      "Synthesize a dedicated skill and register it under this field",
+      "Validate the new skill on a representative task"
+    ],
+    "preferred_slot": "primary",
+    "learn_on_idle": true
+  }
+}

@@ -23,6 +23,12 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+# Expertise-field context-provider bridge (ADR-015, ADR-022-compatible)
+try:
+    from core.expansions.expertise_field_bridge import inject_field_context
+except Exception:
+    inject_field_context = lambda chat_id="", text="": ""
+
 # TTL cache for expensive per-message service-status checks (PD4)
 _STATUS_CACHE: dict = {}  # key -> (value, expiry_ts)
 _STATUS_TTL = 45  # seconds
@@ -804,6 +810,16 @@ def build_system_prompt(
         for note in active_notes:
             p.append(f"- {note}")
         p.append("")
+
+    # =========================================================================
+    # ## Active expertise fields (progressive disclosure, ADR-015/ADR-022)
+    # =========================================================================
+    try:
+        _exp_block = inject_field_context(chat_id=chat_id)
+        if _exp_block:
+            p += ["## Active expertise fields", "", _exp_block, ""]
+    except Exception:
+        pass
 
     # =========================================================================
     # ## Session Notes — anchor for context appended by agent.py

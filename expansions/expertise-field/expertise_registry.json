@@ -1,0 +1,9 @@
+{
+  "active": ["plant-science", "finance", "media-content", "engineering"],
+  "fields": [
+    {"id": "plant-science", "path": "fields/plant-science.json", "version": "1.0.0"},
+    {"id": "finance", "path": "fields/finance.json", "version": "1.0.0"},
+    {"id": "media-content", "path": "fields/media-content.json", "version": "1.0.0"},
+    {"id": "engineering", "path": "fields/engineering.json", "version": "1.0.0"}
+  ]
+}
