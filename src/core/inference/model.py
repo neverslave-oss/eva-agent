@@ -378,14 +378,67 @@ def _normalize_tool_args(tool_name: str, args: dict) -> dict:
     return normalize_tool_args(tool_name, args)
 
 
-def infer_with_image(image_path: str, prompt: str, max_new_tokens: int = 8192) -> str:
-    """Run multimodal inference with an image. Returns text response."""
-    # Try model server first (persistent process)
+def _ensure_local_server(timeout_s: float = 120.0) -> bool:
+    """Ensure the local model server is running, spawning it on demand.
+
+    Mirrors the pattern in core/vision/describe.py: when inference is routed to
+    a cloud provider (task_inference != local), start.sh skips the model server
+    to save VRAM, so the native Gemma E2B multimodal slot is never up for the
+    Telegram image/voice pipelines. Spawn model_server.py --lazy on first use
+    so audio/vision get their native fallback exactly as the look tool does.
+    """
     try:
         from core.inference.model_client import is_server_running
+
         if is_server_running():
+            return True
+
+        import subprocess as _sp
+        import sys as _sys
+        import time as _time
+        from pathlib import Path as _Path
+
+        _cfg = os.environ.get(
+            "KERNEL_EVO_CONFIG",
+            str(_Path(__file__).resolve().parents[3] / "config.yaml"),
+        )
+        print("[model] local model server not running — spawning on demand", flush=True)
+        _sp.Popen(
+            [_sys.executable,
+             str(_Path(__file__).resolve().parent / "model_server.py"),
+             "--config", _cfg, "--lazy"],
+            stdout=open("/tmp/kernel_evolving_model_server.log", "a"),
+            stderr=_sp.STDOUT,
+            start_new_session=True,
+        )
+        for _ in range(int(timeout_s)):
+            _time.sleep(1)
+            if is_server_running():
+                print("[model] local model server ready", flush=True)
+                return True
+        print(f"[model] local model server did not come up within {timeout_s:.0f}s", flush=True)
+        return False
+    except Exception as exc:  # pragma: no cover - defensive
+        print(f"[model] failed to ensure local model server: {exc}", flush=True)
+        return False
+
+
+def infer_with_image(image_path: str, prompt: str, max_new_tokens: int = 1024,
+                     force_local: bool = False) -> str:
+    """Run multimodal inference with an image. Returns text response.
+
+    `force_local`: when True, the model server skips cloud-vision routing and
+    uses the native Gemma E2B slot directly (same as the `look`/describe path).
+    Use this when there are no cloud credits — otherwise the cloud attempt 402s
+    and wastes time before the local fallback.
+    """
+    # Try model server first (persistent process); spawn on demand in cloud mode
+    # so the native Gemma E2B multimodal slot is available for the image pipeline.
+    try:
+        from core.inference.model_client import is_server_running
+        if is_server_running() or _ensure_local_server():
             import core.inference.model_client as _client
-            return _client.infer_with_image(image_path, prompt, max_new_tokens=max_new_tokens)
+            return _client.infer_with_image(image_path, prompt, max_new_tokens=max_new_tokens, force_local=force_local)
     except Exception:
         pass
     # Fallback: in-process loading (original behaviour)
@@ -430,7 +483,7 @@ def infer_with_audio(audio_path: str, prompt: str = "The user sent you a voice m
     """
     try:
         from core.inference.model_client import is_server_running
-        if is_server_running():
+        if is_server_running() or _ensure_local_server():
             import core.inference.model_client as _client
             result = _client.infer_with_audio(audio_path, prompt, max_new_tokens=max_new_tokens, history=history, mode=mode)
             # Raise on error strings so voice handler catches them cleanly
