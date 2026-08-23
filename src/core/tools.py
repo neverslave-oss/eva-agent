@@ -852,7 +852,7 @@ def _run_browser_use(arguments: dict) -> str:
     if not browser_cfg.get("enabled", True):
         return "(error: browser_use is disabled in config — use web_search instead)"
     headless = bool(browser_cfg.get("headless", True))
-    cfg_max_steps = int(browser_cfg.get("max_steps", 30) or 30)
+    cfg_max_steps = int(browser_cfg.get("max_steps", 60) or 60)
     timeout_s = float(browser_cfg.get("timeout_s", 120) or 120)
     screenshot_dir = browser_cfg.get("screenshot_dir", "") or ""
     import os as _os

@@ -181,7 +181,7 @@ def infer_with_tools(
     messages: list,
     tools: list,
     workspace: str = _DEFAULT_WORKSPACE,
-    max_steps: int = 30,
+    max_steps: int = 60,
     step_callback: Optional[Callable] = None,
     chunk_callback: Optional[Callable[[str], None]] = None,
     adapter_path: Optional[str] = None,

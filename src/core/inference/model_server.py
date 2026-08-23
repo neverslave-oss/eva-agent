@@ -1460,7 +1460,7 @@ def _run_two_stage_if_available(params: dict, send_line) -> dict | None:
         return None
 
     workspace = os.path.expanduser(params.get("workspace", "~/.kernel-evolving/workspace"))
-    max_steps = params.get("max_steps", 30)
+    max_steps = params.get("max_steps", 60)
     # Passed explicitly (not read from core.tools._current_chat_id) since
     # model_server runs in a separate, multi-threaded process from the
     # caller that knows the real chat_id (R5/T4).

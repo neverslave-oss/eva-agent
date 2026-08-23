@@ -130,7 +130,7 @@ def infer_with_tools(
     messages: list,
     tools: list,
     workspace: str = _DEFAULT_WORKSPACE,
-    max_steps: int = 30,
+    max_steps: int = 60,
     step_callback=None,
     adapter_path: str | None = None,
     chat_id: str = "",
