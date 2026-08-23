@@ -141,18 +141,24 @@ def _call_api(method: str, path: str, body: dict = None):
 def send_message(chat_id: str, text: str, parse_mode: str = "Markdown") -> int | None:
     """Send a message and return its message_id (or None on failure)."""
     try:
+        payload = {
+            "chat_id": chat_id,
+            "text": text,
+        }
+        # Only include parse_mode when it's a valid string. Telegram rejects
+        # `parse_mode: null` with "400 Bad Request: unsupported parse_mode".
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
         r = requests.post(
             f"{API_BASE}/sendMessage",
-            json={
-                "chat_id": chat_id,
-                "text": text,
-                "parse_mode": parse_mode,
-            },
+            json=payload,
             timeout=10,
         )
         data = r.json()
         if data.get("ok"):
             return data["result"]["message_id"]
+        # Telegram rejected the message — log the actual API error for diagnosis.
+        print(f"[bot] send_message API error: {data.get('error_code')} {data.get('description', '')[:200]}", flush=True)
     except Exception as e:
         print(f"[bot] send error: {e}")
     return None
@@ -161,17 +167,26 @@ def send_message(chat_id: str, text: str, parse_mode: str = "Markdown") -> int |
 def edit_message(chat_id: str, message_id: int, text: str, parse_mode: str = "Markdown") -> bool:
     """Edit an existing message. Falls back silently if it fails."""
     try:
+        payload = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": text,
+        }
+        # Only include parse_mode when it's a valid string. Telegram rejects
+        # `parse_mode: null` with "400 Bad Request: unsupported parse_mode".
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
         r = requests.post(
             f"{API_BASE}/editMessageText",
-            json={
-                "chat_id": chat_id,
-                "message_id": message_id,
-                "text": text,
-                "parse_mode": parse_mode,
-            },
+            json=payload,
             timeout=10,
         )
-        return r.json().get("ok", False)
+        data = r.json()
+        if data.get("ok"):
+            return True
+        # Log the actual Telegram API error for diagnosis.
+        print(f"[bot] edit_message API error: {data.get('error_code')} {data.get('description', '')[:200]}", flush=True)
+        return False
     except Exception as e:
         print(f"[bot] edit error: {e}")
     return False
@@ -1034,7 +1049,13 @@ def handle_message(chat_id: str, text: str, sender_name: str = "", photo_file_id
                 working_id = send_message(chat_id, "🔍 _Analysing image\u2026_")
                 with _MultimodalActivity(), TypingKeepAlive(chat_id, action="upload_photo"):
                     from core.inference.model import infer_with_image
-                    reply = infer_with_image(local_path, text or "Describe this image.")
+                    # Force the LOCAL Gemma E2B slot (no cloud credits available)
+                    # and cap max_new_tokens to match the proven-working `look`/
+                    # describe path. This skips the cloud attempt entirely (which
+                    # 402s without credits) and avoids the native-slot hang seen
+                    # with large token budgets, so the description returns promptly.
+                    reply = infer_with_image(local_path, text or "Describe this image.",
+                                             max_new_tokens=1024, force_local=True)
                 # Raise on error strings so except block handles them cleanly
                 if isinstance(reply, str) and reply.startswith(("[model_server", "[model_client", "[model_server timeout]")):
                     raise RuntimeError(reply)
@@ -1058,10 +1079,16 @@ def handle_message(chat_id: str, text: str, sender_name: str = "", photo_file_id
                 history.append({"role": "user", "content": _img_user_content})
                 history.append({"role": "assistant", "content": _img_summary})
                 _memory_mod.save(history, chat_id=str(chat_id))
-                if working_id and not edit_message(chat_id, working_id, f"🐬 {reply}"):
-                    send_message(chat_id, f"🐬 {reply}")
+                print(f"[bot] photo: reply len={len(reply)} working_id={working_id}", flush=True)
+                if working_id and not edit_message(chat_id, working_id, f"🐬 {reply}", parse_mode=None):
+                    print(f"[bot] photo: edit_message failed — falling back to send_message", flush=True)
+                    _sent = send_message(chat_id, f"🐬 {reply}", parse_mode=None)
+                    print(f"[bot] photo: send_message result={_sent}", flush=True)
+                else:
+                    print(f"[bot] photo: edit_message ok (or working_id None)", flush=True)
             except Exception as e:
                 err = f"🐬 Vision error: {str(e)[:200]}"
+                print(f"[bot] photo EXCEPTION: {type(e).__name__}: {e}", flush=True)
                 if working_id and not edit_message(chat_id, working_id, err):
                     send_message(chat_id, err)
                 try:
