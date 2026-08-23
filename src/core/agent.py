@@ -391,6 +391,23 @@ def triage(text: str, step_callback=None, _evo_retry: bool = False, chat_id: str
     _ctx_disp = "unbounded" if _unbounded_context else _ctx_tokens
     print(f"[agent] chat_id={chat_id!r} history={len(_history)} turns ctx_tokens={_ctx_disp} last={_hist_summary[-2:] if _hist_summary else []}", flush=True)
 
+    # ── Helper-answerer fast-path (ADR-015, closes the field-context loop) ──
+    # The progressive-disclosure block injected by build_system_prompt describes
+    # which expertise field is hot, but nothing steered the tool loop toward the
+    # field's skills without a search_skills round-trip. The helper-answerer
+    # appends an actionable "prefer this skill" hint so the model's FIRST tool
+    # choice is biased toward the active field. It never executes or suppresses
+    # a tool call — the model still calls search_skills/run_skill as tools
+    # (feed, don't bypass; ADR-022). Returns "" (no-op) when no field matches.
+    try:
+        from core.expansions.expertise_field_bridge import helper_answer as _helper_answer
+        _helper_hint = _helper_answer(chat_id=chat_id, text=text)
+        if _helper_hint:
+            system_prompt = system_prompt + "\n\n## Helper-answerer\n" + _helper_hint
+            print(f"[agent] helper-answerer hint applied ({len(_helper_hint)} chars)", flush=True)
+    except Exception as _hint_err:
+        print(f"[agent] helper-answerer skipped (non-fatal): {_hint_err}", flush=True)
+
     messages = [
         {"role": "system", "content": system_prompt},
         *[

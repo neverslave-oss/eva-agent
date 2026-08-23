@@ -251,3 +251,68 @@ def debug_snapshot(chat_id: str = "", query: str = ""):
             "hot_fields": {},
             "routed": None,
         }
+
+
+# ── Helper-answerer fast-path (closes the loop) ────────────────────────────
+def helper_answer(chat_id: str = "", text: str = "") -> str:
+    """Fast-path helper that makes the injected field context ACTIONABLE.
+
+    This is the piece that closes the loop the progressive-disclosure block
+    alone cannot: inject_field_context() tells the model *which* field is hot,
+    but nothing steered the tool loop toward the field's skills without doing
+    the (costly) search_skills round-trip. helper_answer() pre-surfaces the
+    specific dominant skill + knowledge pointer for the current request.
+
+    Semantics (ADR-015 "feed, don't bypass", ADR-022 tool-first):
+        * Returns a ONE-LINE actionable hint like:
+              "Prefer skill open-agentic-investor (field finance) — KB: docs/finance.md"
+        * The model STILL calls search_skills/run_skill as tools — we never
+          execute or suppress anything; we only bias the starting point.
+        * Returns "" (no hint) when the sidecar is unavailable OR no field
+          strongly matches — in which case the loop behaves exactly as before.
+
+    The hint is appended to the system prompt ONLY for requests that reach the
+    tool-first pipeline (ADR-022), so it cannot intercept or block any path.
+    """
+    if not _ensure_loaded():
+        return ""
+    if not (text and text.strip()):
+        return ""
+    try:
+        hot_ids, candidates = _sidecar.router.choose_fields(
+            text, _registry, _state, chat_id=chat_id
+        )
+        if not hot_ids or not candidates:
+            return ""
+        # Pick the first hot field that actually has a candidate skill to drive.
+        for fid in hot_ids:
+            field = _registry.field(fid)
+            if not field:
+                continue
+            fname = field.get("name", fid)
+            kb = field.get("knowledge_base") or []
+            kb_ref = ""
+            for entry in kb[:1]:
+                if isinstance(entry, dict):
+                    kb_ref = str(entry.get("path") or entry.get("namespace") or "")
+                elif isinstance(entry, str):
+                    kb_ref = entry
+                if kb_ref:
+                    break
+            skill = candidates[0] if candidates else ""
+            hint = f"Helper-answerer fast path → field: {fname}"
+            if skill:
+                hint += f", preferred skill: {skill}"
+            if kb_ref:
+                hint += f", kb: {kb_ref}"
+            return hint + " (call search_skills/run_skill as usual; this only biases the starting point. feed, don't bypass.)"
+        return ""
+    except Exception as e:
+        try:
+            import logging
+            logging.getLogger("kernel.evo").warning(
+                "expertise-field helper_answer failed (%s); no-op", e
+            )
+        except Exception:
+            pass
+        return ""

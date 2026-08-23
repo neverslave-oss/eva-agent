@@ -95,3 +95,26 @@ def test_debug_snapshot_reports_registry_and_routing():
     assert "open-agentic-investor" in snap["routed"]["candidate_skills"]
     # Per-chat hot state snapshot
     assert isinstance(snap["hot_fields"], dict)
+
+
+def test_helper_answer_steers_toward_field_skill():
+    """The helper-answerer fast path emits an actionable 'prefer this skill'
+    hint for a field-matching request (closes the loop on injected context)."""
+    hint = bridge.helper_answer(chat_id="chat-ha", text="help me rebalance my investment portfolio")
+    assert isinstance(hint, str)
+    assert hint != ""
+    assert "finance" in hint.lower() or "Finance" in hint
+    # It surfaces the field's dominant skill so the tool loop is biased.
+    assert "open-agentic-investor" in hint or "skill" in hint
+    # Feed, don't bypass — explicitly tells the model to still use the tools.
+    assert "search_skills" in hint
+
+
+def test_helper_answer_noop_without_match():
+    """No field match → empty hint → the loop behaves exactly as before."""
+    assert bridge.helper_answer(chat_id="chat-nm", text="zzzqqqxyznonsense") == ""
+
+
+def test_helper_answer_noop_on_empty_text():
+    """No request text → no hint (defensive)."""
+    assert bridge.helper_answer(chat_id="chat-em", text="  ") == ""
