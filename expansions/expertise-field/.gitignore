@@ -1,0 +1,26 @@
+# Runtime state — per-chat hot-field store (design decision #2: JSON)
+# Generated at runtime; do not commit.
+hot_fields.json
+*.hot.json
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+
+# Local env
+.env
+# Data artifacts — contain raw session conversation text + sourced memory snippets.
+# These are derived from personal/potentially-sensitive session data and must NOT
+# be committed to this (open-source) repository. Regenerate locally as needed.
+models/datasets/
+*.raw_seed.jsonl
+*.embedded_seed.jsonl
+
+# Private local notes (user-specific orientation / goals) — never committed.
+.private/
+*.local.md
+STATE.md

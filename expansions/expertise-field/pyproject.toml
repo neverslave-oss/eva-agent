@@ -1,0 +1,16 @@
+[project]
+name = "expertise-field"
+version = "0.1.0"
+description = "Modular capability-expansion layer for Kernel-Evo (expertise_field module)"
+requires-python = ">=3.10"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["expertise_field"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

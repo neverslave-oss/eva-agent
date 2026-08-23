@@ -1,0 +1,6 @@
+{
+  "active": ["plant-science"],
+  "fields": [
+    {"id": "plant-science", "path": "fields/plant-science.json", "version": "1.0.0"}
+  ]
+}
