@@ -626,6 +626,15 @@ def execute_tool(name: str, arguments: dict, workspace: str = WORKSPACE, chat_id
                 ]
             else:
                 matches = all_skills
+            # Expertise-field bias (ADR-015/ADR-022): re-order matches so the
+            # active field's domain skills float to top. "Feed, don't bypass" —
+            # never drops non-field matches, only reorders.
+            if matches:
+                try:
+                    from core.expansions.expertise_field_bridge import reorder_matches as _reorder
+                    matches = _reorder(query, matches, chat_id=_current_chat_id)
+                except Exception:
+                    pass
             if not matches:
                 return f"No skills match '{query}'. Try a broader term or empty string to list all."
             lines = [f"Found {len(matches)} skill(s) matching '{query}':" if query else f"{len(matches)} skills installed:"]

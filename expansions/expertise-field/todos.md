@@ -30,7 +30,20 @@ Tracking build progress. "done" items were verified via tests/commits.
 - [x] **[MILESTONE] Bootstrap field discovery validated (REAL data, 593 rows):** distinct disciplines emerge when coverage exists (finance sil 0.405, media/content sil 0.347); hack correctly converges to main engineering; weak spots are cold-start artifacts, not design failures. Design graduates from "seed snapshot" to **living discovery engine** driven by think-at-rest expansion.
 - [x] **Dedicated module ADR added:** `docs/adr/ADR-015-expertise-field-module.md` — records the architectural decision for later wiring into kernel-evolving source (next ADR number after kernel ADR-014).
 - [x] **SPEC Part 8 updated** with milestone close-out + ADR reference.
-- [x] **Plots embedded for reference** — cluster discovery plots committed under `models/datasets/` (`fields_discovery_plot.png`, `fields_discovery_revised.png`, `fields_discovery_audit.png`, `fields_discovery_labeled.png`).
+- [x] **Plots embedded for reference**
+- [x] **Kernel bridge layer (ADDITIVE, ADR-022-compatible):** `src/core/expansions/`
+      — `expertise_field_bridge.py` (loader + `inject_field_context` + `reorder_matches`),
+      5 integration tests green. Safe no-op when sidecar absent; never blocks boot.
+- [x] **Context-provider seam wired:** `build_system_prompt` now injects an
+      `## Active expertise fields` progressive-disclosure block (ADR-015/ADR-022).
+      Verified end-to-end: finance-triggering task -> Finance & Investment hot
+      field + domain skills + KB pointers appear in the system prompt.
+- [x] **search_skills bias wired:** `tools.py` `search_skills` re-orders matches so
+      the active field's domain skills float to top. "Feed, don't bypass" — never
+      drops non-field matches.
+- [x] **ADR-022 conflict resolved in code:** integration is a CONTEXT PROVIDER, not a
+      pre-triage interceptor (recorded in ADR-015 commit `f2f00e5`).
+ — cluster discovery plots committed under `models/datasets/` (`fields_discovery_plot.png`, `fields_discovery_revised.png`, `fields_discovery_audit.png`, `fields_discovery_labeled.png`).
 
 ## OPEN (real work remaining)
 - [ ] **Wire live collection** — integrate `collector.py` into Kernel-Evo's session loop so
@@ -45,7 +58,14 @@ Tracking build progress. "done" items were verified via tests/commits.
       back into `skills↔domains` index (register finance/media/engineering as fields).
 - [ ] **Map discovered clusters → skills↔domains index** — register real fields with skills.
 - [ ] **Wire `/debug/fields` endpoint** into live kernel on integration.
-- [ ] **Wiring into kernel-evolving workspace** (sidecar mount, per deployment target).
+- [ ] **Live-matcher regression on merged branch:** confirm the context-provider seam
+      + search_skills bias don't regress real triage() tool-call flow once merged+live.
+- [ ] **Merge `feature/expertise-field-integration` to dev + restart** (user-governed) so
+      the kernel bridge becomes live (currently inert on the feature branch).
+- [ ] **Wiring into kernel-evolving workspace (LIVE):** sidecar + kernel bridge are
+      staged on `feature/expertise-field-integration` (2 commits above dev) + this
+      bridge commit. Pending: merge to dev + restart of the running process (port 8779
+      is still on dev, so the integration is inert until restart).
 
 ## Decisions locked (for reference)
 - Router FEEDS skill matcher, never bypasses (decision #3)
