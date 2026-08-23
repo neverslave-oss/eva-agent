@@ -1,7 +1,7 @@
 # ADR.md — Kernel-Evolving Architecture Decision Records
 
-**Last updated:** 2026-06-12
-**Version:** v1.18.5-evolving
+**Last updated:** 2026-08-23
+**Version:** v1.0.0-evolving
 **Model:** Nemotron-Labs-Diffusion-3B (4-bit, 64k context)
 **Port:** 8779 | **Socket:** `/tmp/kernel_evolving_model.sock`
 
@@ -91,6 +91,14 @@ GET /health                                  — model loaded + slot status
 | [012](#adr-012) | Async Pipeline | Implemented | Background job queue with TTL |
 | [013](#adr-013) | Multi-Provider + Trajectories | Proposed | Inference routing, trajectory collection, HF fine-tune loop |
 | [014](#adr-014) | ADR-to-Codebase Diffusion | Proposed | Prompt → ADR → codebase via DiffusionGemma (separate project) |
+| [015](#adr-015) | Agent Auto-Discovery | Proposed | Peer kernels, OpenClaw, coding agents — agent discovery + peer routing |
+| [016](#adr-016) | Self-Evolution Completeness | Proposed | Completeness checks for the self-evolution loop |
+| [017](#adr-017) | Voice Model Routing | Proposed | Adaptive model switching for voice requests |
+| [018](#adr-018) | Named Model Slots | Accepted | Named model slots (primary, audio) for deterministic routing |
+| [019](#adr-019) | Think-at-Rest Observer + Critique | Accepted | Observer layer, critique layer, closed-loop evolution |
+| [020](#adr-020) | User-Request-Anchored Evolution | Proposed | Evolution anchored to user requests with human-confirmation reward |
+| [021](#adr-021) | Tier 2 Approval Gate | Accepted | Human-approval gate before Tier 2 skill synthesis install |
+| [022](#adr-022) | Unified Tool-First Pipeline | Proposed | Unified tool-first pipeline for task execution |
 
 ---
 

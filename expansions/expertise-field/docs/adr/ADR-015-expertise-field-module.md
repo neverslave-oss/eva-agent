@@ -1,9 +1,9 @@
 # ADR-015 — Expertise Field Module (Capability-on-Demand)
 
 **Date:** 2026-08-23
-**Status:** Proposed (isolated build in `repositories/expertise-field/`; pending wiring into kernel-evolving)
+**Status:** Implemented (wired into kernel-evolving as a sidecar capability; live on `feature/expertise-field-integration`)
 **Author:** Kernel-Evo 🐬 - collaborative design
-**Repo:** `repositories/expertise-field/`
+**Repo:** `repositories/expertise-field/` (isolated build) → `expansions/expertise-field/` (integrated sidecar)
 **Companion spec:** `SPEC.md` (this ADR summarises the architectural decision; the spec carries full detail)
 
 ---
