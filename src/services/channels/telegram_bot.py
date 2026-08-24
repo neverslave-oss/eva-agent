@@ -498,6 +498,33 @@ def _curated_slot_for_repo(repo_id: str) -> str:
     return ""
 
 
+# ── Short callback tokens (XP7) ──────────────────────────────────────────────
+# Telegram inline callback_data is limited to 64 bytes, so embedding a full HF
+# repo_id (e.g. "google/gemma-4-E2B-it") can exceed the limit and Telegram
+# rejects the button with BUTTON_DATA_INVALID. We instead use short opaque
+# tokens in callback_data and resolve them to repo ids here, server-side.
+
+_LOCAL_REPO_TOKENS: dict = {}  # token -> repo_id
+
+
+def _register_repo_token(repo_id: str) -> str:
+    """Return a short token for a repo_id, registering it if not already present.
+
+    Tokens are stable per repo_id within this process: 'lm0', 'lm1', ...
+    """
+    for tok, rid in _LOCAL_REPO_TOKENS.items():
+        if rid == repo_id:
+            return tok
+    tok = f"lm{len(_LOCAL_REPO_TOKENS)}"
+    _LOCAL_REPO_TOKENS[tok] = repo_id
+    return tok
+
+
+def _resolve_repo_token(token: str) -> str:
+    """Resolve a short token back to a repo_id, or return the token unchanged."""
+    return _LOCAL_REPO_TOKENS.get(token, token)
+
+
 # ── Cloud model catalog for guided /cloud flow ─────────────────────────────
 # Models are fetched dynamically from /provider/models API endpoint.
 # This gives live model lists from OpenRouter and reasonable defaults
@@ -2056,7 +2083,9 @@ def handle_message(chat_id: str, text: str, sender_name: str = "", photo_file_id
                     tag = m.get("pipeline_tag") or "unknown"
                     dl = m.get("downloads") or 0
                     lines.append(f"\U0001f4e6 `{mid}`\n   _{tag} \u00b7 {dl} downloads_")
-                    buttons.append([{"text": f"\u23ec Pull {mid}", "callback_data": f"/models pull {mid}"}])
+                    # Use a short token to stay under Telegram's 64-byte callback limit.
+                    tok = _register_repo_token(mid)
+                    buttons.append([{"text": f"\u23ec Pull {mid}", "callback_data": f"/models pull {tok}"}])
                 buttons.append([{"text": "\U0001f9e0 Back to models", "callback_data": "/models"}])
                 send_buttons(chat_id, "\n".join(lines), buttons)
             except Exception as e:
@@ -2064,11 +2093,13 @@ def handle_message(chat_id: str, text: str, sender_name: str = "", photo_file_id
             return
 
         elif sub == "pull":
-            # /models pull <repo_id> — pull an arbitrary model via /pull (background)
-            repo_id = " ".join(parts[2:]).strip()
-            if not repo_id:
+            # /models pull <repo_id|token> — pull an arbitrary model via /pull (background)
+            raw = " ".join(parts[2:]).strip()
+            if not raw:
                 send_message(chat_id, "Usage: `/models pull <repo_id>` e.g. `/models pull Qwen/Qwen2.5-Omni-3B`")
                 return
+            # Resolve a short callback token back to the full repo id.
+            repo_id = _resolve_repo_token(raw)
             try:
                 import urllib.request as _ur_p
                 payload = json.dumps({"model": repo_id}).encode()
@@ -2475,11 +2506,12 @@ def handle_message(chat_id: str, text: str, sender_name: str = "", photo_file_id
             call_type_or_all = parts[2].lower()
             provider_name    = parts[3].lower()
             persist_change = any(p.lower() in ("persist", "--persist") for p in parts[4:])
-            # Detect "persist|assign|<repo_id>" suffix → also assign the local model.
+            # Detect "persist|assign|<token>" suffix → also assign the local model.
             assign_repo = ""
             for p in parts[4:]:
                 if "|assign|" in p:
-                    assign_repo = p.split("|assign|", 1)[1].strip()
+                    _tok = p.split("|assign|", 1)[1].strip()
+                    assign_repo = _resolve_repo_token(_tok)  # token → repo_id
                     break
             try:
                 import urllib.request as _ur
@@ -2574,9 +2606,11 @@ def handle_message(chat_id: str, text: str, sender_name: str = "", photo_file_id
                     fit = _vram_fit_mark(est_gb, vram_free)
                     icon = "\u2705" if dl else "\u23ec"
                     lines.append(f"{icon} {label} `{repo}` {fit}")
+                    # Use a short token to stay under Telegram's 64-byte callback limit.
+                    tok = _register_repo_token(repo)
                     buttons.append([{
                         "text": f"{icon} {label}",
-                        "callback_data": f"/provider set {call_type} local persist|assign|{repo}",
+                        "callback_data": f"/provider set {call_type} local persist|assign|{tok}",
                     }])
                 buttons.append([
                     {"text": "\U0001f50d Search Hub for more", "callback_data": f"/models search "},
