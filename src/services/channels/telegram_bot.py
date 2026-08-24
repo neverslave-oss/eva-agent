@@ -450,6 +450,54 @@ def _get_current_model_label() -> str:
         return "local model"
 
 
+# ── Local model VRAM-fit helpers (XP7) ──────────────────────────────────────
+# Used by the /provider local picker to flag models that likely fit the GPU's
+# free VRAM. Estimates are rough (params × bytes-per-param + overhead) — the
+# real fit depends on dtype, quantization, and context length.
+
+def _estimate_model_gb(repo_id: str) -> float:
+    """Rough model-size estimate in GB from the repo id (params → bytes).
+
+    Heuristic: parse a known param-count marker in the repo id (e.g. 0.8B, 3B,
+    7B, 30B). Falls back to 4GB when unknown. Multiply params by ~2 bytes/param
+    (bf16) and add ~1GB overhead; quantized 4-bit models use far less, so this
+    is intentionally conservative (a "fits" flag is safe).
+    """
+    import re as _re
+    m = _re.search(r"(\d+(?:\.\d+)?)[bB]\b", repo_id)
+    if not m:
+        return 4.0
+    params_b = float(m.group(1))
+    gb = params_b * 2.0 + 1.0  # ~2 bytes/param (bf16) + overhead
+    return round(gb, 1)
+
+
+def _vram_fit_mark(est_gb: float, vram_free_mb: int) -> str:
+    """Return a short emoji marker showing whether a model likely fits free VRAM."""
+    if vram_free_mb <= 0:
+        return ""
+    free_gb = vram_free_mb / 1024.0
+    if est_gb <= free_gb * 0.9:
+        return "\U0001f7e2"  # green — fits comfortably
+    if est_gb <= free_gb * 1.5:
+        return "\U0001f7e1"  # yellow — tight / may need quantization
+    return "\U0001f534"      # red — likely too big for free VRAM
+
+
+def _curated_slot_for_repo(repo_id: str) -> str:
+    """Return the default model_slots entry for a curated repo id, or '' if none."""
+    try:
+        import urllib.request as _ur_c
+        with _ur_c.urlopen(f"http://localhost:{8779}/models/curated", timeout=5) as _rc:
+            curated = (json.loads(_rc.read()) or {}).get("curated", [])
+        for cm in curated:
+            if (cm.get("repo_id") or "").lower() == repo_id.lower():
+                return cm.get("slot") or ""
+    except Exception:
+        pass
+    return ""
+
+
 # ── Cloud model catalog for guided /cloud flow ─────────────────────────────
 # Models are fetched dynamically from /provider/models API endpoint.
 # This gives live model lists from OpenRouter and reasonable defaults
@@ -2422,9 +2470,17 @@ def handle_message(chat_id: str, text: str, sender_name: str = "", photo_file_id
 
         elif sub == "set" and len(parts) >= 4:
             # /provider set <calltype> <provider>  OR  /provider set all <provider>
+            # Optionally with a trailing "persist|assign|<repo_id>" token from the
+            # /provider local picker, which also assigns the chosen model to a slot.
             call_type_or_all = parts[2].lower()
             provider_name    = parts[3].lower()
             persist_change = any(p.lower() in ("persist", "--persist") for p in parts[4:])
+            # Detect "persist|assign|<repo_id>" suffix → also assign the local model.
+            assign_repo = ""
+            for p in parts[4:]:
+                if "|assign|" in p:
+                    assign_repo = p.split("|assign|", 1)[1].strip()
+                    break
             try:
                 import urllib.request as _ur
                 valid_providers = {"local", "openai", "anthropic", "hf", "copilot", "openrouter"}
@@ -2442,7 +2498,27 @@ def handle_message(chat_id: str, text: str, sender_name: str = "", photo_file_id
                 with _ur.urlopen(req, timeout=3) as r:
                     result = json.loads(r.read())
                 persisted_label = " (persisted)" if result.get("persisted") else " (runtime only)"
-                send_message(chat_id, f"\u2705 Provider updated{persisted_label}: `{result['changed']}`")
+                reply = f"\u2705 Provider updated{persisted_label}: `{result['changed']}`"
+
+                # XP7: if a local model was chosen from the picker, assign it to its slot.
+                if assign_repo and provider_name == "local":
+                    slot = _curated_slot_for_repo(assign_repo)
+                    if slot:
+                        try:
+                            apayload = json.dumps({"repo_id": assign_repo, "slot": slot}).encode()
+                            areq = _ur.Request(f"http://localhost:{8779}/models/assign",
+                                               data=apayload, headers={"Content-Type": "application/json"}, method="POST")
+                            with _ur.urlopen(areq, timeout=5) as ar:
+                                adata = json.loads(ar.read())
+                            if adata.get("error"):
+                                reply += f"\n\u26a0\ufe0f Assign to slot `{slot}` failed: {adata['error']}"
+                            else:
+                                reply += f"\n\u2705 Assigned `{assign_repo}` \u2192 slot `{slot}`"
+                        except Exception as _ae:
+                            reply += f"\n\u26a0\ufe0f Assign request failed: {_ae}"
+                    else:
+                        reply += f"\n\u26a0\ufe0f No slot mapping for `{assign_repo}` \u2014 use `/models assign {assign_repo} <slot>`"
+                send_message(chat_id, reply)
             except Exception as e:
                 send_message(chat_id, f"\u274c {e}")
 
@@ -2451,7 +2527,7 @@ def handle_message(chat_id: str, text: str, sender_name: str = "", photo_file_id
             call_type = parts[2]
             buttons = [
                 [
-                    {"text": "\U0001f3e0 local",       "callback_data": f"/provider set {call_type} local persist"},
+                    {"text": "\U0001f3e0 local",       "callback_data": f"/provider local {call_type}"},
                     {"text": "\U0001f916 openai",      "callback_data": f"/provider set {call_type} openai persist"},
                     {"text": "\U0001f9e0 anthropic",   "callback_data": f"/provider set {call_type} anthropic persist"},
                 ],[
@@ -2463,6 +2539,53 @@ def handle_message(chat_id: str, text: str, sender_name: str = "", photo_file_id
                 ]
             ]
             send_buttons(chat_id, f"Swap `{call_type}` to:", buttons)
+
+        elif sub == "local" and len(parts) >= 3:
+            # XP7: local model picker — curated models shown as inline buttons,
+            # with a VRAM-fit indicator, plus Hub search for RAM-compatible models.
+            call_type = parts[2]
+            try:
+                import urllib.request as _ur_l, os as _os_l
+                # Curated local models from the new /models/curated endpoint.
+                curated = []
+                try:
+                    with _ur_l.urlopen(f"http://localhost:{8779}/models/curated", timeout=5) as _rc:
+                        curated = (json.loads(_rc.read()) or {}).get("curated", [])
+                except Exception:
+                    pass
+                # Available VRAM (MB) from /health.
+                vram_free = 0
+                try:
+                    with _ur_l.urlopen(f"http://localhost:{8779}/health", timeout=5) as _rh:
+                        vram_free = int((json.loads(_rh.read()) or {}).get("vram_free_mb", 0) or 0)
+                except Exception:
+                    pass
+
+                lines = [f"\U0001f3e0 *Local Model Picker* \u2014 `{call_type}`",
+                         f"VRAM free: `{vram_free} MB`\n"]
+                buttons = []
+                for cm in curated:
+                    repo = cm.get("repo_id", "")
+                    label = cm.get("label") or repo
+                    dl = cm.get("downloaded", False)
+                    # Rough VRAM fit estimate: assume ~2 bytes/param + overhead;
+                    # flag models likely too big for current free VRAM.
+                    est_gb = _estimate_model_gb(repo)
+                    fit = _vram_fit_mark(est_gb, vram_free)
+                    icon = "\u2705" if dl else "\u23ec"
+                    lines.append(f"{icon} {label} `{repo}` {fit}")
+                    buttons.append([{
+                        "text": f"{icon} {label}",
+                        "callback_data": f"/provider set {call_type} local persist|assign|{repo}",
+                    }])
+                buttons.append([
+                    {"text": "\U0001f50d Search Hub for more", "callback_data": f"/models search "},
+                    {"text": "\u2190 Back", "callback_data": "/provider"},
+                ])
+                send_buttons(chat_id, "\n".join(lines), buttons)
+            except Exception as e:
+                send_message(chat_id, f"\u274c Local picker error: {e}")
+            return
 
         elif sub == "collect" and len(parts) >= 3:
             val = parts[2].lower() == "true"
