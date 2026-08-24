@@ -309,6 +309,39 @@ def infer_with_audio(
         return f"[model_client error] {e}"
 
 
+def infer_local(
+    messages: list,
+    max_new_tokens: int = 8192,
+    slot: str = "audio",
+    ) -> str:
+    """Local-slot text inference via model server.
+
+    Targets a named local model slot (default "audio" = Gemma 4 E2B-it) directly,
+    bypassing cloud provider routing. Used by Think-at-Rest so idle thoughts run
+    on a resident/lazy-loadable local model even when `task_inference` is a cloud
+    provider (e.g. `hf`). The server lazy-loads the slot on first use.
+    """
+    try:
+        resp_lines = _call({
+            "method": "infer_local",
+            "params": {
+                "messages": messages,
+                "max_new_tokens": max_new_tokens,
+                "slot": slot,
+            },
+        })
+        if resp_lines:
+            resp = resp_lines[0]
+            if "error" in resp:
+                return f"[model_server error] {resp['error']}"
+            return resp.get("result", "")
+        return ""
+    except TimeoutError as e:
+        return f"[model_server timeout] {e}"
+    except Exception as e:
+        return f"[model_client error] {e}"
+
+
 def vram_free_mb() -> int:
     """Return free VRAM in MB via model server."""
     try:

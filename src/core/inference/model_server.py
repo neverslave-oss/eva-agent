@@ -2587,6 +2587,95 @@ def _handle_infer_with_audio(params: dict) -> dict:
     return {"result": result}
 
 
+def _handle_infer_local(params: dict) -> dict:
+    """Local-slot text inference for Think-at-Rest.
+
+    Runs plain-text chat inference against a named local model slot (default
+    "audio" = Gemma 4 E2B-it), independent of cloud provider routing. This is
+    what lets idle thoughts run on a resident/lazy-loadable local model even
+    when `task_inference` is a cloud provider (e.g. `hf`).
+
+    The slot is lazy-loaded on first use via _ensure_multimodal_slot() (same
+    pattern as vision/STT). Do NOT call _ensure_model() here — that would load
+    the cloud-only primary text model, which is unnecessary and can fail when
+    the main model path is a cloud-only config.
+    """
+    slot = params.get("slot", "audio")
+    messages = params.get("messages", [])
+    max_new_tokens = params.get("max_new_tokens", 8192)
+
+    if isinstance(messages, str):
+        messages = [{"role": "user", "content": messages}]
+    if not isinstance(messages, list):
+        return {"error": f"'messages' must be a list, got {type(messages).__name__}"}
+
+    # ── Resolve the slot model/processor ─────────────────────────────────────
+    active_model = None
+    active_processor = None
+
+    # Prefer a registered named slot (e.g. "audio" wired into the SlotRegistry).
+    if _slot_registry is not None:
+        try:
+            _state = _slot_registry.get(slot)
+            if _state is not None:
+                active_model = _state.model
+                active_processor = _state.processor
+                print(f"[model_server] infer_local: using named slot {slot!r}", flush=True)
+        except Exception as _e:
+            print(f"[model_server] infer_local: slot {slot!r} lookup failed ({_e})", flush=True)
+
+    # Fallback: lazy-load the multimodal slot (Gemma 4 E2B-it).
+    if active_model is None or active_processor is None:
+        try:
+            _ensure_multimodal_slot()
+        except Exception as e:
+            print(f"[model_server] infer_local: multimodal slot load failed ({e})", flush=True)
+        if _mm_model is not None and _mm_processor is not None:
+            active_model = active_model or _mm_model
+            active_processor = active_processor or _mm_processor
+            print("[model_server] infer_local: using multimodal slot (Gemma 4)", flush=True)
+
+    if active_model is None or active_processor is None:
+        return {"error": "no local slot available (multimodal slot failed to load)"}
+
+    # ── Plain-text chat inference against the slot ───────────────────────────
+    import torch
+    try:
+        text = active_processor.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
+        )
+    except Exception as e:
+        return {"error": f"apply_chat_template failed: {e}"}
+
+    target_device = next(active_model.parameters()).device
+    target_dtype = next(active_model.parameters()).dtype
+    inputs = active_processor(text=text, return_tensors="pt").to(target_device)
+    # Align floating tensors to model dtype to avoid BFloat16/Float mismatch.
+    for k, v in list(inputs.items()):
+        if hasattr(v, "dtype") and hasattr(v, "to"):
+            if torch.is_floating_point(v):
+                inputs[k] = v.to(device=target_device, dtype=target_dtype)
+            else:
+                inputs[k] = v.to(device=target_device)
+    input_len = inputs["input_ids"].shape[-1]
+
+    _mark_activity_start()
+    try:
+        with torch.no_grad():
+            _gen_kwargs = dict(
+                max_new_tokens=max_new_tokens,
+                do_sample=True,
+                temperature=0.8,
+                top_p=0.95,
+                top_k=64,
+            )
+            out = active_model.generate(**inputs, **_gen_kwargs)
+    finally:
+        _mark_activity_end()
+    result = active_processor.decode(out[0][input_len:], skip_special_tokens=True).strip()
+    return {"result": result}
+
+
 # ── Cloud multimodal routing for audio/vision ──────────────────────────────
 # Exposed as config flags: providers.stt / providers.vision / providers.tts in config.yaml.
 # When set to a cloud provider ("openrouter", "openai"), the handler calls the
@@ -3110,6 +3199,10 @@ class _RequestHandler(socketserver.StreamRequestHandler):
 
             elif method == "infer_with_audio":
                 resp = _handle_infer_with_audio(params)
+                send_line(json.dumps(resp))
+
+            elif method == "infer_local":
+                resp = _handle_infer_local(params)
                 send_line(json.dumps(resp))
 
             elif method == "vram_free_mb":
