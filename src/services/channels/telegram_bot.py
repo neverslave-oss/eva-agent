@@ -1813,6 +1813,9 @@ def handle_message(chat_id: str, text: str, sender_name: str = "", photo_file_id
                 else:
                     buttons.append([{"text": f"\u23ec Download {info['label']}", "callback_data": f"/models download {key}"}])
             buttons.append([{"text": "\U0001f504 Reload current", "callback_data": "/models reload"}])
+            # XP7: search + pull arbitrary models from HF Hub
+            buttons.append([{"text": "\U0001f50d Search Hub", "callback_data": "/models search "},
+                            {"text": "\u23ec Pull model", "callback_data": "/models pull "}])
             # If Nemotron is active, add mode-switch buttons
             if h.get("nemotron"):
                 cur_mode = h.get("nemotron_mode", "?")
@@ -1986,13 +1989,106 @@ def handle_message(chat_id: str, text: str, sender_name: str = "", photo_file_id
                 send_message(chat_id, f"\u274c {e}")
             return
 
+        elif sub == "search":
+            # /models search <query> — search HuggingFace Hub via /hub/search
+            query = " ".join(parts[2:]).strip()
+            try:
+                import urllib.request as _ur_s, urllib.parse as _up
+                url = f"http://localhost:{8779}/hub/search?q={_up.quote(query)}&limit=10"
+                with _ur_s.urlopen(url, timeout=15) as _r:
+                    data = json.loads(_r.read())
+                results = data.get("models", [])
+                if not results:
+                    send_message(chat_id, f"\U0001f50d No Hub results for `{query}`")
+                    return
+                lines = [f"\U0001f50d *Hub Search: {query}*\n"]
+                buttons = []
+                for m in results[:10]:
+                    mid = m.get("id", "")
+                    tag = m.get("pipeline_tag") or "unknown"
+                    dl = m.get("downloads") or 0
+                    lines.append(f"\U0001f4e6 `{mid}`\n   _{tag} \u00b7 {dl} downloads_")
+                    buttons.append([{"text": f"\u23ec Pull {mid}", "callback_data": f"/models pull {mid}"}])
+                buttons.append([{"text": "\U0001f9e0 Back to models", "callback_data": "/models"}])
+                send_buttons(chat_id, "\n".join(lines), buttons)
+            except Exception as e:
+                send_message(chat_id, f"\u274c Hub search failed: {e}")
+            return
+
+        elif sub == "pull":
+            # /models pull <repo_id> — pull an arbitrary model via /pull (background)
+            repo_id = " ".join(parts[2:]).strip()
+            if not repo_id:
+                send_message(chat_id, "Usage: `/models pull <repo_id>` e.g. `/models pull Qwen/Qwen2.5-Omni-3B`")
+                return
+            try:
+                import urllib.request as _ur_p
+                payload = json.dumps({"model": repo_id}).encode()
+                req = _ur_p.Request(f"http://localhost:{8779}/pull",
+                                    data=payload, headers={"Content-Type": "application/json"}, method="POST")
+                with _ur_p.urlopen(req, timeout=5) as _r:
+                    data = json.loads(_r.read())
+                job_id = data.get("job_id", "")
+                send_message(chat_id,
+                    f"\u23ec Pulling `{repo_id}` in background (job `{job_id[:8]}\u2026`)\n"
+                    f"I'll ping you when it finishes. Then assign to a slot with `/models assign {repo_id} <slot>`.")
+                # Poll in a background thread and notify on completion.
+                import threading as _thr_p
+                def _watch(jid=job_id, rid=repo_id):
+                    import time as _tp
+                    for _ in range(600):
+                        _tp.sleep(3)
+                        try:
+                            with _ur_p.urlopen(f"http://localhost:{8779}/jobs/{jid}", timeout=5) as _rj:
+                                j = json.loads(_rj.read())
+                            st = j.get("status", "running")
+                            if st == "succeeded":
+                                send_message(chat_id, f"\u2705 Pulled `{rid}`\nUse `/models assign {rid} <slot>` to assign.")
+                                return
+                            if st == "failed":
+                                send_message(chat_id, f"\u274c Pull of `{rid}` failed: {j.get('error')}")
+                                return
+                        except Exception:
+                            continue
+                    send_message(chat_id, f"\u23f3 Pull of `{rid}` still running \u2014 check later.")
+                _thr_p.Thread(target=_watch, daemon=True).start()
+            except Exception as e:
+                send_message(chat_id, f"\u274c Pull request failed: {e}")
+            return
+
+        elif sub == "assign":
+            # /models assign <repo_id> <slot> — assign a pulled model to a named slot
+            parts_a = text.split()
+            if len(parts_a) < 4:
+                send_message(chat_id, "Usage: `/models assign <repo_id> <slot>` e.g. `/models assign Qwen/Qwen2.5-Omni-3B audio`")
+                return
+            repo_id = parts_a[2].strip()
+            slot = parts_a[3].strip()
+            try:
+                import urllib.request as _ur_a
+                payload = json.dumps({"repo_id": repo_id, "slot": slot}).encode()
+                req = _ur_a.Request(f"http://localhost:{8779}/models/assign",
+                                    data=payload, headers={"Content-Type": "application/json"}, method="POST")
+                with _ur_a.urlopen(req, timeout=5) as _r:
+                    data = json.loads(_r.read())
+                if data.get("error"):
+                    send_message(chat_id, f"\u274c Assign failed: {data['error']}")
+                    return
+                send_message(chat_id, f"\u2705 Assigned `{repo_id}` \u2192 slot `{slot}`\nIt will lazy-load on first use.")
+            except Exception as e:
+                send_message(chat_id, f"\u274c Assign request failed: {e}")
+            return
+
         else:
             send_message(chat_id, "Usage:\n"
                 "`/models` — show menu\n"
                 "`/models load e2b|e4b|nemotron3b` — hot-swap model (unloads current first)\n"
                 "`/models mode ar|diffusion|linear_spec` — switch Nemotron generation mode\n"
                 "`/models reload` — reload current\n"
-                "`/models download nemotron3b` — download from HuggingFace")
+                "`/models download nemotron3b` — download from HuggingFace\n"
+                "`/models search <query>` — search HuggingFace Hub\n"
+                "`/models pull <repo_id>` — pull any model from Hub (background)\n"
+                "`/models assign <repo_id> <slot>` — assign pulled model to a model_slots entry")
             return
     # ─────────────────────────────────────────────────────────────────────────
 
