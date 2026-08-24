@@ -70,7 +70,7 @@ def test_thought_evaluator_discards_low_score():
         {"thought": "Borderline", "score": 0.39, "category": "self_improvement", "promote": False},
     ])
 
-    with patch("core.inference.model_client.infer", return_value=mock_response), \
+    with patch("core.inference.model_client.infer_local", return_value=mock_response), \
          patch("core.inference.model_client.is_server_running", return_value=True):
         evaluator = ThoughtEvaluator(min_score=0.4)
         results = evaluator.evaluate(["thought1", "thought2", "thought3"])
@@ -84,7 +84,7 @@ def test_thought_evaluator_returns_empty_on_model_error():
     """ThoughtEvaluator should return [] when model returns error."""
     from services.thought_engine import ThoughtEvaluator
 
-    with patch("core.inference.model_client.infer", return_value="[model_server error] connection refused"):
+    with patch("core.inference.model_client.infer_local", return_value="[model_server error] connection refused"):
         evaluator = ThoughtEvaluator()
         results = evaluator.evaluate(["some thought"])
 
@@ -95,7 +95,7 @@ def test_thought_evaluator_handles_invalid_json():
     """ThoughtEvaluator should return [] on malformed JSON."""
     from services.thought_engine import ThoughtEvaluator
 
-    with patch("core.inference.model_client.infer", return_value="not valid json at all"):
+    with patch("core.inference.model_client.infer_local", return_value="not valid json at all"):
         evaluator = ThoughtEvaluator()
         results = evaluator.evaluate(["some thought"])
 
@@ -110,7 +110,7 @@ def test_thought_evaluator_normalises_unknown_category():
         {"thought": "Unusual", "score": 0.7, "category": "weird_unknown_category", "promote": True},
     ])
 
-    with patch("core.inference.model_client.infer", return_value=mock_response), \
+    with patch("core.inference.model_client.infer_local", return_value=mock_response), \
          patch("core.inference.model_client.is_server_running", return_value=True):
         evaluator = ThoughtEvaluator(min_score=0.4)
         results = evaluator.evaluate(["unusual thought"])

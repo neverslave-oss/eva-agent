@@ -195,11 +195,13 @@ class ThoughtGenerator:
             logger.error(f"[ThoughtGenerator] infer_draft error: {e}")
 
         if not raw or raw.startswith("[model_"):
-            logger.warning(f"[ThoughtGenerator] drafter unavailable, falling back to main infer: {raw!r}")
+            logger.warning(f"[ThoughtGenerator] drafter unavailable, falling back to local slot: {raw!r}")
             try:
-                raw = model_client.infer(messages, max_new_tokens=8192)
+                # Priority #0: run thoughts on a resident/lazy-loadable local slot
+                # (Gemma 4 E2B-it) so idle reflection works even in cloud mode.
+                raw = model_client.infer_local(messages, max_new_tokens=8192, slot="audio")
             except Exception as e:
-                logger.error(f"[ThoughtGenerator] fallback infer error: {e}")
+                logger.error(f"[ThoughtGenerator] local slot infer error: {e}")
                 return []
 
         if not raw or raw.startswith("[model_"):
@@ -249,9 +251,9 @@ class ThoughtEvaluator:
         ]
 
         try:
-            raw = model_client.infer(messages, max_new_tokens=8192)
+            raw = model_client.infer_local(messages, max_new_tokens=8192, slot="audio")
         except Exception as e:
-            logger.error(f"[ThoughtEvaluator] infer error: {e}")
+            logger.error(f"[ThoughtEvaluator] local slot infer error: {e}")
             return []
 
         if not raw or raw.startswith("[model_"):
@@ -337,6 +339,20 @@ class ThinkAtRest:
             import core.inference.model_client as model_client
             health = model_client.health()
             return bool(health.get("main_model_loaded", False))
+        except Exception:
+            return False
+
+    def _local_slot_available(self) -> bool:
+        """Return True when the local thought slot can be used for idle thoughts.
+
+        Priority #0: idle thoughts run on a resident/lazy-loadable local slot
+        (Gemma 4 E2B-it, the `audio` slot), independent of the cloud text
+        provider. The slot is lazy-loaded on first use by `infer_local()`, so
+        this only needs to confirm the model server is running.
+        """
+        try:
+            import core.inference.model_client as model_client
+            return model_client.is_server_running()
         except Exception:
             return False
 
@@ -657,8 +673,13 @@ class ThinkAtRest:
         self._run_identity_consolidator()
 
         # ── Curiosity: real exploration → LLM insight ──
-        if not self._main_model_loaded():
-            logger.debug("[ThinkAtRest] model not loaded — skipping curiosity generation")
+        # Priority #0: the old hard `_main_model_loaded()` gate blocked all
+        # curiosity in cloud mode (no resident primary model). Replace it with a
+        # local-slot-available check: if the model server is running, the local
+        # thought slot (Gemma 4 E2B-it) will be lazy-loaded on first use by
+        # infer_local(). Skip only if the server is not running at all.
+        if not self._local_slot_available():
+            logger.debug("[ThinkAtRest] no local slot available (model server not running) — skipping curiosity generation")
             return
 
         # Only generate if exploration data actually changed since last cycle
