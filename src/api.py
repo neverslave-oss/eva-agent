@@ -51,6 +51,7 @@ _IDLE_BYPASS_PATHS = {
     "/debug/prompt-logs", "/debug/prompt-log", "/debug/trajectories", "/debug/chat-history",
     "/debug/fields",
     "/provider", "/provider/available",
+    "/models", "/models/curated", "/models/assign", "/pull", "/hub/search", "/jobs",
     "/memory/files", "/memory/file", "/memory/stats", "/workspace/tree",
     "/memory/file/rename", "/memory/file/new",
     "/sqlite/tables", "/sqlite/table", "/sqlite/row", "/sqlite/table/data", "/sqlite/db/data",
@@ -2060,6 +2061,269 @@ def get_provider_models(provider: str = "", capability: str = "text"):
         result[prov] = mlist
 
     return {"capability": capability, "models": result}
+
+
+# ── Local model management (Priority #7) ───────────────────────────────────
+# Mirrors the pull/list/search/jobs mechanism from ai-server-py
+# (src/routes/models.py), adapted for kernel-evolving's slot registry.
+# Local models are stored in the HF hub-cache layout under HF_HOME/hub.
+
+_pull_jobs: dict[str, dict] = {}  # job_id → job state dict (in-memory, like pipeline jobs)
+
+# Curated local-model catalog: model_slots defaults + multimodal candidates.
+# Extends config.yaml `model_catalog` with slots + omni candidates.
+def _curated_local_models() -> list[dict]:
+    """Return a curated list of local models available to pull/assign."""
+    curated = [
+        {"repo_id": "google/gemma-4-E2B-it", "label": "Gemma 4 E2B (2.3B)", "slot": "audio", "multimodal": True},
+        {"repo_id": "google/gemma-4-E4B-it", "label": "Gemma 4 E4B (4.5B)", "slot": None, "multimodal": True},
+        {"repo_id": "nvidia/Nemotron-Labs-Diffusion-3B", "label": "Nemotron-Diffusion 3B", "slot": "primary", "multimodal": False},
+        {"repo_id": "Qwen/Qwen2.5-Omni-3B", "label": "Qwen2.5-Omni 3B", "slot": "audio", "multimodal": True},
+        {"repo_id": "Qwen/Qwen3-VL-2B-Instruct", "label": "Qwen3-VL 2B Instruct", "slot": None, "multimodal": True},
+        {"repo_id": "deepseek-ai/Janus-Pro-7B", "label": "Janus-Pro 7B (vision)", "slot": None, "multimodal": True},
+    ]
+    return curated
+
+
+def _local_model_scan() -> list[dict]:
+    """Scan the HF hub-cache layout for locally downloaded models."""
+    try:
+        from core.hf_cache import resolve_hf_hub_dir
+        hub = resolve_hf_hub_dir()
+    except Exception:
+        hub = None
+    models: list[dict] = []
+    seen: set = set()
+    roots: list[str] = []
+    if hub and os.path.isdir(hub):
+        roots.append(str(hub))
+    # Also scan configured model_slots paths (may be under KERNEL_EVO_HF_HUB).
+    try:
+        slots = (_cfg.get("model_slots", {}) or {}) if isinstance(_cfg, dict) else {}
+        for name, slot in slots.items():
+            p = (slot or {}).get("model_path")
+            if p and os.path.isdir(p):
+                roots.append(str(p))
+    except Exception:
+        pass
+
+    for root in roots:
+        if not os.path.isdir(root):
+            continue
+        for entry in os.listdir(root):
+            full = os.path.join(root, entry)
+            if not os.path.isdir(full):
+                continue
+            if entry.startswith("models--"):
+                repo_id = entry[len("models--"):].replace("--", "/")
+            else:
+                repo_id = entry
+            if repo_id in seen:
+                continue
+            seen.add(repo_id)
+            size = 0
+            for r2, _, fs2 in os.walk(full):
+                for f2 in fs2:
+                    try:
+                        size += os.path.getsize(os.path.join(r2, f2))
+                    except Exception:
+                        pass
+            # Which configured slot points here?
+            slot_name = None
+            try:
+                slots = (_cfg.get("model_slots", {}) or {}) if isinstance(_cfg, dict) else {}
+                for name, slot in slots.items():
+                    sp = (slot or {}).get("model_path") or ""
+                    if sp and os.path.realpath(os.path.expanduser(sp)) == os.path.realpath(full):
+                        slot_name = name
+                        break
+            except Exception:
+                pass
+            models.append({
+                "model": repo_id,
+                "local_path": full,
+                "size_bytes": size,
+                "slot": slot_name,
+                "downloaded": True,
+            })
+    return models
+
+
+@app.get("/models")
+def list_models():
+    """List locally downloaded models (HF hub-cache scan + configured slots)."""
+    local = _local_model_scan()
+    curated = _curated_local_models()
+    # Mark which curated models are already downloaded.
+    downloaded_ids = {m["model"].lower() for m in local}
+    for c in curated:
+        c["downloaded"] = c["repo_id"].lower() in downloaded_ids
+    return {"models": local, "curated": curated}
+
+
+@app.get("/models/curated")
+def curated_models():
+    """Return the curated local-model catalog (pull + assign candidates)."""
+    local = _local_model_scan()
+    downloaded_ids = {m["model"].lower() for m in local}
+    curated = _curated_local_models()
+    for c in curated:
+        c["downloaded"] = c["repo_id"].lower() in downloaded_ids
+    return {"curated": curated}
+
+
+@app.get("/hub/search")
+def hub_search(q: str = "", limit: int = 20):
+    """Search HuggingFace Hub for models to pull. Uses HfApi.list_models."""
+    try:
+        from huggingface_hub import HfApi
+    except Exception as e:
+        return JSONResponse({"error": f"huggingface_hub not available: {e}"}, status_code=500)
+    try:
+        api = HfApi()
+        limit = max(1, min(int(limit), 50))
+        if q.strip():
+            models = api.list_models(search=q.strip(), limit=limit)
+        else:
+            models = api.list_models(limit=limit)
+        results = [
+            {
+                "id": m.modelId,
+                "pipeline_tag": getattr(m, "pipeline_tag", None),
+                "downloads": getattr(m, "downloads", None),
+                "likes": getattr(m, "likes", None),
+            }
+            for m in models
+        ]
+        return {"models": results}
+    except Exception as e:
+        return JSONResponse({"error": f"Hub search failed: {e}"}, status_code=502)
+
+
+@app.post("/pull")
+async def pull_model(body: dict):
+    """Download a model from HuggingFace Hub in the background.
+
+    Body: {model: "repo_id", init?: bool}. Returns {status, job_id}.
+    Poll GET /jobs/{job_id} for progress. Mirrors ai-server-py /pull.
+    """
+    model_name = (body.get("model") or "").strip()
+    if not model_name:
+        return JSONResponse({"error": "Missing 'model'"}, status_code=400)
+    try:
+        from huggingface_hub import snapshot_download
+    except Exception as e:
+        return JSONResponse({"error": f"huggingface_hub not available: {e}"}, status_code=500)
+
+    job_id = str(uuid.uuid4())
+    now = time.time()
+    _pull_jobs[job_id] = {
+        "job_id": job_id,
+        "model": model_name,
+        "status": "queued",
+        "created_at": now,
+        "started_at": None,
+        "finished_at": None,
+        "error": None,
+        "local_path": None,
+        "size_bytes": None,
+    }
+
+    async def _background_pull(jid: str, repo_id: str):
+        job = _pull_jobs.get(jid)
+        if job is None:
+            return
+        job["status"] = "running"
+        job["started_at"] = time.time()
+        try:
+            from core.hf_cache import resolve_hf_cache_root
+            token = os.environ.get("HF_TOKEN", "")
+            cache_dir = resolve_hf_cache_root()
+            path = await asyncio.to_thread(
+                snapshot_download, repo_id=repo_id, cache_dir=cache_dir,
+                token=token, ignore_patterns=["*.gguf"],
+            )
+            job["local_path"] = path
+            sz = 0
+            for r2, _, fs2 in os.walk(path):
+                for f2 in fs2:
+                    try:
+                        sz += os.path.getsize(os.path.join(r2, f2))
+                    except Exception:
+                        pass
+            job["size_bytes"] = sz
+            job["status"] = "succeeded"
+            job["finished_at"] = time.time()
+        except Exception as e:
+            job["status"] = "failed"
+            job["error"] = str(e)
+            job["finished_at"] = time.time()
+
+    asyncio.create_task(_background_pull(job_id, model_name))
+    return {"status": "accepted", "job_id": job_id}
+
+
+@app.get("/jobs/{job_id}")
+def get_pull_job(job_id: str):
+    """Poll a background pull job's progress."""
+    job = _pull_jobs.get(job_id)
+    if job is None:
+        return JSONResponse({"error": "job not found"}, status_code=404)
+    return job
+
+
+@app.post("/models/assign")
+def assign_model_to_slot(body: dict):
+    """Assign a pulled local model to a named model_slots entry.
+
+    Body: {slot: "audio", repo_id?: "google/gemma-4-E2B-it", local_path?: "/abs/path"}.
+    Writes config.yaml model_slots.<slot>.model_path. The slot remains lazy-loaded
+    on first use (no forced load).
+    """
+    slot = (body.get("slot") or "").strip()
+    repo_id = (body.get("repo_id") or "").strip()
+    local_path = (body.get("local_path") or "").strip()
+    if not slot:
+        return JSONResponse({"error": "Missing 'slot'"}, status_code=400)
+
+    # Resolve the local path: explicit path, or find the pulled snapshot for repo_id.
+    if not local_path and repo_id:
+        for m in _local_model_scan():
+            if m["model"].lower() == repo_id.lower():
+                local_path = m["local_path"]
+                break
+    if not local_path:
+        return JSONResponse(
+            {"error": "Model not downloaded locally. Pull it first (POST /pull) or provide local_path."},
+            status_code=404,
+        )
+
+    # Persist to config.yaml model_slots.<slot>.model_path.
+    cfg_path = os.path.join(_BASE, "config.yaml")
+    try:
+        with open(cfg_path) as f:
+            on_disk = yaml.safe_load(f) or {}
+    except Exception as e:
+        return JSONResponse({"error": f"Could not read config.yaml: {e}"}, status_code=500)
+
+    on_disk.setdefault("model_slots", {})
+    on_disk["model_slots"].setdefault(slot, {})
+    on_disk["model_slots"][slot]["model_path"] = local_path
+    if "role" not in on_disk["model_slots"][slot]:
+        on_disk["model_slots"][slot]["role"] = slot
+    try:
+        with open(cfg_path, "w") as f:
+            yaml.dump(on_disk, f, default_flow_style=False, allow_unicode=True)
+    except Exception as e:
+        return JSONResponse({"error": f"Could not write config.yaml: {e}"}, status_code=500)
+
+    # Update in-memory config too.
+    global _cfg
+    _cfg.setdefault("model_slots", {})
+    _cfg["model_slots"].setdefault(slot, {})
+    _cfg["model_slots"][slot]["model_path"] = local_path
+
+    return {"ok": True, "slot": slot, "local_path": local_path, "repo_id": repo_id}
 
 
 @app.get("/evolution/trajectories")
