@@ -492,9 +492,19 @@ class ThinkAtRest:
         if not self._is_idle:
             self._is_idle = True
             logger.info("[ThinkAtRest] entered idle state")
-        # Check if enough time has passed since last think cycle
+
+        # Priority #6 (delta-aware cadence): the clock is a FLOOR, not the sole
+        # driver. A changed performance signal is the primary event trigger — if
+        # the anomaly state changed since the last cycle, run immediately (subject
+        # to a short minimum-interval floor to avoid thundering). Otherwise fall
+        # back to the regular cadence so slow drift (e.g. RAM creep) is still caught.
         elapsed = time.monotonic() - self._last_think_time
-        if elapsed >= self._thought_interval_s:
+        min_floor_s = min(self._thought_interval_s, 300.0)
+        try:
+            perf_changed = bool(self._gather_performance_signals())
+        except Exception:
+            perf_changed = False
+        if elapsed >= self._thought_interval_s or (perf_changed and elapsed >= min_floor_s):
             self._run_think_cycle()
 
     def _get_triggered_probe_seeds(self) -> list[str]:
@@ -617,7 +627,14 @@ class ThinkAtRest:
 
     def _gather_performance_signals(self) -> list[dict]:
         """Return real self-improvement signals from metrics.
+
         Each is {message, metric, severity}. Returns empty list if nothing notable.
+
+        Priority #6 (state-change suppression): a signal is only emitted when its
+        underlying value *changes* since the last cycle (or crosses a threshold
+        boundary). A confirmed anomaly that merely persists at the same value is
+        NOT re-emitted — otherwise the same observation is re-journaled every
+        cycle (the "uniform heartbeat" failure mode).
         """
         signals = []
         try:
@@ -625,12 +642,22 @@ class ThinkAtRest:
             if self._observer is not None:
                 active = self._observer._probe_store.list_active()
                 old_probes = [p for p in active if p.get("created_at")]
-                if len(old_probes) > 10:
+                probe_count = len(old_probes)
+                metric = "stuck_probes"
+                last = getattr(self, "_last_signal_values", {}).get(metric)
+                # Emit only when the count changed, or crossed the threshold
+                # (>10) for the first time. Persist the last-observed value so
+                # a stable count goes quiet.
+                if probe_count > 10 and (
+                    last is None or last <= 10 or probe_count != last
+                ):
                     signals.append({
-                        "message": f"{len(old_probes)} active probes accumulating — may indicate unresolved patterns",
-                        "metric": "stuck_probes",
+                        "message": f"{probe_count} active probes accumulating — may indicate unresolved patterns",
+                        "metric": metric,
                         "severity": 0.75,
                     })
+                self._last_signal_values = getattr(self, "_last_signal_values", {})
+                self._last_signal_values[metric] = probe_count
         except Exception:
             pass
         return signals
