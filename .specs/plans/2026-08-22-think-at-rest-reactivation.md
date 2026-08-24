@@ -173,12 +173,26 @@ fired ~12×/day at the same score).
 > - **kernel-evolving** `src/api.py`: `GET /models`, `GET /models/curated`, `GET /hub/search`,
 >   `POST /pull` (background job), `GET /jobs/{id}`, `POST /models/assign`. Mirrors
 >   ai-server-py, adapted for the slot registry. New paths added to `_IDLE_BYPASS_PATHS`.
-> - **kernel-desktop-v1** (branch `feature/local-model-selection`): `Settings.php` +
->   `settings.blade.php` — "Local Model Management" section in the Model Storage tab with
->   downloaded-models list, curated catalog (Pull / assign-to-slot), and Hub search.
-> - **Telegram bot** `telegram_bot.py`: `/models search <q>`, `/models pull <repo_id>`,
->   `/models assign <repo_id> <slot>` + Search Hub / Pull buttons in the `/models` menu.
-> Tests: `tests/test_api.py` (33) + related thought tests (51) — all green.
+> - **kernel-desktop-v1** (branch `feature/local-model-selection`, merged to `main`):
+>   `Settings.php` + `settings.blade.php` — "Local Model Management" section in the Model
+>   Storage tab with downloaded-models list, curated catalog (Pull / assign-to-slot), and
+>   Hub search.
+> - **Telegram bot** `telegram_bot.py`: unified `/models` + `/provider` flow — `/models`
+>   shows a provider selector; `/models provider <name>` lists that provider's models
+>   (local = pulled/curated with Use/Pull buttons; cloud = model list routed to
+>   `task_inference` with optional `model_override`). Short opaque callback tokens
+>   (`lm0`, `lm1`) keep buttons under Telegram's 64-byte `callback_data` limit.
+> - **Dedicated models folder + portability (final cleanup):**
+>   - `runtime_paths.MODELS_DIR = WORKSPACE_ROOT/models` (added to `MANAGED_DIRS`).
+>   - `POST /pull` now downloads into `MODELS_DIR` (not the shared HF cache), so
+>     kernel-evolving's own pulled models are stored separately and incompatible
+>     shared-cache models (FLUX, TTS voices, etc.) never appear in the local list.
+>   - `_local_model_scan()` scans only `MODELS_DIR` (+ its `hub` subdir) and configured
+>     `model_slots` paths — NOT the whole shared HF cache.
+>   - `GET /models?with_size=true` computes sizes lazily via a portable,
+>     bounded `os.scandir` walk (no `du -sb`, works on Linux/macOS/Windows).
+> Tests: `tests/test_api.py` (33) + related thought tests (51) + full suite
+> (707 passed) — all green.
 
 Make local model management usable from the **desktop app** (kernel-desktop-v1) by adding
 REST endpoints to **kernel-evolving** that mirror the proven pull mechanism in the
