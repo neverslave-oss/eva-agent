@@ -1558,16 +1558,21 @@ def handle_message(chat_id: str, text: str, sender_name: str = "", photo_file_id
             f"🏠 **/local** — load Nemotron-3B locally for inference. "
             f"STT/vision/voice all work. Skill synthesis and planning go to cloud.\n\n"
             f"☁️ **/cloud** — everything runs through cloud providers. "
-            f"Zero local VRAM used. No STT/voice/vision (no local model loaded)."
+            f"Zero local VRAM used. No STT/voice/vision (no local model loaded).\n\n"
+            f"🎛️ **/models** — pick a provider and its model (local pulls on demand).\n"
+            f"🗺️ **/provider** — routing table for each call type."
         )
         buttons = [
             # ─ Mode selection
             [{"text": "🏠 /local — load Nemotron", "callback_data": "/local"},
              {"text": "☁️ /cloud — all cloud", "callback_data": "/cloud"}],
+            # ─ Models & Provider
+            [{"text": "🎛️ Models", "callback_data": "/models"},
+             {"text": "🗺️ Provider", "callback_data": "/provider"}],
             # ─ Chat & Inference
             [{"text": "🧠 Status", "callback_data": "/status"}, {"text": "💭 Thoughts", "callback_data": "/thoughts"}],
             # ─ Skills & Routines
-            [{"text": "🔧 Skills", "callback_data": "/skills"}, {"text": "⚙️ Routines", "callback_data": "/routines"}, {"text": "🎛️ Provider", "callback_data": "/provider"}],
+            [{"text": "🔧 Skills", "callback_data": "/skills"}, {"text": "⚙️ Routines", "callback_data": "/routines"}],
             # ─ Replicas
             [{"text": "🤖 List replicas", "callback_data": "/replica list"}, {"text": "➕ Spawn", "callback_data": "/replica spawn"}, {"text": "👥 Clone", "callback_data": "/replica clone"}],
             [{"text": "⏹ Stop replica", "callback_data": "/replica stop"}, {"text": "🗂️ Workspaces", "callback_data": "/workspaces"}],
@@ -1851,7 +1856,7 @@ def handle_message(chat_id: str, text: str, sender_name: str = "", photo_file_id
             return False
 
         if sub == "" or sub == "menu":
-            # Show current model + swap buttons
+            # Unified model manager: show active provider/model + provider selector.
             try:
                 import core.inference.model_client as _mc
                 h = _mc.health()
@@ -1860,8 +1865,6 @@ def handle_message(chat_id: str, text: str, sender_name: str = "", photo_file_id
             except Exception:
                 current, vram = "unknown", 0
 
-            # Check which models are downloaded
-            # Also fetch provider routing so we can show active task_inference
             _prov_data = {}
             try:
                 import urllib.request as _ur2
@@ -1872,25 +1875,29 @@ def handle_message(chat_id: str, text: str, sender_name: str = "", photo_file_id
             except Exception:
                 _task_provider, _task_model = "?", ""
 
-            lines = [f"\U0001f916 *Model Manager*\n",
-                     f"Task inference: `{_task_provider}`" + (f" / `{_task_model}`" if _task_model else ""),
-                     f"Local model: `{current}`",
-                     f"VRAM free: {vram} MB\n"]
-            buttons = []
-            for key, info in KNOWN_MODELS.items():
-                downloaded = _is_downloaded(info)
-                icon = "\u2705" if downloaded else "\u23ec"
-                active = "\u25b6 " if current and info["label"].split(" ")[0].lower() in current.lower() else ""
-                note = f" \u2022 {info['note']}" if info.get("note") else ""
-                lines.append(f"{icon} {active}{info['label']}{note}")
-                if downloaded:
-                    buttons.append([{"text": f"\U0001f504 Load {info['label']}", "callback_data": f"/models load {key}"}])
-                else:
-                    buttons.append([{"text": f"\u23ec Download {info['label']}", "callback_data": f"/models download {key}"}])
-            buttons.append([{"text": "\U0001f504 Reload current", "callback_data": "/models reload"}])
-            # XP7: search + pull arbitrary models from HF Hub
-            buttons.append([{"text": "\U0001f50d Search Hub", "callback_data": "/models search "},
-                            {"text": "\u23ec Pull model", "callback_data": "/models pull "}])
+            _provider_icons = {"local": "\U0001f3e0", "openai": "\U0001f916", "anthropic": "\U0001f9e0",
+                               "hf": "\U0001f917", "copilot": "\u26a1", "openrouter": "\U0001f310"}
+            _prov_icon = _provider_icons.get(_task_provider, "\U0001f4e1")
+
+            lines = [
+                f"\U0001f916 *Model Manager*\n",
+                f"{_prov_icon} Task inference: `{_task_provider}`" + (f" / `{_task_model}`" if _task_model else ""),
+                f"\U0001f4be Local model loaded: `{current}`",
+                f"\U0001f5a5 VRAM free: `{vram} MB`\n",
+                "*Select a provider to pick its model:*",
+            ]
+            buttons = [
+                # Provider selector — each opens that provider's model list
+                [{"text": "\U0001f3e0 Local", "callback_data": "/models provider local"},
+                 {"text": "\U0001f916 OpenAI", "callback_data": "/models provider openai"}],
+                [{"text": "\U0001f9e0 Anthropic", "callback_data": "/models provider anthropic"},
+                 {"text": "\U0001f917 HF", "callback_data": "/models provider hf"}],
+                [{"text": "\u26a1 Copilot", "callback_data": "/models provider copilot"},
+                 {"text": "\U0001f310 OpenRouter", "callback_data": "/models provider openrouter"}],
+                # Local management
+                [{"text": "\U0001f504 Reload current", "callback_data": "/models reload"},
+                 {"text": "\U0001f50d Search Hub", "callback_data": "/models search "}],
+            ]
             # If Nemotron is active, add mode-switch buttons
             if h.get("nemotron"):
                 cur_mode = h.get("nemotron_mode", "?")
@@ -1900,24 +1907,118 @@ def handle_message(chat_id: str, text: str, sender_name: str = "", photo_file_id
                     {"text": "Diffusion",   "callback_data": "/models mode diffusion"},
                     {"text": "\u26a1 linear_spec", "callback_data": "/models mode linear_spec"},
                 ])
-            # Cloud provider model catalog
-            _model_catalog = _prov_data.get("model_catalog", {})
-            if _model_catalog:
-                lines.append("\n\U0001f310 *Cloud Provider Models*")
-                _provider_icons = {"openai": "\U0001f916", "anthropic": "\U0001f9e0", "hf": "\U0001f917",
-                                   "copilot": "\u26a1", "openrouter": "\U0001f310", "local": "\U0001f3e0", "olly": "\U0001f916"}
-                for prov, model in _model_catalog.items():
-                    if model and prov not in ("local", "openrouter_tool"):
-                        icon = _provider_icons.get(prov, "\U0001f4e1")
-                        active_marker = " \u25b6" if prov == _task_provider else ""
-                        lines.append(f"{icon} `{prov}` \u2192 `{model}`{active_marker}")
-                # openrouter_tool separate line
-                if _model_catalog.get("openrouter_tool"):
-                    lines.append(f"\U0001f310 `openrouter_tool` \u2192 `{_model_catalog['openrouter_tool']}`")
-                # Quick-set openrouter for task_inference
-                buttons.append([{"text": "\U0001f310 Use OpenRouter for task",
-                                  "callback_data": "/provider set task_inference openrouter persist"}])
             send_buttons(chat_id, "\n".join(lines), buttons)
+            return
+
+        elif sub == "provider" and len(parts) >= 3:
+            # /models provider <name> — show that provider's selectable models.
+            provider = parts[2].lower()
+            if provider == "local":
+                # Local picker: actual pulled models (selectable) + curated unpulled (pull).
+                try:
+                    import urllib.request as _ur_l
+                    # Pulled local models from /models
+                    local_models = []
+                    try:
+                        with _ur_l.urlopen(f"http://localhost:{8779}/models", timeout=5) as _rm:
+                            local_models = (json.loads(_rm.read()) or {}).get("models", [])
+                    except Exception:
+                        pass
+                    # Curated catalog from /models/curated (marks which are downloaded)
+                    curated = []
+                    try:
+                        with _ur_l.urlopen(f"http://localhost:{8779}/models/curated", timeout=5) as _rc:
+                            curated = (json.loads(_rc.read()) or {}).get("curated", [])
+                    except Exception:
+                        pass
+                    downloaded_ids = {m.get("model", "").lower() for m in local_models}
+
+                    lines = ["\U0001f3e0 *Local Models*\n"]
+                    buttons = []
+
+                    # 1) Downloaded models — always surfaced, never empty.
+                    pulled = [m for m in local_models if m.get("model")]
+                    if pulled:
+                        lines.append("*✅ Downloaded (tap to use):*")
+                        for m in pulled:
+                            repo = m.get("model", "")
+                            slot = m.get("slot") or ""
+                            lines.append(f"\u2705 `{repo}`" + (f" \u2192 slot `{slot}`" if slot else ""))
+                            tok = _register_repo_token(repo)
+                            buttons.append([{"text": f"\U0001f504 Use {repo}", "callback_data": f"/models use {tok}"}])
+                    else:
+                        lines.append("*\u2139\ufe0f No models downloaded yet.*\n_Pull one below or search the Hub._")
+
+                    # 2) Curated models not yet pulled → pull.
+                    unpulled = [c for c in curated if c.get("repo_id", "").lower() not in downloaded_ids]
+                    if unpulled:
+                        lines.append("\n*📥 Not downloaded (pull to use):*")
+                        for cm in unpulled:
+                            repo = cm.get("repo_id", "")
+                            label = cm.get("label") or repo
+                            lines.append(f"\u23ec `{repo}`")
+                            tok = _register_repo_token(repo)
+                            buttons.append([{"text": f"\u23ec Pull {label}", "callback_data": f"/models pull {tok}"}])
+
+                    # 3) Search Hub to find + download more locally.
+                    buttons.append([
+                        {"text": "\U0001f50d Search Hub", "callback_data": "/models search "},
+                        {"text": "\U0001f504 Refresh", "callback_data": "/models provider local"},
+                        {"text": "\u2190 Back", "callback_data": "/models"},
+                    ])
+                    send_buttons(chat_id, "\n".join(lines), buttons)
+                except Exception as e:
+                    send_message(chat_id, f"\u274c Local models error: {e}")
+                return
+
+            # Cloud provider: show that provider's available models from /provider/models.
+            try:
+                import urllib.request as _ur_c
+                with _ur_c.urlopen(f"http://localhost:{8779}/provider/models?provider={provider}&capability=text", timeout=8) as _rc:
+                    data = json.loads(_rc.read())
+                models = (data.get("models", {}) or {}).get(provider, [])
+                if not models:
+                    send_message(chat_id, f"\u274c No models listed for provider `{provider}` (or it's unavailable).")
+                    return
+                _provider_icons = {"openai": "\U0001f916", "anthropic": "\U0001f9e0", "hf": "\U0001f917",
+                                   "copilot": "\u26a1", "openrouter": "\U0001f310"}
+                icon = _provider_icons.get(provider, "\U0001f4e1")
+                lines = [f"{icon} *{provider.title()} models*\n", "_Tap a model to route task_inference to it:_"]
+                buttons = []
+                for m in models[:12]:
+                    lines.append(f"\U0001f4e6 `{m}`")
+                    buttons.append([{"text": f"\U0001f504 Use {m}", "callback_data": f"/provider set task_inference {provider} persist|model|{m}"}])
+                buttons.append([{"text": "\u2190 Back", "callback_data": "/models"}])
+                send_buttons(chat_id, "\n".join(lines), buttons)
+            except Exception as e:
+                send_message(chat_id, f"\u274c Cloud models error: {e}")
+            return
+
+        elif sub == "use" and len(parts) >= 3:
+            # /models use <token> — set task_inference to local + load the pulled model.
+            repo_id = _resolve_repo_token(parts[2].strip())
+            slot = _curated_slot_for_repo(repo_id)
+            try:
+                import urllib.request as _ur_u
+                # Assign to slot if we know one, then route task_inference to local.
+                if slot:
+                    apayload = json.dumps({"repo_id": repo_id, "slot": slot}).encode()
+                    areq = _ur_u.Request(f"http://localhost:{8779}/models/assign",
+                                         data=apayload, headers={"Content-Type": "application/json"}, method="POST")
+                    try:
+                        with _ur_u.urlopen(areq, timeout=5):
+                            pass
+                    except Exception:
+                        pass
+                body = {"task_inference": "local", "persist": True}
+                payload = json.dumps(body).encode()
+                req = _ur_u.Request(f"http://localhost:{8779}/provider/set",
+                                    data=payload, headers={"Content-Type": "application/json"}, method="POST")
+                with _ur_u.urlopen(req, timeout=5) as r:
+                    result = json.loads(r.read())
+                send_message(chat_id, f"\u2705 Task inference \u2192 local (`{repo_id}`)" + (f" \u2192 slot `{slot}`" if slot else ""))
+            except Exception as e:
+                send_message(chat_id, f"\u274c Use failed: {e}")
             return
 
         elif sub == "load" and len(parts) >= 3:
@@ -2501,18 +2602,20 @@ def handle_message(chat_id: str, text: str, sender_name: str = "", photo_file_id
 
         elif sub == "set" and len(parts) >= 4:
             # /provider set <calltype> <provider>  OR  /provider set all <provider>
-            # Optionally with a trailing "persist|assign|<repo_id>" token from the
-            # /provider local picker, which also assigns the chosen model to a slot.
+            # Optionally with a trailing token from the model pickers:
+            #   "persist|assign|<token>" — local: also assign the chosen model to its slot.
+            #   "persist|model|<model>"  — cloud: also set a model_override for the call type.
             call_type_or_all = parts[2].lower()
             provider_name    = parts[3].lower()
             persist_change = any(p.lower() in ("persist", "--persist") for p in parts[4:])
-            # Detect "persist|assign|<token>" suffix → also assign the local model.
             assign_repo = ""
+            model_override = ""
             for p in parts[4:]:
                 if "|assign|" in p:
                     _tok = p.split("|assign|", 1)[1].strip()
                     assign_repo = _resolve_repo_token(_tok)  # token → repo_id
-                    break
+                elif "|model|" in p:
+                    model_override = p.split("|model|", 1)[1].strip()
             try:
                 import urllib.request as _ur
                 valid_providers = {"local", "openai", "anthropic", "hf", "copilot", "openrouter"}
@@ -2523,6 +2626,9 @@ def handle_message(chat_id: str, text: str, sender_name: str = "", photo_file_id
                     body = {ct: provider_name for ct in ("task_inference","synthesis","critic","planning","trajectory_teacher")}
                 else:
                     body = {call_type_or_all: provider_name}
+                # Apply a cloud model override if provided (e.g. from /models provider <cloud>).
+                if model_override:
+                    body["model_override"] = {call_type_or_all: model_override}
                 body["persist"] = persist_change
                 payload = json.dumps(body).encode()
                 req = _ur.Request(f"http://localhost:{8779}/provider/set",
@@ -2531,6 +2637,8 @@ def handle_message(chat_id: str, text: str, sender_name: str = "", photo_file_id
                     result = json.loads(r.read())
                 persisted_label = " (persisted)" if result.get("persisted") else " (runtime only)"
                 reply = f"\u2705 Provider updated{persisted_label}: `{result['changed']}`"
+                if model_override:
+                    reply += f"\n\U0001f4e6 Model override: `{model_override}`"
 
                 # XP7: if a local model was chosen from the picker, assign it to its slot.
                 if assign_repo and provider_name == "local":
@@ -2559,18 +2667,18 @@ def handle_message(chat_id: str, text: str, sender_name: str = "", photo_file_id
             call_type = parts[2]
             buttons = [
                 [
-                    {"text": "\U0001f3e0 local",       "callback_data": f"/provider local {call_type}"},
-                    {"text": "\U0001f916 openai",      "callback_data": f"/provider set {call_type} openai persist"},
-                    {"text": "\U0001f9e0 anthropic",   "callback_data": f"/provider set {call_type} anthropic persist"},
+                    {"text": "\U0001f3e0 local",       "callback_data": f"/models provider local"},
+                    {"text": "\U0001f916 openai",      "callback_data": f"/models provider openai"},
+                    {"text": "\U0001f9e0 anthropic",   "callback_data": f"/models provider anthropic"},
                 ],[
-                    {"text": "\U0001f917 hf",          "callback_data": f"/provider set {call_type} hf persist"},
-                    {"text": "\u26a1 copilot",         "callback_data": f"/provider set {call_type} copilot persist"},
-                    {"text": "\U0001f310 openrouter",  "callback_data": f"/provider set {call_type} openrouter persist"},
+                    {"text": "\U0001f917 hf",          "callback_data": f"/models provider hf"},
+                    {"text": "\u26a1 copilot",         "callback_data": f"/models provider copilot"},
+                    {"text": "\U0001f310 openrouter",  "callback_data": f"/models provider openrouter"},
                 ],[
                     {"text": "\u2190 Back",            "callback_data": "/provider"},
                 ]
             ]
-            send_buttons(chat_id, f"Swap `{call_type}` to:", buttons)
+            send_buttons(chat_id, f"Pick a provider for `{call_type}` \u2014 then choose its model:", buttons)
 
         elif sub == "local" and len(parts) >= 3:
             # XP7: local model picker — curated models shown as inline buttons,
