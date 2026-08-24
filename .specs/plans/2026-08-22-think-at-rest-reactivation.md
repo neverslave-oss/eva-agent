@@ -189,6 +189,15 @@ fired ~12×/day at the same score).
 >     shared-cache models (FLUX, TTS voices, etc.) never appear in the local list.
 >   - `_local_model_scan()` scans only `MODELS_DIR` (+ its `hub` subdir) and configured
 >     `model_slots` paths — NOT the whole shared HF cache.
+>   - **Curated "downloaded" detection (2026-08-24):** after the dedicated-folder
+>     change, `/models` showed "no models downloaded" even though compatible models
+>     (Gemma, Nemotron, Qwen) already existed in the shared HF cache. Fixed in two ways:
+>     (a) `_local_model_scan()` now surfaces each configured `model_slots` entry
+>     (deriving the repo id from its `models--org--repo` path), so Gemma (audio slot)
+>     and Qwen (tool_calling slot) show as ready; (b) curated models are marked
+>     `downloaded: true` if present in the shared HF hub-cache (`_repo_downloaded`),
+>     so Nemotron/E4B/Qwen-VL show as ready without pulling incompatible shared-cache
+>     models (FLUX, TTS) into the list.
 >   - `GET /models?with_size=true` computes sizes lazily via a portable,
 >     bounded `os.scandir` walk (no `du -sb`, works on Linux/macOS/Windows).
 > - **Deployment fix — lazy model server in cloud mode (`start.sh`, 2026-08-24):**
