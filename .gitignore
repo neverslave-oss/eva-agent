@@ -57,3 +57,5 @@ startup.log
 # npm artifacts (not part of this project)
 package.json
 package-lock.json
+
+hot_fields.json

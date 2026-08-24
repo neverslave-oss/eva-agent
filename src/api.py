@@ -2086,17 +2086,28 @@ def _curated_local_models() -> list[dict]:
 
 
 def _local_model_scan() -> list[dict]:
-    """Scan the HF hub-cache layout for locally downloaded models."""
+    """Scan kernel-evolving's dedicated models folder + configured slots.
+
+    Scans only MODELS_DIR (where /pull downloads) and the configured
+    model_slots paths — NOT the whole shared HF cache. This keeps the local
+    model list limited to agent-compatible models instead of every model the
+    user has cached (e.g. FLUX image models, TTS voices).
+    """
     try:
-        from core.hf_cache import resolve_hf_hub_dir
-        hub = resolve_hf_hub_dir()
+        from runtime_paths import MODELS_DIR
+        models_dir = str(MODELS_DIR)
     except Exception:
-        hub = None
+        models_dir = None
     models: list[dict] = []
     seen: set = set()
     roots: list[str] = []
-    if hub and os.path.isdir(hub):
-        roots.append(str(hub))
+    if models_dir and os.path.isdir(models_dir):
+        roots.append(models_dir)
+        # snapshot_download(cache_dir=MODELS_DIR) stores snapshots under
+        # MODELS_DIR/hub/models--org--repo, so also scan that subdir.
+        hub_sub = os.path.join(models_dir, "hub")
+        if os.path.isdir(hub_sub):
+            roots.append(hub_sub)
     # Also scan configured model_slots paths (may be under KERNEL_EVO_HF_HUB).
     try:
         slots = (_cfg.get("model_slots", {}) or {}) if isinstance(_cfg, dict) else {}
@@ -2112,7 +2123,14 @@ def _local_model_scan() -> list[dict]:
             continue
         for entry in os.listdir(root):
             full = os.path.join(root, entry)
+            # Skip hidden/lock dirs (e.g. .locks) which are not models.
+            if entry.startswith("."):
+                continue
             if not os.path.isdir(full):
+                continue
+            # The 'hub' subdir itself is not a model — only its children are
+            # (and they're scanned as their own root above).
+            if entry == "hub":
                 continue
             if entry.startswith("models--"):
                 repo_id = entry[len("models--"):].replace("--", "/")
@@ -2121,13 +2139,10 @@ def _local_model_scan() -> list[dict]:
             if repo_id in seen:
                 continue
             seen.add(repo_id)
-            size = 0
-            for r2, _, fs2 in os.walk(full):
-                for f2 in fs2:
-                    try:
-                        size += os.path.getsize(os.path.join(r2, f2))
-                    except Exception:
-                        pass
+            # Size is computed lazily (see _local_model_size) — never eagerly
+            # walk every file here, which stalls on large model dirs and is
+            # not portable across OSes. The listing stays fast.
+            size = None
             # Which configured slot points here?
             slot_name = None
             try:
@@ -2149,10 +2164,50 @@ def _local_model_scan() -> list[dict]:
     return models
 
 
+def _local_model_size(path: str) -> int:
+    """Return a model directory's size in bytes via a portable, bounded walk.
+
+    Uses os.scandir recursively (pure Python — works on Linux/macOS/Windows
+    with no external `du` dependency). Bounded so a huge model dir cannot
+    stall the request indefinitely.
+    """
+    total = 0
+    try:
+        stack = [path]
+        visited = 0
+        while stack and visited < 50000:  # safety cap on entries scanned
+            cur = stack.pop()
+            try:
+                with os.scandir(cur) as it:
+                    for e in it:
+                        visited += 1
+                        try:
+                            if e.is_dir(follow_symlinks=False):
+                                stack.append(e.path)
+                            else:
+                                total += e.stat(follow_symlinks=False).st_size
+                        except OSError:
+                            continue
+            except OSError:
+                continue
+    except Exception:
+        return 0
+    return total
+
+
 @app.get("/models")
-def list_models():
-    """List locally downloaded models (HF hub-cache scan + configured slots)."""
+def list_models(with_size: str = "false"):
+    """List locally downloaded models (HF hub-cache scan + configured slots).
+
+    Query param `with_size=true` computes each model's size (slower). By
+    default sizes are None so the listing is fast and portable.
+    """
+    with_size_flag = str(with_size).lower() in ("1", "true", "yes", "y")
     local = _local_model_scan()
+    if with_size_flag:
+        for m in local:
+            if m.get("local_path"):
+                m["size_bytes"] = _local_model_size(m["local_path"])
     curated = _curated_local_models()
     # Mark which curated models are already downloaded.
     downloaded_ids = {m["model"].lower() for m in local}
@@ -2236,22 +2291,20 @@ async def pull_model(body: dict):
         job["status"] = "running"
         job["started_at"] = time.time()
         try:
-            from core.hf_cache import resolve_hf_cache_root
+            from runtime_paths import MODELS_DIR
             token = os.environ.get("HF_TOKEN", "")
-            cache_dir = resolve_hf_cache_root()
+            # Download into kernel-evolving's dedicated models folder, NOT the
+            # shared HF cache. This keeps the local model list limited to
+            # agent-compatible models (pulled here) instead of every model the
+            # user has cached (e.g. FLUX image models, TTS voices).
+            os.makedirs(MODELS_DIR, exist_ok=True)
+            cache_dir = str(MODELS_DIR)
             path = await asyncio.to_thread(
                 snapshot_download, repo_id=repo_id, cache_dir=cache_dir,
                 token=token, ignore_patterns=["*.gguf"],
             )
             job["local_path"] = path
-            sz = 0
-            for r2, _, fs2 in os.walk(path):
-                for f2 in fs2:
-                    try:
-                        sz += os.path.getsize(os.path.join(r2, f2))
-                    except Exception:
-                        pass
-            job["size_bytes"] = sz
+            job["size_bytes"] = _local_model_size(path)
             job["status"] = "succeeded"
             job["finished_at"] = time.time()
         except Exception as e:

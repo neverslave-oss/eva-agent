@@ -30,6 +30,11 @@ NOTES_DIR = WORKSPACE_ROOT / "notes"
 SCRIPTS_DIR = WORKSPACE_ROOT / "scripts"
 DOCUMENTS_DIR = WORKSPACE_ROOT / "documents"
 
+# Dedicated folder for models kernel-evolving downloads for itself (pull).
+# Scanning only this folder (instead of the whole shared HF cache) keeps the
+# local model list limited to agent-compatible models.
+MODELS_DIR = WORKSPACE_ROOT / "models"
+
 # Nested folders used by multiple subsystems.
 THOUGHTS_IDEAS_DIR = THOUGHTS_DIR / "ideas"
 
@@ -81,6 +86,7 @@ MANAGED_DIRS = (
     NOTES_DIR,
     SCRIPTS_DIR,
     DOCUMENTS_DIR,
+    MODELS_DIR,
     THOUGHTS_IDEAS_DIR,
     ARTIFACTS_EVAL_RUNS_DIR,
     ARTIFACTS_EVAL_RESULTS_DIR,
