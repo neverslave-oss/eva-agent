@@ -118,6 +118,56 @@ def test_thought_evaluator_normalises_unknown_category():
     assert results[0]["category"] == "curiosity"
 
 
+# ── ThinkAtRest: state-change suppression + local slot (Priority #0/#6) ──────
+
+def test_gather_performance_signals_suppresses_unchanged_state():
+    """stuck_probes should NOT re-fire when the probe count is unchanged (Priority #6)."""
+    from services.thought_engine import ThinkAtRest
+
+    tar = object.__new__(ThinkAtRest)
+    # Mock observer with 12 active probes.
+    probe_store = MagicMock()
+    probe_store.list_active.return_value = [
+        {"created_at": "x"} for _ in range(12)
+    ]
+    tar._observer = MagicMock()
+    tar._observer._probe_store = probe_store
+
+    # First call: count is new (>10) → signal emitted.
+    first = tar._gather_performance_signals()
+    assert len(first) == 1
+    assert first[0]["metric"] == "stuck_probes"
+
+    # Second call with the SAME count → suppressed (no signal).
+    second = tar._gather_performance_signals()
+    assert second == []
+
+    # Count changes to 15 → emits again.
+    probe_store.list_active.return_value = [
+        {"created_at": "x"} for _ in range(15)
+    ]
+    third = tar._gather_performance_signals()
+    assert len(third) == 1
+
+
+def test_local_slot_available_true_when_server_running():
+    """_local_slot_available() should be True when the model server is running (Priority #0)."""
+    from services.thought_engine import ThinkAtRest
+
+    tar = object.__new__(ThinkAtRest)
+    with patch("core.inference.model_client.is_server_running", return_value=True):
+        assert tar._local_slot_available() is True
+
+
+def test_local_slot_available_false_when_server_down():
+    """_local_slot_available() should be False when the model server is not running."""
+    from services.thought_engine import ThinkAtRest
+
+    tar = object.__new__(ThinkAtRest)
+    with patch("core.inference.model_client.is_server_running", return_value=False):
+        assert tar._local_slot_available() is False
+
+
 # ── ThoughtJournal ────────────────────────────────────────────────────────────
 
 def test_thought_journal_write_read():
