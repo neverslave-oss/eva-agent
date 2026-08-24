@@ -176,6 +176,8 @@ fired ~12×/day at the same score).
 > - **kernel-desktop-v1** (branch `feature/local-model-selection`): `Settings.php` +
 >   `settings.blade.php` — "Local Model Management" section in the Model Storage tab with
 >   downloaded-models list, curated catalog (Pull / assign-to-slot), and Hub search.
+> - **Telegram bot** `telegram_bot.py`: `/models search <q>`, `/models pull <repo_id>`,
+>   `/models assign <repo_id> <slot>` + Search Hub / Pull buttons in the `/models` menu.
 > Tests: `tests/test_api.py` (33) + related thought tests (51) — all green.
 
 Make local model management usable from the **desktop app** (kernel-desktop-v1) by adding
