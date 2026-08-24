@@ -191,6 +191,15 @@ fired ~12×/day at the same score).
 >     `model_slots` paths — NOT the whole shared HF cache.
 >   - `GET /models?with_size=true` computes sizes lazily via a portable,
 >     bounded `os.scandir` walk (no `du -sb`, works on Linux/macOS/Windows).
+> - **Deployment fix — lazy model server in cloud mode (`start.sh`, 2026-08-24):**
+>   - Originally `start.sh` only started the model server when `task_inference == local`,
+>     so in cloud mode (`task_inference: hf`) the local thought slot was never available
+>     and Priority #0 was inert (no thoughts generated).
+>   - Now in cloud mode the model server starts in **lazy mode** (`--lazy`) — the Gemma
+>     thought slot lazy-loads on first idle cycle instead of reserving VRAM for the
+>     cloud-only primary. `KERNEL_EVO_SKIP_MODEL_SERVER=1` still opts out entirely.
+>   - Verified end-to-end: `infer_local(slot="audio")` lazy-loads Gemma and returns text
+>     while `task_inference: hf`.
 > Tests: `tests/test_api.py` (33) + related thought tests (51) + full suite
 > (707 passed) — all green.
 
