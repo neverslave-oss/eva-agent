@@ -68,6 +68,15 @@ layered (each layer is a prerequisite for the next):
 
 ### Priority #0 — Local thought slot (the enabler; fixes the primary cause in cloud mode)
 
+> ✅ **Implemented 2026-08-24** (branch `feature/think-at-rest-reactivation`):
+> - `model_client.infer_local(slot="audio", ...)` — local-slot text inference path.
+> - `model_server._handle_infer_local` + dispatch — lazy-loads the multimodal slot.
+> - `thought_engine` — `_local_slot_available()` replaces the hard `_main_model_loaded()`
+>   gate; `ThoughtGenerator.generate()` and `ThoughtEvaluator.evaluate()` now use
+>   `infer_local` (local Gemma slot) instead of cloud-routed `infer`.
+> Tests: `tests/test_thought_engine.py` (11), `test_think_at_rest_memory.py`,
+> `test_observer_layer.py`, `test_critique_layer.py` (40 total) — all green.
+
 Give Think-at-Rest a **resident-or-lazy-loadable local model** independent of the cloud
 text provider, so the residency gate can pass even when `task_inference` is a cloud
 provider. Reuse the proven `_ensure_multimodal_slot()` pattern (model_server.py) that
@@ -124,6 +133,13 @@ load on demand).
      made this 2-month pause invisible.
 
 ### Priority #6 — Event-triggered cadence + state-change suppression (the quality layer)
+
+> ✅ **Implemented 2026-08-24** (branch `feature/think-at-rest-reactivation`):
+> - `_gather_performance_signals()` — state-change suppression: `stuck_probes` only
+>   re-fires when the count changes or crosses the >10 threshold.
+> - `_on_idle()` — delta-aware cadence: changed perf signals trigger a cycle (subject to
+>   a min-interval floor), clock becomes a floor for slow-drift catch.
+> Tests: `tests/test_thought_engine.py` still green.
 
 Once unblocked, prevent the pipeline from degenerating into a **uniform clock heartbeat**
 that re-fires the same observation every cycle. The current trigger is a pure clock
