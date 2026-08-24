@@ -12,7 +12,7 @@ from typing import Optional
 import yaml
 import infra.bootstrap as _bootstrap
 import asyncio
-import os, json, time, uuid
+import os, json, re, time, uuid
 import logging as _logging
 from runtime_paths import LOGS_DIR, load_config as _load_config
 from core.voice_activity import voice_activity
@@ -2108,16 +2108,9 @@ def _local_model_scan() -> list[dict]:
         hub_sub = os.path.join(models_dir, "hub")
         if os.path.isdir(hub_sub):
             roots.append(hub_sub)
-    # Also scan configured model_slots paths (may be under KERNEL_EVO_HF_HUB).
-    try:
-        slots = (_cfg.get("model_slots", {}) or {}) if isinstance(_cfg, dict) else {}
-        for name, slot in slots.items():
-            p = (slot or {}).get("model_path")
-            if p and os.path.isdir(p):
-                roots.append(str(p))
-    except Exception:
-        pass
 
+    # First pass: scan the directory roots (dedicated MODELS_DIR + its hub
+    # subdir) for models--org--repo dirs. This covers models pulled via /pull.
     for root in roots:
         if not os.path.isdir(root):
             continue
@@ -2139,28 +2132,50 @@ def _local_model_scan() -> list[dict]:
             if repo_id in seen:
                 continue
             seen.add(repo_id)
-            # Size is computed lazily (see _local_model_size) — never eagerly
-            # walk every file here, which stalls on large model dirs and is
-            # not portable across OSes. The listing stays fast.
-            size = None
-            # Which configured slot points here?
-            slot_name = None
-            try:
-                slots = (_cfg.get("model_slots", {}) or {}) if isinstance(_cfg, dict) else {}
-                for name, slot in slots.items():
-                    sp = (slot or {}).get("model_path") or ""
-                    if sp and os.path.realpath(os.path.expanduser(sp)) == os.path.realpath(full):
-                        slot_name = name
-                        break
-            except Exception:
-                pass
             models.append({
                 "model": repo_id,
                 "local_path": full,
-                "size_bytes": size,
-                "slot": slot_name,
+                "size_bytes": None,
+                "slot": None,
                 "downloaded": True,
             })
+
+    # Second pass: surface each configured model_slots entry. These are the
+    # agent's compatible models (Gemma, Nemotron, Qwen, ...) which may live in
+    # the shared HF cache (KERNEL_EVO_HF_HUB) rather than MODELS_DIR. We derive
+    # the repo id from the slot's model_path (e.g. .../hub/models--org--repo/
+    # snapshots/<hash>) so they show as downloaded/ready without pulling in the
+    # incompatible shared-cache junk (FLUX, TTS voices, etc.).
+    try:
+        slots = (_cfg.get("model_slots", {}) or {}) if isinstance(_cfg, dict) else {}
+    except Exception:
+        slots = {}
+    for name, slot in (slots or {}).items():
+        sp = (slot or {}).get("model_path") or ""
+        if not sp:
+            continue
+        expanded = os.path.expandvars(os.path.expanduser(sp))
+        if not os.path.isdir(expanded):
+            continue
+        # Derive repo id from the hub-cache layout: .../models--org--repo/...
+        m = re.search(r"models--([^/]+)--([^/]+)", expanded)
+        if m:
+            repo_id = f"{m.group(1)}/{m.group(2)}"
+            local_path = expanded
+        else:
+            # Bare path — use the dir name as the model id.
+            repo_id = os.path.basename(os.path.normpath(expanded))
+            local_path = expanded
+        if repo_id in seen:
+            continue
+        seen.add(repo_id)
+        models.append({
+            "model": repo_id,
+            "local_path": local_path,
+            "size_bytes": None,
+            "slot": name,
+            "downloaded": True,
+        })
     return models
 
 
@@ -2195,9 +2210,31 @@ def _local_model_size(path: str) -> int:
     return total
 
 
+def _repo_downloaded(repo_id: str, local_ids: set) -> bool:
+    """Return True if a curated repo is already available locally.
+
+    Checks (in order): the dedicated MODELS_DIR scan result, then the shared HF
+    hub-cache layout (KERNEL_EVO_HF_HUB / HF_HOME). This lets curated compatible
+    models (Gemma, Nemotron, Qwen) that were downloaded before the dedicated
+    folder existed still show as "downloaded/ready", without pulling incompatible
+    shared-cache models (FLUX, TTS voices) into the /models list itself.
+    """
+    rid = (repo_id or "").lower()
+    if rid in local_ids:
+        return True
+    # Check the shared HF hub-cache: <root>/hub/models--org--repo
+    try:
+        from core.hf_cache import resolve_hf_hub_dir
+        hub = resolve_hf_hub_dir()
+        dir_name = "models--" + repo_id.replace("/", "--")
+        return bool(hub and os.path.isdir(os.path.join(str(hub), dir_name)))
+    except Exception:
+        return False
+
+
 @app.get("/models")
 def list_models(with_size: str = "false"):
-    """List locally downloaded models (HF hub-cache scan + configured slots).
+    """List locally downloaded models (dedicated folder + configured slots).
 
     Query param `with_size=true` computes each model's size (slower). By
     default sizes are None so the listing is fast and portable.
@@ -2209,10 +2246,11 @@ def list_models(with_size: str = "false"):
             if m.get("local_path"):
                 m["size_bytes"] = _local_model_size(m["local_path"])
     curated = _curated_local_models()
-    # Mark which curated models are already downloaded.
-    downloaded_ids = {m["model"].lower() for m in local}
+    # Mark which curated models are already downloaded (dedicated folder OR
+    # shared HF hub-cache).
+    local_ids = {m["model"].lower() for m in local}
     for c in curated:
-        c["downloaded"] = c["repo_id"].lower() in downloaded_ids
+        c["downloaded"] = _repo_downloaded(c["repo_id"], local_ids)
     return {"models": local, "curated": curated}
 
 
@@ -2220,10 +2258,10 @@ def list_models(with_size: str = "false"):
 def curated_models():
     """Return the curated local-model catalog (pull + assign candidates)."""
     local = _local_model_scan()
-    downloaded_ids = {m["model"].lower() for m in local}
+    local_ids = {m["model"].lower() for m in local}
     curated = _curated_local_models()
     for c in curated:
-        c["downloaded"] = c["repo_id"].lower() in downloaded_ids
+        c["downloaded"] = _repo_downloaded(c["repo_id"], local_ids)
     return {"curated": curated}
 
 
