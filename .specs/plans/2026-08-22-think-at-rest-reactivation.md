@@ -1,7 +1,7 @@
 # Plan: Reactivate Think-at-Rest (thought engine starving since June 24)
 
 **Created:** 2026-08-22
-**Status:** scoped, not implemented (pair-programming session required)
+**Status:** implemented 2026-08-24 (branch `feature/think-at-rest-reactivation`; desktop on `feature/local-model-selection`) — pending user review
 **Branch:** `fix/cloud-audio-vision-402-fallback` (issues live on the currently checked-out branch)
 **Related:** `ADR-005` (Think-at-Rest), `ADR-012`, `ADR-019` (Observer/Critique), src/services/thought_engine.py
 
@@ -168,6 +168,15 @@ fired ~12×/day at the same score).
   that wakes a thought, rather than the clock. Real anomalies → fire; calm → go quiet.
 
 ### Priority #7 — Local model selection via the desktop app (pull + curated list + slot)
+
+> ✅ **Implemented 2026-08-24** (branch `feature/think-at-rest-reactivation`):
+> - **kernel-evolving** `src/api.py`: `GET /models`, `GET /models/curated`, `GET /hub/search`,
+>   `POST /pull` (background job), `GET /jobs/{id}`, `POST /models/assign`. Mirrors
+>   ai-server-py, adapted for the slot registry. New paths added to `_IDLE_BYPASS_PATHS`.
+> - **kernel-desktop-v1** (branch `feature/local-model-selection`): `Settings.php` +
+>   `settings.blade.php` — "Local Model Management" section in the Model Storage tab with
+>   downloaded-models list, curated catalog (Pull / assign-to-slot), and Hub search.
+> Tests: `tests/test_api.py` (33) + related thought tests (51) — all green.
 
 Make local model management usable from the **desktop app** (kernel-desktop-v1) by adding
 REST endpoints to **kernel-evolving** that mirror the proven pull mechanism in the
