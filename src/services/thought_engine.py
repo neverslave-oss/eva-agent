@@ -1482,10 +1482,19 @@ class EvolvingThinkAtRest(ThinkAtRest):
             pending = _fr.get_unresolved(limit=3)
             if pending:
                 self._pending_failed_requests = pending
+                # Only count the cycle as "handled" if at least one request was
+                # ACTUALLY evolved. A request skipped by the recency/yield gate
+                # (e.g. stale backlog) must not suppress curiosity exploration —
+                # otherwise a permanent stale backlog starves Phase 3 forever.
+                evolved_any = False
                 for req in pending:
-                    self._evolve_from_failed_request(req)
-                handled = True
-                logger.info(f"[EvolvingThinkAtRest] processed {len(pending)} failed request(s)")
+                    if self._evolve_from_failed_request(req):
+                        evolved_any = True
+                handled = evolved_any
+                logger.info(
+                    f"[EvolvingThinkAtRest] processed {len(pending)} failed request(s) "
+                    f"(evolved={evolved_any})"
+                )
         except Exception as e:
             logger.warning(f"[EvolvingThinkAtRest] failed_requests error: {e}")
 
@@ -1513,8 +1522,14 @@ class EvolvingThinkAtRest(ThinkAtRest):
         # Phase 3: curiosity — outward exploration (only model-assisted when data changed)
         super()._run_think_cycle()
 
-    def _evolve_from_failed_request(self, req: dict) -> None:
+    def _evolve_from_failed_request(self, req: dict) -> bool:
         """ADR-020: directly trigger evolution for a concrete failed user request.
+
+        Returns True if evolution actually ran for this request, False if it was
+        skipped (evolution disabled/paused, stale beyond the recency window, or
+        yielding to an active chat request). The caller uses this so a cycle where
+        every request was merely skipped does NOT count as "handled" — otherwise
+        stale backlog would permanently suppress curiosity exploration.
 
         Recency gate (2026-08-26): enabling EVOLUTION_ENABLED caused every stale
         unresolved failed request in the backlog to be evolved during idle,
@@ -1525,13 +1540,13 @@ class EvolvingThinkAtRest(ThinkAtRest):
             import core.evolution.evolution_hook
             from core.evolution.evolution_hook import EVOLUTION_ENABLED
             if not EVOLUTION_ENABLED:
-                return
+                return False
             import core.evolution.evolution_state as _evo_state
             if not _evo_state.should_evolve():
                 logger.info(f"[EvolvingThinkAtRest] evolution paused/stopped — skipping failed_request id={req['id']}")
-                return
+                return False
         except ImportError:
-            return
+            return False
 
         # Recency gate: skip stale failed requests so idle evolution doesn't
         # replay old backlog and preempt active chat.
@@ -1547,7 +1562,7 @@ class EvolvingThinkAtRest(ThinkAtRest):
                         f"[EvolvingThinkAtRest] skipping failed_request id={req.get('id')} "
                         f"(age {age_h:.1f}h > {recency_hours}h recency window)"
                     )
-                    return
+                    return False
         except Exception as _e:
             logger.debug(f"[EvolvingThinkAtRest] recency check skipped ({_e})")
 
@@ -1561,7 +1576,7 @@ class EvolvingThinkAtRest(ThinkAtRest):
                 f"[EvolvingThinkAtRest] model active — yielding evolution for "
                 f"failed_request id={req.get('id')} to active chat"
             )
-            return
+            return False
 
         request_id = req["id"]
         user_message = req["user_message"]
@@ -1596,6 +1611,8 @@ class EvolvingThinkAtRest(ThinkAtRest):
                 )
         except Exception as _re:
             logger.warning(f"[EvolvingThinkAtRest] retry_count update error: {_re}")
+
+        return True
 
     def _on_thought_accepted(self, thought: dict):
         """Override: gap_reflection no longer reaches here — handled directly
