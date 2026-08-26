@@ -1,7 +1,7 @@
 # Plan: Reactivate Think-at-Rest (thought engine starving since June 24)
 
 **Created:** 2026-08-22
-**Status:** implemented 2026-08-24 (branch `feature/think-at-rest-reactivation`; desktop on `feature/local-model-selection`) — pending user review; **evolution-loop fixes applied 2026-08-26** (commit `0748047`, see Priority #8); **"not thinking at rest" fixes applied 2026-08-26** (commits `b574dfc` + `3c77350`, see Priority #9)
+**Status:** implemented 2026-08-24 (branch `feature/think-at-rest-reactivation`; desktop on `feature/local-model-selection`) — pending user review; **evolution-loop fixes applied 2026-08-26** (commit `0748047`, see Priority #8); **"not thinking at rest" fixes applied 2026-08-26** (commits `b574dfc` + `3c77350`, see Priority #9); **configurable thought slot applied 2026-08-26** (commit `1790a05`, see Priority #10)
 **Branch:** `fix/cloud-audio-vision-402-fallback` (issues live on the currently checked-out branch)
 **Related:** `ADR-005` (Think-at-Rest), `ADR-012`, `ADR-019` (Observer/Critique), src/services/thought_engine.py
 
@@ -241,6 +241,38 @@ fired ~12×/day at the same score).
 > the first think cycle (~15 min after boot) lazy-loads **Nemotron-Labs-Diffusion-3B**
 > (primary/drafter via `infer_draft`) and **Gemma 4 E2B-it** (audio slot via
 > `infer_local(slot="audio")`). Tests: `test_thought_engine` (14) green.
+
+### Priority #10 — Configurable thought slot: one local model, pick which one (2026-08-26)
+
+> ✅ **Implemented 2026-08-26** (commit `1790a05`, branch `dev`):
+>
+> **Why two models loaded:** each think cycle loaded BOTH local models —
+> `ThoughtGenerator.generate()` used `infer_draft()` → **Nemotron-Labs-Diffusion-3B**
+> (primary slot), and `ThoughtEvaluator.evaluate()` used `infer_local(slot="audio")` →
+> **Gemma 4 E2B-it**. Two slots, two models, extra VRAM and load time.
+>
+> **Fix — dedicated `thinking.thought_slot` config (default `audio` = Gemma 4 E2B-it):**
+> - `thought_engine.py`: both `ThoughtGenerator` and `ThoughtEvaluator` now take a
+>   `thought_slot` and route generation AND evaluation to that slot, so only ONE local
+>   model loads. `infer_draft` (Nemotron) is now only a fallback if the configured slot
+>   is unavailable.
+> - `config.yaml`: `thinking.thought_slot: audio` (Gemma 4 E2B-it — multimodal,
+>   lazy-loaded, preferred). Set to `primary` (Nemotron) or `tool_calling` (Qwen) to switch.
+> - `src/api.py`:
+>   - `GET /config/thought-slot` — view the active thought slot + slot→model assignments.
+>   - `POST /config/thought-slot` `{slot}` — change it at runtime (persists to config.yaml).
+>   - `GET /models` now returns `thought_slot` + `slots` so callers can see/decide.
+> - New paths added to `_IDLE_BYPASS_PATHS`.
+>
+> **Downloaded local models kernel-evolving can use** (from `GET /models`):
+> `google/gemma-4-E2B-it` (audio slot), `Qwen/Qwen3.5-0.8B` (tool_calling slot),
+> `nvidia/Nemotron-Labs-Diffusion-3B` (primary), `deepseek-ai/Janus-Pro-7B`,
+> `Qwen/Qwen2.5-Omni-3B`, `google/gemma-4-E4B-it`, `Qwen/Qwen3-VL-2B-Instruct`.
+>
+> **Verification:** `GET/POST /config/thought-slot` work (valid + invalid slot handling);
+> `/models` returns `thought_slot: audio`. Tests: `test_thought_engine` (14),
+> `test_api` (33) green.
+
 ### Priority #7 — Local model selection via the desktop app (pull + curated list + slot)
 
 > ✅ **Implemented 2026-08-24** (branch `feature/think-at-rest-reactivation`):
