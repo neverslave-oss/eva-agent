@@ -259,7 +259,7 @@ thinking:
   ideas_dir: ~/.kernel-evolving/workspace/thoughts/ideas
   idle_threshold_s: 300
   journal_dir: ~/.kernel-evolving/workspace/thoughts
-  min_score: 0.65
+  min_score: 0.5
   observer:
     anti_seed_count: 10
     enabled: true
