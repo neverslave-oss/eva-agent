@@ -808,6 +808,13 @@ class ThinkAtRest:
         if score >= self._promote_threshold:
             self._promote_to_idea(thought)
 
+        # Proactive Telegram for accepted curiosity thoughts (respects the
+        # proactive_max_per_day cap). Actionable thoughts get ✅/❌ buttons.
+        try:
+            self._maybe_send_telegram(thought)
+        except Exception as e:
+            logger.error(f"[ThinkAtRest] proactive telegram error: {e}")
+
     def _promote_to_idea(self, thought: dict):
         """Write thought to ideas directory and feed as high-weight signal into goal_discovery."""
         try:
@@ -1078,10 +1085,12 @@ class ThinkAtRest:
                 f"_— {category} · score {score:.2f}_"
             )
             if is_actionable:
-                # Send with action buttons only for actionable thoughts
-                _tb.send_message(
+                # Send with action buttons only for actionable thoughts.
+                # Use send_buttons (not send_message) — buttons are a separate
+                # render path in telegram_bot.
+                _tb.send_buttons(
                     chat_id, text,
-                    buttons=[[{"text": "✅ Do it", "callback_data": f"thought_do_{score:.2f}"}, {"text": "❌ Skip", "callback_data": "thought_skip"}]]
+                    [[{"text": "✅ Do it", "callback_data": f"thought_do_{score:.2f}"}, {"text": "❌ Skip", "callback_data": "thought_skip"}]]
                 )
             else:
                 _tb.send_message(chat_id, text)
