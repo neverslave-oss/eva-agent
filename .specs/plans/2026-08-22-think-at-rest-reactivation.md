@@ -1,7 +1,7 @@
 # Plan: Reactivate Think-at-Rest (thought engine starving since June 24)
 
 **Created:** 2026-08-22
-**Status:** implemented 2026-08-24 (branch `feature/think-at-rest-reactivation`; desktop on `feature/local-model-selection`) — pending user review
+**Status:** implemented 2026-08-24 (branch `feature/think-at-rest-reactivation`; desktop on `feature/local-model-selection`) — pending user review; **evolution-loop fixes applied 2026-08-26** (commit `0748047`, see Priority #8)
 **Branch:** `fix/cloud-audio-vision-402-fallback` (issues live on the currently checked-out branch)
 **Related:** `ADR-005` (Think-at-Rest), `ADR-012`, `ADR-019` (Observer/Critique), src/services/thought_engine.py
 
@@ -172,6 +172,45 @@ fired ~12×/day at the same score).
   expertise-field) is the upstream inspiration: use delta/anomaly detection on real signals
   (sensor readings, service health, active probe count, VRAM, GPU temp) as the *event*
   that wakes a thought, rather than the clock. Real anomalies → fire; calm → go quiet.
+
+### Priority #8 — Stop the evolution loop from starving active chat (2026-08-26)
+
+> ✅ **Implemented 2026-08-26** (commit `0748047`, branch `feature/think-at-rest-reactivation`):
+>
+> **Symptom:** After `EVOLUTION_ENABLED=true` was set so accepted thoughts + failed-request
+> gaps auto-evolve via Tier 2, the evolution loop hijacked the user's chat. A cascade of
+> failed-request evolutions (ids 130→129→128) ran during idle and starved active
+> conversation, accompanied by 140+ `embed failed: Native embedding model unavailable`
+> retries and `[ADR-021] no chat_id available — skipping approval gate` warnings.
+>
+> **Four fixes applied in order:**
+>
+> 1. **Recency gate on failed-request evolution** (`thought_engine.py`,
+>    `_evolve_from_failed_request`): only evolve failed requests whose `ts` falls within
+>    `failed_request_recency_hours` (default 24h, from `thinking` config). Stale backlog
+>    from before evolution was enabled is no longer replayed on every idle cycle.
+> 2. **Embedding env expansion** (`embedding_client.py`): `_DEFAULT_MODEL_PATH` was built
+>    at import time from `HF_HOME`, which could contain a literal `${KERNEL_EVO_HF_HUB}`
+>    that was never expanded — so `SentenceTransformer` failed and `embed()` retried in a
+>    tight loop. Both the import-time default and `_embed_native` now call
+>    `_os.path.expandvars(...)` before loading.
+> 3. **Yield idle evolution to active chat** (`thought_engine.py`,
+>    `_evolve_from_failed_request`): before evolving a failed request, check
+>    `_model_is_active()` (the same in-flight/recently-finished check the idle detector
+>    uses). If a user/model request is active, skip evolution and leave the request
+>    unresolved for a later idle cycle — no more preempting live chat.
+> 4. **Carry chat_id into evolution context (ADR-021)** (`evolution_hook.py` +
+>    `thought_engine.py`): the originating `chat_id` from the `failed_requests` row is now
+>    threaded `_evolve_from_failed_request` → `_run_evolution_with_critique` →
+>    `maybe_evolve(chat_id=...)` → `_try_tier2(chat_id=...)` →
+>    `_try_tier2_pipeline(chat_id=...)` → `_gate_tier2(chat_id=...)`. The ADR-021 Tier 2
+>    approval gate now reaches the user with Approve/Reject buttons instead of being
+>    silently skipped ("no chat_id available").
+>
+> **Verification:** `python -m py_compile` clean; tests green —
+> `test_thought_engine` (14), `test_evolver` (37), `test_tier2_approval_gate` (12),
+> `test_provider_fallback` (13). Restarted via `./start.sh`; API healthy on `:8779`,
+> model server running `--lazy`, **0 embed failures** after restart (was 140+).
 
 ### Priority #7 — Local model selection via the desktop app (pull + curated list + slot)
 
