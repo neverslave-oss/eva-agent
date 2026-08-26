@@ -139,6 +139,12 @@ load on demand).
 >   re-fires when the count changes or crosses the >10 threshold.
 > - `_on_idle()` — delta-aware cadence: changed perf signals trigger a cycle (subject to
 >   a min-interval floor), clock becomes a floor for slow-drift catch.
+> - **Proactive Telegram wired (2026-08-26):** `_maybe_send_telegram()` (dead since
+>   launch) is now called from `_on_thought_accepted()` for accepted curiosity thoughts.
+>   Sends "Kernel is thinking…" messages (respecting `proactive_max_per_day: 4`);
+>   actionable thoughts get ✅ Do it / ❌ Skip inline buttons (fixed to use
+>   `send_buttons`, not `send_message`). `EVOLUTION_ENABLED=true` in `.env` so
+>   high-score promoted ideas + failed-request gaps now auto-evolve via Tier 2.
 > Tests: `tests/test_thought_engine.py` still green.
 
 Once unblocked, prevent the pipeline from degenerating into a **uniform clock heartbeat**
