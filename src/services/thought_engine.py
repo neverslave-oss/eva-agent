@@ -917,12 +917,18 @@ class ThinkAtRest:
             if critique_notes:
                 task = f"{thought_text}\n\nPrevious attempt notes: {critique_notes}"
 
+            # ADR-021 (fix 2026-08-26): carry the originating chat_id into the
+            # evolution pipeline so the Tier 2 approval gate can ask the user
+            # instead of being silently skipped.
+            source_chat_id = thought.get("_source_chat_id")
+
             try:
                 evo_result = evolution_hook.maybe_evolve(
                     task,
                     cfg,
                     skills_dir=skills_dir,
                     infer_fn=infer_fn,
+                    chat_id=source_chat_id,
                 )
             except Exception as e:
                 logger.error(f"[ThinkAtRest] evolution attempt {attempt} error: {e}")
@@ -1508,7 +1514,13 @@ class EvolvingThinkAtRest(ThinkAtRest):
         super()._run_think_cycle()
 
     def _evolve_from_failed_request(self, req: dict) -> None:
-        """ADR-020: directly trigger evolution for a concrete failed user request."""
+        """ADR-020: directly trigger evolution for a concrete failed user request.
+
+        Recency gate (2026-08-26): enabling EVOLUTION_ENABLED caused every stale
+        unresolved failed request in the backlog to be evolved during idle,
+        which starved active chat. Only evolve requests that failed within the
+        configured recency window (default 24h). Use the request's `ts` (ISO UTC).
+        """
         try:
             import core.evolution.evolution_hook
             from core.evolution.evolution_hook import EVOLUTION_ENABLED
@@ -1519,6 +1531,36 @@ class EvolvingThinkAtRest(ThinkAtRest):
                 logger.info(f"[EvolvingThinkAtRest] evolution paused/stopped — skipping failed_request id={req['id']}")
                 return
         except ImportError:
+            return
+
+        # Recency gate: skip stale failed requests so idle evolution doesn't
+        # replay old backlog and preempt active chat.
+        try:
+            recency_hours = float(self._cfg.get("failed_request_recency_hours", 24))
+            ts_raw = req.get("ts") or ""
+            if ts_raw:
+                ts_naive = ts_raw.split("+")[0].split("Z")[0]
+                req_ts = datetime.fromisoformat(ts_naive).replace(tzinfo=timezone.utc)
+                age_h = (datetime.now(timezone.utc) - req_ts).total_seconds() / 3600.0
+                if age_h > recency_hours:
+                    logger.info(
+                        f"[EvolvingThinkAtRest] skipping failed_request id={req.get('id')} "
+                        f"(age {age_h:.1f}h > {recency_hours}h recency window)"
+                    )
+                    return
+        except Exception as _e:
+            logger.debug(f"[EvolvingThinkAtRest] recency check skipped ({_e})")
+
+        # Yield gate (2026-08-26): if a user/model request is now in-flight or
+        # recently finished, do NOT run evolution — it would compete for the same
+        # inference slot and starve active chat. Reuse the same activity check the
+        # idle detector uses. The failed request stays unresolved and will be
+        # reconsidered on a later idle cycle.
+        if self._model_is_active():
+            logger.info(
+                f"[EvolvingThinkAtRest] model active — yielding evolution for "
+                f"failed_request id={req.get('id')} to active chat"
+            )
             return
 
         request_id = req["id"]
@@ -1533,6 +1575,7 @@ class EvolvingThinkAtRest(ThinkAtRest):
             "_source_request_id": request_id,
             "_source_user_message": user_message,
             "_source_failure_type": req.get("failure_type", "unknown"),
+            "_source_chat_id": req.get("chat_id"),
             "_observer_evidence": f"user_request:{request_id}",
         }
 

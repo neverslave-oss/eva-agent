@@ -23,13 +23,17 @@ import os as _os
 
 # Default model path — resolved at import time, overridable via env.
 # Users can set KERNEL_EMBEDDING_MODEL_PATH to point to their local snapshot.
-_DEFAULT_MODEL_PATH = _os.environ.get(
-    "KERNEL_EMBEDDING_MODEL_PATH"
-) or _os.path.join(
-    _os.environ.get("HF_HOME") or _os.environ.get("TRANSFORMERS_CACHE") or _os.path.expanduser("~/.cache/huggingface"),
-    "hub_cache",
-    "models--unsloth--embeddinggemma-300m-qat-q8_0-unquantized", "snapshots",
-    "dc4294deb8cbaad174042a020037fb3a5b008976"
+# NOTE: expandvars() is critical — HF_HOME may be set to a literal "${VAR}"
+# (e.g. "${KERNEL_EVO_HF_HUB}") that must be expanded, otherwise SentenceTransformer
+# fails to load and embed() retries in a tight loop (140+ failures observed).
+_DEFAULT_MODEL_PATH = _os.path.expandvars(
+    _os.environ.get("KERNEL_EMBEDDING_MODEL_PATH")
+    or _os.path.join(
+        _os.environ.get("HF_HOME") or _os.environ.get("TRANSFORMERS_CACHE") or _os.path.expanduser("~/.cache/huggingface"),
+        "hub_cache",
+        "models--unsloth--embeddinggemma-300m-qat-q8_0-unquantized", "snapshots",
+        "dc4294deb8cbaad174042a020037fb3a5b008976"
+    )
 )
 _DEFAULT_HTTP_URL = "http://localhost:8770/embeddings"
 
@@ -86,8 +90,11 @@ class EmbeddingClient:
             try:
                 if SentenceTransformer is None:
                     raise ImportError("sentence-transformers not installed")
-                self._st_model = SentenceTransformer(self.model_path)
-                logger.info(f"[EmbeddingClient] Loaded native model from {self.model_path}")
+                # Expand ${VAR} (e.g. ${KERNEL_EVO_HF_HUB}) in a config-supplied
+                # model_path so it resolves to a real local snapshot.
+                resolved_path = _os.path.expandvars(self.model_path)
+                self._st_model = SentenceTransformer(resolved_path)
+                logger.info(f"[EmbeddingClient] Loaded native model from {resolved_path}")
             except Exception as e:
                 logger.warning(f"[EmbeddingClient] Failed to load native model: {e}")
 

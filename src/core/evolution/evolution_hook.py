@@ -19,13 +19,16 @@ from . import pending_synthesis as _ps
 EVOLUTION_ENABLED = os.environ.get("EVOLUTION_ENABLED", "false").lower() == "true"
 
 
-def maybe_evolve(task: str, config: dict, skills_dir: str, infer_fn=None) -> EvolutionResult | None:
+def maybe_evolve(task: str, config: dict, skills_dir: str, infer_fn=None, chat_id: str | None = None) -> EvolutionResult | None:
     """
     Called when agent.triage() finds no skill/routine match.
     Respects the evolution state machine: only runs when state=RUNNING
     and iteration cap has not been reached.
     `infer_fn` is an optional callable(prompt: str, max_new_tokens: int) -> str
     used for ADR-006 capability verification.
+    `chat_id` is an optional Telegram chat id. When provided it is threaded into
+    the ADR-021 Tier 2 approval gate so the user is asked for approval instead of
+    the gate being silently skipped (fix 2026-08-26).
     """
     if not EVOLUTION_ENABLED:
         return None
@@ -45,7 +48,7 @@ def maybe_evolve(task: str, config: dict, skills_dir: str, infer_fn=None) -> Evo
 
     # If Tier 1 escalated and Tier 2 synthesis is available, attempt it
     if result.escalated:
-        result = _try_tier2(task, result.gap, config)
+        result = _try_tier2(task, result.gap, config, chat_id=chat_id)
 
     # Count against cap only when a new skill was actually installed
     if result.found and result.installed:
@@ -398,9 +401,9 @@ def _create_gap_todo_standalone(task: str):
         pass
 
 
-def _try_tier2(task: str, gap: str, config: dict) -> EvolutionResult:
+def _try_tier2(task: str, gap: str, config: dict, *, chat_id: str | None = None) -> EvolutionResult:
     """ADR-010: Attempt Tier 2 — try critic pipeline first, fallback to legacy."""
-    return _try_tier2_pipeline(task, gap, config)
+    return _try_tier2_pipeline(task, gap, config, chat_id=chat_id)
 
 
 # Public alias used by tests and ADR docs
