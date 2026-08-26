@@ -122,16 +122,19 @@ class IdleDetector:
 
 
 class ThoughtGenerator:
-    """System 1: prefer drafter-only generation, but fall back to main-model chat inference when needed."""
+    """System 1: prefer the configured local thought slot (default Gemma 'audio'),
+    fall back to drafter-only generation when the local slot is unavailable."""
 
     def __init__(self, unused_skills_fn: Optional[Callable] = None,
                  recent_gaps_fn: Optional[Callable] = None,
                  last_thought_fn: Optional[Callable] = None,
-                 recent_interactions_fn: Optional[Callable] = None):
+                 recent_interactions_fn: Optional[Callable] = None,
+                 thought_slot: str = "audio"):
         self._unused_skills_fn = unused_skills_fn
         self._recent_gaps_fn = recent_gaps_fn
         self._last_thought_fn = last_thought_fn
         self._recent_interactions_fn = recent_interactions_fn
+        self._thought_slot = thought_slot
         self._recent_thoughts: list = []
 
     def set_recent_thoughts(self, thoughts: list) -> None:
@@ -188,20 +191,21 @@ class ThoughtGenerator:
             {"role": "user", "content": prompt},
         ]
 
+        # Priority #0 + thought_slot config (2026-08-26): run thoughts on the
+        # configured local slot (default Gemma 'audio') so idle reflection works
+        # even in cloud mode and only ONE local model loads (no Nemotron drafter).
         raw = ""
         try:
-            raw = model_client.infer_draft(prompt, max_new_tokens=8192)
+            raw = model_client.infer_local(messages, max_new_tokens=8192, slot=self._thought_slot)
         except Exception as e:
-            logger.error(f"[ThoughtGenerator] infer_draft error: {e}")
+            logger.error(f"[ThoughtGenerator] local slot infer error: {e}")
 
         if not raw or raw.startswith("[model_"):
-            logger.warning(f"[ThoughtGenerator] drafter unavailable, falling back to local slot: {raw!r}")
+            logger.warning(f"[ThoughtGenerator] local slot '{self._thought_slot}' unavailable, falling back to drafter: {raw!r}")
             try:
-                # Priority #0: run thoughts on a resident/lazy-loadable local slot
-                # (Gemma 4 E2B-it) so idle reflection works even in cloud mode.
-                raw = model_client.infer_local(messages, max_new_tokens=8192, slot="audio")
+                raw = model_client.infer_draft(prompt, max_new_tokens=8192)
             except Exception as e:
-                logger.error(f"[ThoughtGenerator] local slot infer error: {e}")
+                logger.error(f"[ThoughtGenerator] infer_draft error: {e}")
                 return []
 
         if not raw or raw.startswith("[model_"):
@@ -221,10 +225,11 @@ class ThoughtGenerator:
 
 
 class ThoughtEvaluator:
-    """System 2: uses the main model to score + classify seeds."""
+    """System 2: uses the configured local thought slot to score + classify seeds."""
 
-    def __init__(self, min_score: float = 0.65):
+    def __init__(self, min_score: float = 0.65, thought_slot: str = "audio"):
         self._min_score = min_score
+        self._thought_slot = thought_slot
 
     def evaluate(self, seeds: list) -> list:
         """
@@ -251,7 +256,7 @@ class ThoughtEvaluator:
         ]
 
         try:
-            raw = model_client.infer_local(messages, max_new_tokens=8192, slot="audio")
+            raw = model_client.infer_local(messages, max_new_tokens=8192, slot=self._thought_slot)
         except Exception as e:
             logger.error(f"[ThoughtEvaluator] local slot infer error: {e}")
             return []
@@ -398,6 +403,11 @@ class ThinkAtRest:
         self._thought_interval_s = float(self._cfg.get("thought_interval_s", 1800))
         self._min_score = float(self._cfg.get("min_score", 0.65))
         self._promote_threshold = float(self._cfg.get("promote_threshold", 0.80))
+        # Which local model slot the Think-at-Rest engine uses for BOTH thought
+        # generation and evaluation. Default "audio" = Gemma 4 E2B-it (multimodal,
+        # lazy-loaded). Set to e.g. "primary" for Nemotron. This makes the engine
+        # load only ONE local model instead of two.
+        self._thought_slot = self._cfg.get("thought_slot", "audio") or "audio"
         self._proactive_telegram = self._cfg.get("proactive_telegram", True)
         self._proactive_max_per_day = int(self._cfg.get("proactive_max_per_day", 2))
         self._journal_dir = os.path.expanduser(
@@ -433,8 +443,9 @@ class ThinkAtRest:
             recent_gaps_fn=self._get_recent_gaps,
             last_thought_fn=self._get_last_thought,
             recent_interactions_fn=self._get_recent_interactions,
+            thought_slot=self._thought_slot,
         )
-        self._evaluator = ThoughtEvaluator(min_score=self._min_score)
+        self._evaluator = ThoughtEvaluator(min_score=self._min_score, thought_slot=self._thought_slot)
 
         # Idle state
         self._is_idle = False

@@ -260,6 +260,11 @@ thinking:
   idle_threshold_s: 300
   journal_dir: ~/.kernel-evolving/workspace/thoughts
   min_score: 0.5
+  # Which local model slot the Think-at-Rest engine uses for thought generation
+  # AND evaluation. "audio" = Gemma 4 E2B-it (multimodal, lazy-loaded — preferred);
+  # "primary" = Nemotron-Labs-Diffusion-3B; "tool_calling" = Qwen3.5-0.8B.
+  # Setting this makes the engine load only ONE local model instead of two.
+  thought_slot: audio
   observer:
     anti_seed_count: 10
     enabled: true

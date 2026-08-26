@@ -52,6 +52,7 @@ _IDLE_BYPASS_PATHS = {
     "/debug/fields",
     "/provider", "/provider/available",
     "/models", "/models/curated", "/models/assign", "/pull", "/hub/search", "/jobs",
+    "/config/thought-slot",
     "/memory/files", "/memory/file", "/memory/stats", "/workspace/tree",
     "/memory/file/rename", "/memory/file/new",
     "/sqlite/tables", "/sqlite/table", "/sqlite/row", "/sqlite/table/data", "/sqlite/db/data",
@@ -2251,7 +2252,22 @@ def list_models(with_size: str = "false"):
     local_ids = {m["model"].lower() for m in local}
     for c in curated:
         c["downloaded"] = _repo_downloaded(c["repo_id"], local_ids)
-    return {"models": local, "curated": curated}
+    # Expose which local slot the Think-at-Rest engine uses, and which model is
+    # currently assigned to each slot, so callers can see/decide the thought model.
+    thought_slot = "audio"
+    slots = {}
+    try:
+        _slots_cfg = (_cfg.get("model_slots", {}) or {}) if isinstance(_cfg, dict) else {}
+        slots = dict(_slots_cfg)
+        thought_slot = ((_cfg.get("thinking", {}) or {}).get("thought_slot") or "audio")
+    except Exception:
+        pass
+    return {
+        "models": local,
+        "curated": curated,
+        "thought_slot": thought_slot,
+        "slots": slots,
+    }
 
 
 @app.get("/models/curated")
@@ -2415,6 +2431,74 @@ def assign_model_to_slot(body: dict):
     _cfg["model_slots"][slot]["model_path"] = local_path
 
     return {"ok": True, "slot": slot, "local_path": local_path, "repo_id": repo_id}
+
+
+@app.get("/config/thought-slot")
+def get_thought_slot():
+    """Return which local model slot the Think-at-Rest engine uses for thoughts.
+
+    The slot name (e.g. "audio" = Gemma 4 E2B-it, "primary" = Nemotron, or a
+    custom slot) controls BOTH thought generation and evaluation, so only one
+    local model loads. Also returns the available slots and their assigned models.
+    """
+    thought_slot = "audio"
+    slots = {}
+    thinking = (_cfg.get("thinking", {}) or {}) if isinstance(_cfg, dict) else {}
+    thought_slot = thinking.get("thought_slot") or "audio"
+    try:
+        slots = dict((_cfg.get("model_slots", {}) or {}))
+    except Exception:
+        slots = {}
+    return {"thought_slot": thought_slot, "slots": slots}
+
+
+@app.post("/config/thought-slot")
+def set_thought_slot(body: dict):
+    """Set which local model slot the Think-at-Rest engine uses for thoughts.
+
+    Body: {slot: "audio" | "primary" | "tool_calling" | <custom slot name>}.
+    Persists `thinking.thought_slot` in config.yaml. Takes effect on the next
+    think cycle (no restart required for the in-memory config; a restart is only
+    needed if you want the change reflected in the running engine's constructor).
+    """
+    global _cfg
+    slot = (body.get("slot") or "").strip()
+    if not slot:
+        return JSONResponse({"error": "Missing 'slot'"}, status_code=400)
+
+    # Validate the slot exists in model_slots (or is a known slot name).
+    slots = {}
+    try:
+        slots = dict((_cfg.get("model_slots", {}) or {}))
+    except Exception:
+        slots = {}
+    if slot not in slots:
+        return JSONResponse(
+            {"error": f"Unknown slot '{slot}'. Available slots: {sorted(slots.keys()) or ['audio','primary','tool_calling']}"},
+            status_code=400,
+        )
+
+    # Persist to config.yaml thinking.thought_slot.
+    cfg_path = os.path.join(_BASE, "config.yaml")
+    try:
+        with open(cfg_path) as f:
+            on_disk = yaml.safe_load(f) or {}
+    except Exception as e:
+        return JSONResponse({"error": f"Could not read config.yaml: {e}"}, status_code=500)
+
+    on_disk.setdefault("thinking", {})
+    on_disk["thinking"]["thought_slot"] = slot
+    try:
+        with open(cfg_path, "w") as f:
+            yaml.dump(on_disk, f, default_flow_style=False, allow_unicode=True)
+    except Exception as e:
+        return JSONResponse({"error": f"Could not write config.yaml: {e}"}, status_code=500)
+
+    # Update in-memory config too (so the next think cycle uses it).
+    _cfg.setdefault("thinking", {})
+    _cfg["thinking"]["thought_slot"] = slot
+
+    return {"ok": True, "thought_slot": slot}
 
 
 @app.get("/evolution/trajectories")
