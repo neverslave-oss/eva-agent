@@ -1,7 +1,7 @@
 # Plan: Reactivate Think-at-Rest (thought engine starving since June 24)
 
 **Created:** 2026-08-22
-**Status:** implemented 2026-08-24 (branch `feature/think-at-rest-reactivation`; desktop on `feature/local-model-selection`) — pending user review; **evolution-loop fixes applied 2026-08-26** (commit `0748047`, see Priority #8)
+**Status:** implemented 2026-08-24 (branch `feature/think-at-rest-reactivation`; desktop on `feature/local-model-selection`) — pending user review; **evolution-loop fixes applied 2026-08-26** (commit `0748047`, see Priority #8); **"not thinking at rest" fixes applied 2026-08-26** (commits `b574dfc` + `3c77350`, see Priority #9)
 **Branch:** `fix/cloud-audio-vision-402-fallback` (issues live on the currently checked-out branch)
 **Related:** `ADR-005` (Think-at-Rest), `ADR-012`, `ADR-019` (Observer/Critique), src/services/thought_engine.py
 
@@ -211,7 +211,36 @@ fired ~12×/day at the same score).
 > `test_thought_engine` (14), `test_evolver` (37), `test_tier2_approval_gate` (12),
 > `test_provider_fallback` (13). Restarted via `./start.sh`; API healthy on `:8779`,
 > model server running `--lazy`, **0 embed failures** after restart (was 140+).
+### Priority #9 — "Not thinking at rest" — stale backlog + evaluator threshold (2026-08-26)
 
+> ✅ **Implemented 2026-08-26** (commits `b574dfc`, `3c77350`, branch `dev`):
+>
+> **Symptom:** Even after Priority #8, the user reported Eva still wasn't thinking at
+> rest after long idle, and `/thoughts` returned `[]` (no journal entry since Jun 24).
+>
+> **Root cause 1 — stale backlog suppressed curiosity (fixed `b574dfc`):**
+> `_run_think_cycle` Phase 1 set `handled=True` whenever *any* unresolved failed request
+> existed, even if every one was skipped by the recency/yield gate. The 3 stale requests
+> (ids 130/129/128, 70+ h old) were always present and always skipped, so `handled` stayed
+> `True` every cycle and **Phase 3 (curiosity) was never reached**. The engine logged
+> "real signals processed — skipping curiosity exploration" while producing nothing.
+> Fix: `_evolve_from_failed_request` now returns `True` only when evolution actually runs,
+> and Phase 1 sets `handled` only if at least one request was genuinely evolved. Log now
+> shows `processed 3 failed request(s) (evolved=False)` followed by `[ThinkAtRest] running
+> think cycle`.
+>
+> **Root cause 2 — evaluator threshold too strict (fixed `3c77350`):**
+> Once Phase 3 ran, the ThoughtGenerator produced a valid outward-facing curiosity thought
+> ("I wonder what's the latest update in the open-fantasia-imagegen skill's codebase…"),
+> but the Gemma evaluator scored it **0.5**, below the `min_score: 0.65` threshold, so it
+> was discarded (`curiosity cycle complete — 0 thought(s)`). Fix: lowered `thinking.min_score`
+> to **0.5** in `config.yaml` so genuine curiosity thoughts pass while still filtering noise.
+>
+> **Verification:** clean-boot observation confirmed the model server starts in `--lazy`
+> (no weights at boot — only "Lazy mode: model will load on first inference request");
+> the first think cycle (~15 min after boot) lazy-loads **Nemotron-Labs-Diffusion-3B**
+> (primary/drafter via `infer_draft`) and **Gemma 4 E2B-it** (audio slot via
+> `infer_local(slot="audio")`). Tests: `test_thought_engine` (14) green.
 ### Priority #7 — Local model selection via the desktop app (pull + curated list + slot)
 
 > ✅ **Implemented 2026-08-24** (branch `feature/think-at-rest-reactivation`):
