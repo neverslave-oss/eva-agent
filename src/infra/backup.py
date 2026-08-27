@@ -24,7 +24,13 @@ HOME = Path.home()
 BACKUP_ROOT = HOME / ".kernel-evolving" / "backups"
 WORKSPACE_DIR = HOME / ".kernel-evolving" / "workspace"
 ECOSYSTEM_DIR = HOME / ".kernel-evolving" / "ecosystem"
-CONFIG_PATH = Path(__file__).parent.parent.parent / "config.yaml"
+# Honor KERNEL_EVO_CONFIG (set by start.sh --config=...) when present.
+_CONFIG_OVERRIDE = os.environ.get("KERNEL_EVO_CONFIG", "").strip()
+CONFIG_PATH = (
+    Path(os.path.abspath(os.path.expanduser(_CONFIG_OVERRIDE)))
+    if _CONFIG_OVERRIDE
+    else Path(__file__).parent.parent.parent / "config.yaml"
+)
 ENV_PATH = Path(__file__).parent.parent / ".env"
 
 # Ensure backup root exists

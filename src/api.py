@@ -26,6 +26,19 @@ _logging.basicConfig(
 
 _BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+
+def _resolve_config_path() -> str:
+    """Resolve the active config file.
+
+    Honors KERNEL_EVO_CONFIG (set by start.sh --config=... so an alternate
+    config can be used on demand). Falls back to the repo's config.yaml.
+    """
+    override = os.environ.get("KERNEL_EVO_CONFIG", "").strip()
+    if override:
+        return os.path.abspath(os.path.expanduser(override))
+    return os.path.join(_BASE, "config.yaml")
+
+
 # Lazily initialized in startup() to avoid import-time circular failures.
 agent = None
 rep = None
@@ -217,7 +230,7 @@ async def startup():
 
     # Use the env-expanding loader so ${VAR} references in config.yaml resolve
     # from the environment (e.g. collective_memory.url, vision eye bases).
-    _cfg = _load_config(os.path.join(_BASE, "config.yaml"))
+    _cfg = _load_config(_resolve_config_path())
     # Expand ~ in well-known path keys so config stays portable
     for _key in ("olly_workspace", "workspace", "skills_dir", "private_skills_dir",
                  "routines_dir", "embedding_model_path"):
@@ -231,7 +244,7 @@ async def startup():
     if counts["skills"] or counts["routines"]:
         print(f"[bootstrap] Added {counts['skills']} skills, {counts['routines']} routines from ecosystem")
 
-    _config_path = os.path.join(_BASE, "config.yaml")
+    _config_path = _resolve_config_path()
     mdl.load(_config_path)
     agent.init(_config_path)
     print(f"[api] Kernel ready on :{_cfg['api']['port']}")
@@ -1625,7 +1638,7 @@ def evolution_trigger(body: EvolutionTriggerRequest):
     if body.cap:
         _evo_state.start(cap=body.cap)
 
-    with open(os.path.join(_BASE, "config.yaml")) as f:
+    with open(_resolve_config_path()) as f:
         cfg = _yaml.safe_load(f)
     skills_dir = os.path.expanduser(cfg.get("skills_dir", "./skills"))
 
@@ -1914,7 +1927,7 @@ def set_provider_routing(body: dict):
             vram_actions.append("model server running — ready for local inference")
 
     if body.get("persist"):
-        cfg_path = os.path.join(_BASE, "config.yaml")
+        cfg_path = _resolve_config_path()
         with open(cfg_path) as f:
             on_disk = _yaml.safe_load(f)
         providers_block = on_disk.setdefault("providers", {})
@@ -2406,7 +2419,7 @@ def assign_model_to_slot(body: dict):
         )
 
     # Persist to config.yaml model_slots.<slot>.model_path.
-    cfg_path = os.path.join(_BASE, "config.yaml")
+    cfg_path = _resolve_config_path()
     try:
         with open(cfg_path) as f:
             on_disk = yaml.safe_load(f) or {}
@@ -2479,7 +2492,7 @@ def set_thought_slot(body: dict):
         )
 
     # Persist to config.yaml thinking.thought_slot.
-    cfg_path = os.path.join(_BASE, "config.yaml")
+    cfg_path = _resolve_config_path()
     try:
         with open(cfg_path) as f:
             on_disk = yaml.safe_load(f) or {}

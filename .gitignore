@@ -59,3 +59,5 @@ package.json
 package-lock.json
 
 hot_fields.json
+# Local machine overrides — never commit (contains local paths/keys)
+config.local.yaml

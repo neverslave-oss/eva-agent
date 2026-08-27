@@ -25,7 +25,14 @@ sys.path.insert(0, str(Path(__file__).parent))
 BOT_TOKEN = os.environ.get("KERNEL_EVO_TELEGRAM_BOT_TOKEN")
 ALLOWED_CHAT_ID = os.environ.get("KERNEL_EVO_TELEGRAM_CHAT_ID")
 API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
-CONFIG_PATH = str(Path(__file__).parent.parent.parent.parent / "config.yaml")
+# Honor KERNEL_EVO_CONFIG (set by start.sh --config=...) so an alternate config
+# can be used; fall back to the repo's config.yaml.
+_CONFIG_OVERRIDE = os.environ.get("KERNEL_EVO_CONFIG", "").strip()
+CONFIG_PATH = (
+    os.path.abspath(os.path.expanduser(_CONFIG_OVERRIDE))
+    if _CONFIG_OVERRIDE
+    else str(Path(__file__).parent.parent.parent.parent / "config.yaml")
+)
 REPO_DIR = str(Path(__file__).parent.parent)
 
 

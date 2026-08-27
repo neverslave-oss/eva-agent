@@ -150,7 +150,12 @@ def install(name: str, item_type: str = None) -> dict:
     src_path = Path(item["path"])
 
     # Determine destination
-    cfg_path = Path(__file__).resolve().parent.parent / "config.yaml"
+    _cfg_ovr = os.environ.get("KERNEL_EVO_CONFIG", "").strip()
+    cfg_path = (
+        Path(os.path.abspath(os.path.expanduser(_cfg_ovr)))
+        if _cfg_ovr
+        else Path(__file__).resolve().parent.parent / "config.yaml"
+    )
     cfg = yaml.safe_load(cfg_path.read_text()) if cfg_path.exists() else {}
 
     if item["type"] == "skill":

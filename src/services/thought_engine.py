@@ -911,7 +911,12 @@ class ThinkAtRest:
         max_iter = 3
         critique_notes = ""
 
-        cfg_path = os.path.join(os.path.dirname(__file__), "..", "..", "config.yaml")
+        _cfg_ovr = os.environ.get("KERNEL_EVO_CONFIG", "").strip()
+        cfg_path = (
+            os.path.abspath(os.path.expanduser(_cfg_ovr))
+            if _cfg_ovr
+            else os.path.join(os.path.dirname(__file__), "..", "..", "config.yaml")
+        )
         try:
             with open(cfg_path) as f:
                 cfg = yaml.safe_load(f)
@@ -1036,7 +1041,12 @@ class ThinkAtRest:
             from core.pipelines import goal_discovery as _gd
             import yaml, os
             if hasattr(evolution_hook, "maybe_evolve"):
-                cfg_path = os.path.join(os.path.dirname(__file__), "..", "..", "config.yaml")
+                _cfg_ovr = os.environ.get("KERNEL_EVO_CONFIG", "").strip()
+                cfg_path = (
+                    os.path.abspath(os.path.expanduser(_cfg_ovr))
+                    if _cfg_ovr
+                    else os.path.join(os.path.dirname(__file__), "..", "..", "config.yaml")
+                )
                 with open(cfg_path) as f:
                     cfg = yaml.safe_load(f)
                 skills_dir = os.path.expanduser(cfg.get("skills_dir", "~/.kernel-evolving/ecosystem"))

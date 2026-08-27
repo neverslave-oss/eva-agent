@@ -8,6 +8,20 @@ MODEL_LOG="/tmp/kernel_evolving_model_server.log"
 SOCKET="/tmp/kernel_evolving_model.sock"
 PORT=8779
 
+# Optional alternate config: ./start.sh --config=config.reorganized.yaml
+# Sets KERNEL_EVO_CONFIG so the API, telegram bot, and model server all use it.
+CONFIG="$REPO/config.yaml"
+for arg in "$@"; do
+    case "$arg" in
+        --config=*)
+            CONFIG="${arg#--config=}"
+            [[ "$CONFIG" != /* ]] && CONFIG="$REPO/$CONFIG"
+            ;;
+    esac
+done
+export KERNEL_EVO_CONFIG="$CONFIG"
+echo "[kernel-evolving] Using config: $CONFIG"
+
 # Prefer explicit KERNEL_EVO_PYTHON, then local venv, then system python3
 if [[ -n "${KERNEL_EVO_PYTHON:-}" ]]; then
     PY="$KERNEL_EVO_PYTHON"
@@ -51,7 +65,7 @@ echo "[kernel-evolving] Version: ${GIT_VERSION:-$PY_VERSION}"
 _TASK_PROVIDER=$($PY -c "
 import yaml, sys
 try:
-    cfg = yaml.safe_load(open('$REPO/config.yaml'))
+    cfg = yaml.safe_load(open('$CONFIG'))
     print(cfg.get('providers', {}).get('task_inference', 'local'))
 except Exception:
     print('local')
@@ -88,7 +102,7 @@ elif [[ $_SOCK_ALIVE -eq 0 ]]; then
         _MODEL_ARGS="--lazy"
     fi
     nohup $PY "$REPO/src/core/inference/model_server.py" \
-        --config "$REPO/config.yaml" \
+        --config "$CONFIG" \
         $_MODEL_ARGS \
         >> "$MODEL_LOG" 2>&1 &
     MODEL_PID=$!
