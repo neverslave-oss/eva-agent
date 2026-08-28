@@ -162,6 +162,11 @@ _nemotron_threshold = 0.9
 # ---------------------------------------------------------------------------
 _model_supports_tools = True  # True only for Gemma 4+ with native parse_response
 _audio_capable = False         # True when main model natively handles audio (Gemma 4)
+_native_agentic = False        # True when the main model can handle the full agentic flow
+                               # (tool loop + synthesis) itself — e.g. any-to-any Omni —
+                               # so we skip the Qwen two-stage detour entirely.
+_is_omni = False               # True for Qwen2.5-Omni (any-to-any) — needs its special
+                               # generate(generation_mode="text") path, not the generic one.
 
 # ---------------------------------------------------------------------------
 # Multimodal slot — Gemma 4 E2B-it loaded via HF transformers.
@@ -231,23 +236,34 @@ def _sync_globals_from_slot(state: "SlotState") -> None:  # type: ignore[name-de
     request handlers reference.  This keeps every handler working unchanged
     while the slot registry manages the objects.
     """
-    global _model, _processor, _is_nemotron, _audio_capable, _model_supports_tools
+    global _model, _processor, _is_nemotron, _audio_capable, _model_supports_tools, _native_agentic, _is_omni
     _model = state.model
     _processor = state.processor
     _is_nemotron = state.is_nemotron
     _audio_capable = state.audio_capable
     _model_supports_tools = state.supports_tools
+    _native_agentic = getattr(state, 'native_agentic', False)
+    _is_omni = getattr(state, 'is_omni', False)
 
 
 # ---------------------------------------------------------------------------
 # Capability detection helpers
 # ---------------------------------------------------------------------------
 
-_AUDIO_CAPABLE_PREFIXES = ("google/gemma-4", "google/gemma-3")
+_AUDIO_CAPABLE_PREFIXES = ("google/gemma-4", "google/gemma-3", "qwen2.5-omni", "qwen2.5-omni")
+
+# Models that can handle the FULL agentic flow (tool loop + synthesis) natively
+# on their own — no Qwen two-stage detour, no Nemotron synthesis fallback.
+# Any-to-any models like Qwen2.5-Omni are the canonical example.
+_NATIVE_AGENTIC_PREFIXES = ("qwen2.5-omni", "qwen3-omni", "qwen3-omni-moe", "gemma-4", "gemma-3")
+
+# Qwen2.5-Omni (any-to-any) — its generate() has a non-standard signature and
+# needs generation_mode="text" for fast text-only output.
+_OMNI_PREFIXES = ("qwen2.5-omni", "qwen3-omni", "qwen3-omni-moe")
 
 def _detect_capabilities(model_path: str, cfg: dict):
-    """Set _model_supports_tools and _audio_capable from model_path + config."""
-    global _model_supports_tools, _audio_capable
+    """Set capability flags from model_path + config."""
+    global _model_supports_tools, _audio_capable, _native_agentic, _is_omni
     model_name = cfg.get("model", {}).get("name", "")
     # Tool support: Gemma 4 has parse_response (detected later via processor),
     # but for vLLM path we detect by name.
@@ -265,8 +281,72 @@ def _detect_capabilities(model_path: str, cfg: dict):
         model_path.lower().replace("\\", "/").find(p.lower().split("/")[-1]) != -1
         for p in _AUDIO_CAPABLE_PREFIXES
     )
+    # Native agentic: the model drives the whole flow itself. Any-to-any
+    # models (Omni) and native-tool models (Gemma 4) qualify. Nemotron stays
+    # on its tested two-stage path.
+    _native_agentic = (
+        any(model_name.lower().startswith(p.lower()) for p in _NATIVE_AGENTIC_PREFIXES)
+        or any(
+            model_path.lower().replace("\\", "/").find(p.lower().split("/")[-1]) != -1
+            for p in _NATIVE_AGENTIC_PREFIXES
+        )
+    )
+    # Omni any-to-any detection
+    _is_omni = (
+        any(model_name.lower().startswith(p.lower()) for p in _OMNI_PREFIXES)
+        or any(
+            model_path.lower().replace("\\", "/").find(p.lower().split("/")[-1]) != -1
+            for p in _OMNI_PREFIXES
+        )
+    )
     print(f"[model_server] Tool-calling support: {_model_supports_tools}", flush=True)
     print(f"[model_server] Audio capability: {_audio_capable}", flush=True)
+    print(f"[model_server] Native agentic: {_native_agentic}", flush=True)
+    print(f"[model_server] Omni any-to-any: {_is_omni}", flush=True)
+
+
+# ---------------------------------------------------------------------------
+# Qwen2.5-Omni any-to-any inference helper
+# ---------------------------------------------------------------------------
+# Omni's generate() has a non-standard signature: it requires input_ids and
+# defaults to AUDIO output (thinker + talker + token2wav), which is extremely
+# slow and memory-heavy. For text-only output (chat, vision, STT) we must pass
+# generation_mode="text" so only the thinker runs and returns the token ids.
+def _omni_generate_text(inputs: dict, max_new_tokens: int = 1024) -> "object":
+    """Run Qwen2.5-Omni for TEXT-only output. Returns the raw token tensor.
+
+    inputs: dict from processor(text=..., images=[...]|audio=[...], return_tensors='pt')
+    """
+    import torch
+    _ensure_model()
+    gen_kwargs = {}
+    # Route the multimodal inputs Omni's generate() understands.
+    if inputs.get("attention_mask") is not None:
+        gen_kwargs["attention_mask"] = inputs["attention_mask"]
+    if inputs.get("pixel_values") is not None:
+        gen_kwargs["pixel_values"] = inputs["pixel_values"]
+    # Omni's thinker needs the grid/thw tensors to know the layout of the
+    # image patches / audio features — without them it sees None and crashes.
+    if inputs.get("image_grid_thw") is not None:
+        gen_kwargs["image_grid_thw"] = inputs["image_grid_thw"]
+    if inputs.get("feature_attention_mask") is not None:
+        gen_kwargs["feature_attention_mask"] = inputs["feature_attention_mask"]
+    if inputs.get("input_features") is not None:
+        gen_kwargs["input_features"] = inputs["input_features"]
+    if inputs.get("audio_feature_lengths") is not None:
+        gen_kwargs["audio_feature_lengths"] = inputs["audio_feature_lengths"]
+    _mark_activity_start()
+    try:
+        with torch.no_grad():
+            out = _model.generate(
+                input_ids=inputs["input_ids"],
+                generation_mode="text",
+                thinker_max_new_tokens=max_new_tokens,
+                **gen_kwargs,
+            )
+    finally:
+        _mark_activity_end()
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -535,6 +615,16 @@ def _load_hf_model(config_path="config.yaml", model_path_override: str | None = 
             _cls_name = _architectures[0]  # e.g. 'Qwen3VLForConditionalGeneration'
             _mod = _il.import_module('transformers')
             _ModelCls = getattr(_mod, _cls_name, None)
+            # Some any-to-any models (e.g. Qwen2.5-Omni) declare a base
+            # architecture (Qwen2_5OmniModel) that isn't exported at the
+            # transformers top level, but expose a ForConditionalGeneration
+            # variant that IS. Try that before falling back to Auto classes.
+            if _ModelCls is None or not hasattr(_ModelCls, 'generate'):
+                _fcg_name = _cls_name.replace('Model', 'ForConditionalGeneration')
+                if _fcg_name != _cls_name:
+                    _ModelCls = getattr(_mod, _fcg_name, None)
+                    if _ModelCls is not None:
+                        _cls_name = _fcg_name
             if _ModelCls is not None and hasattr(_ModelCls, 'generate'):
                 print(f"[model_server] Using architecture class: {_cls_name}", flush=True)
                 _model = _ModelCls.from_pretrained(model_path, trust_remote_code=True, **load_kwargs)
@@ -598,6 +688,8 @@ def _load_hf_model(config_path="config.yaml", model_path_override: str | None = 
                 is_nemotron=_is_nemotron,
                 audio_capable=_audio_capable,
                 supports_tools=_model_supports_tools,
+                native_agentic=_native_agentic,
+                is_omni=_is_omni,
             )
             _slot_registry._loaded["primary"] = _state
             print("[model_server] Primary slot wired into SlotRegistry", flush=True)
@@ -731,6 +823,8 @@ def _load_nemotron(config_path="config.yaml", model_path_override: str | None = 
     # Nemotron has full tool-calling via its chat template (XML function_calls format)
     _model_supports_tools = True
     _audio_capable = False
+    # Nemotron stays on its tested Qwen two-stage path — not native-agentic.
+    _native_agentic = False
     print(f"[model_server] Nemotron ready. mode={_nemotron_mode} block={_nemotron_block_length} threshold={_nemotron_threshold}", flush=True)
 
 
@@ -1419,15 +1513,18 @@ def _handle_infer_plain(params: dict) -> dict:
                 inputs = _processor(text=last, return_tensors="pt").to(_target_device())
 
             input_len = inputs["input_ids"].shape[-1]
-            with torch.no_grad():
-                out = _model.generate(
-                    **inputs,
-                    max_new_tokens=8192,
-                    do_sample=True,
-                    temperature=0.7,
-                    top_p=0.9,
-                    top_k=50,
-                )
+            if _is_omni:
+                out = _omni_generate_text(inputs, max_new_tokens=8192)
+            else:
+                with torch.no_grad():
+                    out = _model.generate(
+                        **inputs,
+                        max_new_tokens=8192,
+                        do_sample=True,
+                        temperature=0.7,
+                        top_p=0.9,
+                        top_k=50,
+                    )
             result = _processor.decode(out[0][input_len:], skip_special_tokens=True).strip()
             return {"result": result}
     except Exception as e:
@@ -1816,15 +1913,21 @@ def _handle_infer_with_tools(params: dict, send_line) -> dict:
     # (its chat template understands tool-call XML), but the single-model
     # native tool loop below it in this function has never been this
     # pipeline's tested/working path for Nemotron — two-stage
-    # (Qwen -> Nemotron synthesis) is, and stays the route for it. Only
-    # non-Nemotron models with detected native tool support (e.g. Gemma 4
-    # after a swap, per _TOOL_CAPABLE_PREFIXES) skip the two-stage detour.
-    if _is_nemotron or not _model_supports_tools:
+    # (Qwen -> Nemotron synthesis) is, and stays the route for it.
+    #
+    # Native-agentic models (any-to-any like Qwen2.5-Omni, or Gemma 4 with
+    # parse_response) handle the ENTIRE flow on their own — no Qwen tool-calling
+    # detour, no Nemotron synthesis. They skip the two-stage pipeline and use the
+    # single-model loop below.
+    if _is_nemotron or not _native_agentic:
         _two_stage_result = _run_two_stage_if_available(params, send_line)
         if _two_stage_result is not None:
             return _two_stage_result
 
-    if not _model_supports_tools:
+    # Native agentic models fall through to the single-model loop below, which
+    # degrades gracefully when parse_response isn't available. Only non-native
+    # models with no tool support go straight to plain inference.
+    if not _model_supports_tools and not _native_agentic:
         return _handle_infer_plain(params)
 
     messages = params["messages"]
@@ -2391,11 +2494,16 @@ def _handle_infer_with_image(params: dict) -> dict:
     )
     inputs = _processor(text=text, images=[img], return_tensors="pt").to(_target_device())
     input_len = inputs["input_ids"].shape[-1]
-    with torch.no_grad():
-        _gen_kwargs = dict(max_new_tokens=max_new_tokens, do_sample=False)
-        if _drafter is not None:
-            _gen_kwargs["assistant_model"] = _drafter
-        out = _model.generate(**inputs, **_gen_kwargs)
+    if _is_omni:
+        # Omni's generate() is non-standard — use generation_mode="text" so it
+        # returns text tokens fast instead of doing slow audio synthesis.
+        out = _omni_generate_text(inputs, max_new_tokens=max_new_tokens)
+    else:
+        with torch.no_grad():
+            _gen_kwargs = dict(max_new_tokens=max_new_tokens, do_sample=False)
+            if _drafter is not None:
+                _gen_kwargs["assistant_model"] = _drafter
+            out = _model.generate(**inputs, **_gen_kwargs)
     result = _processor.decode(out[0][input_len:], skip_special_tokens=True).strip()
     return {"result": result}
 
@@ -2573,12 +2681,17 @@ def _handle_infer_with_audio(params: dict) -> dict:
     print(f"[infer_with_audio] Input IDs length: {input_len}", flush=True)
     _mark_activity_start()
     try:
-        with torch.no_grad():
-            _gen_kwargs = dict(max_new_tokens=max_new_tokens, do_sample=False)
-            if active_model is _model and _drafter is not None:
-                _gen_kwargs["assistant_model"] = _drafter
-            print(f"[infer_with_audio] Generating...", flush=True)
-            out = active_model.generate(**inputs, **_gen_kwargs)
+        if active_model is _model and _is_omni:
+            # Omni any-to-any: text-only STT via generation_mode="text"
+            print(f"[infer_with_audio] Omni STT generating (text mode)...", flush=True)
+            out = _omni_generate_text(inputs, max_new_tokens=max_new_tokens)
+        else:
+            with torch.no_grad():
+                _gen_kwargs = dict(max_new_tokens=max_new_tokens, do_sample=False)
+                if active_model is _model and _drafter is not None:
+                    _gen_kwargs["assistant_model"] = _drafter
+                print(f"[infer_with_audio] Generating...", flush=True)
+                out = active_model.generate(**inputs, **_gen_kwargs)
             print(f"[infer_with_audio] Generation complete, output shape: {out.shape}", flush=True)
     finally:
         _mark_activity_end()
@@ -2886,7 +2999,7 @@ def _handle_unload(params: dict) -> dict:
     """
     global _model, _processor, _drafter, _drafter_tokenizer
     global _vllm_engine, _vllm_model_path, _vllm_enabled
-    global _is_nemotron
+    global _is_nemotron, _mm_model, _mm_processor, _slot_registry
     import gc
     import torch
 
@@ -2907,7 +3020,25 @@ def _handle_unload(params: dict) -> dict:
             del obj
             globals()[attr] = None
 
+    # Free the multimodal slot (Gemma) too — this is what STT/vision/audio and
+    # infer_local use, and it holds a large VRAM footprint that unload() must
+    # release so a different primary model can be tested.
+    for attr in ("_mm_model", "_mm_processor"):
+        obj = globals().get(attr)
+        if obj is not None:
+            del obj
+            globals()[attr] = None
+
+    # Free all named slots in the SlotRegistry (e.g. tool_calling/Qwen).
+    if _slot_registry is not None:
+        try:
+            for _sname in list((_slot_registry.loaded_slots() or {}).keys()):
+                _slot_registry.unload(_sname)
+        except Exception as _sl_err:
+            print(f"[model_server] unload: slot cleanup error ({_sl_err})", flush=True)
+
     _is_nemotron = False
+    _native_agentic = False
 
     gc.collect()
     freed_mb = 0
@@ -3020,6 +3151,8 @@ def _handle_swap_model(params: dict) -> dict:
                 is_nemotron=_is_nemotron,
                 audio_capable=_audio_capable,
                 supports_tools=_model_supports_tools,
+                native_agentic=_native_agentic,
+                is_omni=_is_omni,
             )
             _slot_registry._loaded["primary"] = _state
             _slot_registry._specs["primary"] = _spec

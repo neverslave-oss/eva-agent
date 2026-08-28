@@ -186,6 +186,18 @@ def main():
         slot, label = MODEL_SLOTS[key]
         print(f"--- {label} (slot={slot}) ---")
 
+        # ── Isolate each model ─────────────────────────────────────────────
+        # Evict ALL resident models (primary, multimodal slot, and every named
+        # slot) before loading the next one, so each model is benchmarked in
+        # isolation with full VRAM. Without this, co-resident models (e.g.
+        # Gemma + Qwen) leave no VRAM for the next model and the Nemotron VRAM
+        # guard refuses to load.
+        try:
+            _u = mc.unload()
+            print(f"  [unload] freed ~{_u.get('freed_mb', 0)}MB before {label}")
+        except Exception as _ue:
+            print(f"  [unload] failed before {label}: {_ue}")
+
         if run_text:
             r = bench_text(mc, slot, label)
             results.append(r)

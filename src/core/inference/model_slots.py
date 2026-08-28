@@ -54,6 +54,8 @@ class SlotState:
     is_nemotron: bool = False
     audio_capable: bool = False
     supports_tools: bool = False
+    native_agentic: bool = False
+    is_omni: bool = False
     loaded_at: float = field(default_factory=time.time)
     adapter_registry: Dict[str, Any] = field(default_factory=dict)
 
@@ -167,6 +169,8 @@ class SlotRegistry:
                 entry["is_nemotron"] = state.is_nemotron
                 entry["audio_capable"] = state.audio_capable
                 entry["supports_tools"] = state.supports_tools
+                entry["native_agentic"] = state.native_agentic
+                entry["is_omni"] = state.is_omni
                 entry["adapter_count"] = len(state.adapter_registry)
             result.append(entry)
         return result

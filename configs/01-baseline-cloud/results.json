@@ -1,0 +1,34 @@
+{
+  "label": "01-baseline-cloud",
+  "timestamp": "2026-08-27 15:52:14",
+  "models": "primary=Nemotron, thought=Gemma",
+  "tests_run": 4,
+  "tests_ok": 4,
+  "avg_latency_s": 3.683,
+  "results": [
+    {
+      "latency_s": 3.513,
+      "reply": "A transformer is a neural network architecture that processes sequences (like text) in parallel rather than word-by-word. It uses a mechanism called **self-attention** to weigh how relevant every token in the sequence is to every other token, capturing long-range relationships. This parallel, attention-driven design makes it highly scalable, which is why it powers modern large language models like GPT and the model I'm built on.",
+      "error": null,
+      "label": "text"
+    },
+    {
+      "latency_s": 6.104,
+      "reply": "**15% of 240 is 36.**\n\nThe calculator confirmed it: `240 \u00d7 0.15 = 36.0`.",
+      "error": null,
+      "label": "tool_calc"
+    },
+    {
+      "latency_s": 1.459,
+      "reply": "**33% of 36 is 11.88.**\n\nThe calculator confirmed it: `36 \u00d7 0.33 = 11.88`.",
+      "error": null,
+      "label": "tool_followup"
+    },
+    {
+      "latency_s": 3.656,
+      "reply": "Here's a brief summary of this conversation:\n\n1. **Verification checks** \u2014 You asked me to reply with exact phrases (\"context fix verified\", \"unbounded verified\"), which I did, confirming those systems are working.\n\n2. **Transformer explanation** \u2014 I explained in 3 short sentences what a transformer neural network is (parallel processing, self-attention, scalability).\n\n3. **Two calculator questions** \u2014 I computed:\n   - **15% of 240 = 36**\n   - **33% of 36 = 11.88**\n\nThat's it \u2014 quick verifications, a quick explainer, and some simple arithmetic. Nothing heavy. What would you like to tackle next?",
+      "error": null,
+      "label": "memory_context"
+    }
+  ]
+}

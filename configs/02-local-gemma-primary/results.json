@@ -1,0 +1,34 @@
+{
+  "label": "02-local-gemma-primary",
+  "timestamp": "2026-08-27 16:05:07",
+  "models": "primary=Gemma, thought=Gemma, local",
+  "tests_run": 4,
+  "tests_ok": 4,
+  "avg_latency_s": 118.416,
+  "results": [
+    {
+      "latency_s": 23.803,
+      "reply": "A Transformer neural network uses self-attention mechanisms to weigh the importance of different parts of the input sequence. It processes data by calculating relationships between all elements simultaneously, capturing long-range dependencies. This architecture allows it to model complex sequences, like language, by understanding context across the entire input at once.",
+      "error": null,
+      "label": "text"
+    },
+    {
+      "latency_s": 17.977,
+      "reply": "15% of 240 is 36.",
+      "error": null,
+      "label": "tool_calc"
+    },
+    {
+      "latency_s": 246.437,
+      "reply": "33% of 36 is 11.88.",
+      "error": null,
+      "label": "tool_followup"
+    },
+    {
+      "latency_s": 185.448,
+      "reply": "We have established my identity as Kernel-Evo, a self-evolving, local AI agent. We have tested my adherence to strict formatting rules by responding to specific, constrained replies. We have also performed basic mathematical calculations when requested.",
+      "error": null,
+      "label": "memory_context"
+    }
+  ]
+}

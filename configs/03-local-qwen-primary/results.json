@@ -1,0 +1,34 @@
+{
+  "label": "03-local-qwen-primary",
+  "timestamp": "2026-08-27 16:07:09",
+  "models": "primary=Qwen3.5, thought=Qwen, local",
+  "tests_run": 4,
+  "tests_ok": 4,
+  "avg_latency_s": 4.29,
+  "results": [
+    {
+      "latency_s": 4.652,
+      "reply": "A transformer is a neural network architecture that processes entire sequences of data at once (in parallel) rather than one step at a time, using a mechanism called **attention** to weigh how relevant each word is to every other word. This parallel design makes it far faster to train than older recurrent networks, which is why it powers modern language models like GPT and me. Its core innovation is self-attention, which lets the model capture long-range relationships and context in text.",
+      "error": null,
+      "label": "text"
+    },
+    {
+      "latency_s": 6.976,
+      "reply": "The `bc` command didn't return a value (it may not be installed). Let me compute it directly.\n\n15% of 240 = 0.15 \u00d7 240 = **36**.",
+      "error": null,
+      "label": "tool_calc"
+    },
+    {
+      "latency_s": 1.775,
+      "reply": "The `calculator` tool isn't available in this environment, so I'll compute it directly.\n\n33% of 36 = 0.33 \u00d7 36 = **11.88**.",
+      "error": null,
+      "label": "tool_followup"
+    },
+    {
+      "latency_s": 3.756,
+      "reply": "Here's a brief summary of what we've done in this conversation:\n\n1. **Two fixed-format replies** \u2014 You asked me to reply with exactly \"context fix verified\" and \"unbounded verified,\" which I did verbatim.\n\n2. **Transformer explanation** \u2014 I gave a 3-sentence explanation of what a transformer neural network is (parallel processing, self-attention, powers modern LLMs).\n\n3. **Percentage calculations**:\n   - 15% of 240 = **36**\n   - Then 33% of that result (36) = **11.88**\n\nNote: the `calculator` tool isn't actually available in this environment, so I computed both by hand (0.15 \u00d7 240, then 0.33 \u00d7 36).",
+      "error": null,
+      "label": "memory_context"
+    }
+  ]
+}

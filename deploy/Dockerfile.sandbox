@@ -3,7 +3,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 COPY src/ ./src/
-COPY config.yaml .
+COPY config.container.yaml config.yaml
 # EVOLUTION_ENABLED=true by default in sandbox
 ENV EVOLUTION_ENABLED=true
 ENV KERNEL_SANDBOX=true

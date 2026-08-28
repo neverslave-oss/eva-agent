@@ -107,9 +107,13 @@ elif [[ $_SOCK_ALIVE -eq 0 ]]; then
         >> "$MODEL_LOG" 2>&1 &
     MODEL_PID=$!
     echo "[kernel-evolving] Model server PID $MODEL_PID — log: $MODEL_LOG"
-    echo "[kernel-evolving] Waiting for model server socket (up to 120s)..."
+    # Local multimodal models (e.g. Qwen2.5-Omni) can take 3+ minutes to load
+    # weights, so the socket wait must be generous. Override with
+    # KERNEL_EVO_MODEL_TIMEOUT (seconds) if needed.
+    _MODEL_TIMEOUT="${KERNEL_EVO_MODEL_TIMEOUT:-360}"
+    echo "[kernel-evolving] Waiting for model server socket (up to ${_MODEL_TIMEOUT}s)..."
     _MODEL_READY=0
-    for i in $(seq 1 120); do
+    for i in $(seq 1 "$_MODEL_TIMEOUT"); do
         if [[ -S "$SOCKET" ]] && $PY -c "import socket as _s; s=_s.socket(_s.AF_UNIX,_s.SOCK_STREAM); s.settimeout(2); s.connect('$SOCKET'); s.close()" 2>/dev/null; then
             _MODEL_READY=1
             echo "[kernel-evolving] Model server ready after ${i}s"

@@ -2358,14 +2358,19 @@ async def pull_model(body: dict):
         job["status"] = "running"
         job["started_at"] = time.time()
         try:
-            from runtime_paths import MODELS_DIR
             token = os.environ.get("HF_TOKEN", "")
-            # Download into kernel-evolving's dedicated models folder, NOT the
-            # shared HF cache. This keeps the local model list limited to
-            # agent-compatible models (pulled here) instead of every model the
-            # user has cached (e.g. FLUX image models, TTS voices).
-            os.makedirs(MODELS_DIR, exist_ok=True)
-            cache_dir = str(MODELS_DIR)
+            # Download into the shared HF hub root (KERNEL_EVO_HF_HUB, e.g.
+            # /mnt/e/models/huggingface) so models land in its `hub/` subdir and
+            # are shared across projects — NOT in kernel-evolving's workspace.
+            # Falls back to MODELS_DIR only if the hub root env is unset.
+            hub_root = os.environ.get("KERNEL_EVO_HF_HUB", "").strip()
+            if hub_root:
+                os.makedirs(hub_root, exist_ok=True)
+                cache_dir = hub_root
+            else:
+                from runtime_paths import MODELS_DIR
+                os.makedirs(MODELS_DIR, exist_ok=True)
+                cache_dir = str(MODELS_DIR)
             path = await asyncio.to_thread(
                 snapshot_download, repo_id=repo_id, cache_dir=cache_dir,
                 token=token, ignore_patterns=["*.gguf"],

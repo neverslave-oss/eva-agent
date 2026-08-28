@@ -10,7 +10,7 @@ RUN pip install --no-cache-dir \
     psutil>=5.9.0
 
 COPY src/ ./src/
-COPY config.yaml .
+COPY config.container.yaml config.yaml
 
 # Write a stub model.py that satisfies imports without torch/GPU
 RUN printf '%s\n' \
