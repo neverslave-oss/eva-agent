@@ -56,6 +56,7 @@ class SlotState:
     supports_tools: bool = False
     native_agentic: bool = False
     is_omni: bool = False
+    is_janus: bool = False
     loaded_at: float = field(default_factory=time.time)
     adapter_registry: Dict[str, Any] = field(default_factory=dict)
 
@@ -171,6 +172,7 @@ class SlotRegistry:
                 entry["supports_tools"] = state.supports_tools
                 entry["native_agentic"] = state.native_agentic
                 entry["is_omni"] = state.is_omni
+                entry["is_janus"] = state.is_janus
                 entry["adapter_count"] = len(state.adapter_registry)
             result.append(entry)
         return result

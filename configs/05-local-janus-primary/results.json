@@ -1,0 +1,34 @@
+{
+  "label": "05-local-janus-primary",
+  "timestamp": "2026-08-29 20:02:07",
+  "models": null,
+  "tests_run": 4,
+  "tests_ok": 4,
+  "avg_latency_s": 8.745,
+  "results": [
+    {
+      "latency_s": 2.403,
+      "reply": "A transformer is a neural network architecture introduced in 2017 that processes data (like text) using a mechanism called self-attention, which weighs how relevant each word is to every other word in a sequence. Unlike earlier models that read input one word at a time, transformers process the entire sequence in parallel, making them much faster to train and highly effective at capturing long-range relationships. This architecture powers virtually all modern large language models, including GPT, Claude, and Gemini.",
+      "error": null,
+      "label": "text"
+    },
+    {
+      "latency_s": 10.425,
+      "reply": "15% of 240 is **36**.\n\nYou can verify with a quick calculation: 240 \u00d7 0.15 = 36.",
+      "error": null,
+      "label": "tool_calc"
+    },
+    {
+      "latency_s": 6.199,
+      "reply": "33% of 36 is **11.88** (36 \u00d7 0.33 = 11.88).",
+      "error": null,
+      "label": "tool_followup"
+    },
+    {
+      "latency_s": 15.952,
+      "reply": "Here's a brief summary of our conversation so far:\n\n1. **Two verification checks** \u2014 You asked me to reply with exact phrases (\"context fix verified\" and \"unbounded verified\"), which I did.\n\n2. **Transformer explanation** \u2014 I explained in three short sentences what a transformer neural network is (self-attention, parallel processing, powers modern LLMs).\n\n3. **Two percentage calculations** \u2014 I computed 15% of 240 = 36, then 33% of that result = 11.88.\n\nAll pretty straightforward tasks so far \u2014 no files, tools, or complex workstreams involved. Let me know what you'd like to tackle next!",
+      "error": null,
+      "label": "memory_context"
+    }
+  ]
+}

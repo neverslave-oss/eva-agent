@@ -78,7 +78,7 @@ model:
   dtype: bfloat16
   max_context_length: 32768
   name: deepseek-ai/Janus-Pro-7B
-  path: ${KERNEL_EVO_HF_HUB}/hub/models--deepseek-ai--Janus-Pro-7B/snapshots/5c3eb3fb2a3b61094328465ba61fcd4272090d67
+  path: ${KERNEL_EVO_HF_HUB}/models--deepseek-ai--Janus-Pro-7B/snapshots/5c3eb3fb2a3b61094328465ba61fcd4272090d67
   quantize: 4bit
   speculative_decoding: false
 
@@ -184,14 +184,14 @@ providers:
     synthesis: false
     task_inference: true
     trajectory_teacher: true
-  stt: openrouter
+  stt: local
   synthesis: hf
   task_inference: local
   trajectory_min_critic_score: 0.7
   trajectory_require_artifact: true
   trajectory_teacher: hf
-  tts: openrouter
-  vision: openrouter
+  tts: local
+  vision: local
 
 # ── 4. AGENT BEHAVIORS ───────────────────────────────────────────────────
 # audio, browser, delegation, discovery, planning, memory, goal_discovery

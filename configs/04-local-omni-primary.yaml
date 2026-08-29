@@ -1,76 +1,83 @@
-# ============================================================================
-# KERNEL-EVOLVING — CONFIGURATION
-# ============================================================================
-# Grouped into logical sections for readability. Port the keys/values from
-# config.yaml under each section, keeping the key names identical.
-
-# --- 0. INITIALIZATION / PATHS / PIPELINE / SELF-IDENTITY --------------------------------
-
-self_identity:
-  adr_active:
-  - ADR-004
-  - ADR-005
-  - ADR-006
-  - ADR-007
-  - ADR-008
-  - ADR-009
-  - ADR-010
-  - ADR-011
-  - ADR-012
-  - ADR-013
-  - ADR-014
-  codename: kernel-evolving
-  purpose: Self-evolving agent. Receives delegated tasks from the user and/or base
-    kernel. Detects skill gaps, synthesises new skills via Tier 2 with critic gate,
-    reflects during idle time, verifies before acquiring, decomposes multi-step tasks
-    via micro-planner.
-  role: agent
-  version_tag: v1.18.5-evolving
-
-
-paths:
-  DIGEST_HTML: ~/.openclaw/media/digest_today_improved.html
-  DIGEST_JSON: ~/.openclaw/media/digest_today.json
-  INVESTOR: ~/.openclaw/workspace/repositories/open-agentic-investor
-  MENTAL_MAP: ~/.openclaw/workspace/repositories/mental-map
-  NEVERSLAVE_POSTS: ${KERNEL_EVO_NEVERSLAVE_POSTS}
-  OLLY_WORKSPACE: ~/.openclaw/workspace
-  REPOSITORIES: ~/.openclaw/workspace/repositories
-  ROUTINES_LOG: ~/.openclaw/workspace/scripts/routines.log
-  SCOUT: ~/.openclaw/workspace/repositories/open-workspace-tracker/scripts/scout.py
-  SCRIPTS_DIR: ~/.openclaw/workspace/scripts
-  SECURITY_MONITOR: ~/.openclaw/workspace/scripts/security_monitor.sh
-  TRACKER: ~/.openclaw/workspace/repositories/open-workspace-tracker/scripts/tracker.py
-  WORKSPACE_LEGAL: ~/.openclaw/workspace-legal
-  WORKSPACE_MARKETING: ~/.openclaw/workspace-marketing
-
-pipeline:
-  async_enabled: true
-  job_ttl_s: 3600
-  speculative_stages: false
-
-
-
-# ── 1. CORE ──────────────────────────────────────────────────────────────
-# api, workspace, kernel_workspace, olly_workspace, logging
 api:
   host: 0.0.0.0
   openclaw_endpoint: http://localhost:18789
   port: 8779
-
-workspace: ~/.kernel-evolving/workspace
+audio:
+  enabled: true
+  input_device: default
+  output_device: default
+  wake_word: hey  eva
+browser:
+  enabled: true
+  headless: true
+  max_steps: 15
+  provider: task_inference
+  screenshot_dir: ~/.kernel-evolving/workspace/tmp/browser_screenshots
+  timeout_s: 240
+cluster:
+  discovery: mdns
+  enabled: false
+  node_id: kernel-evolving-local
+  peers: []
+collective_memory:
+  url: ${KERNEL_EVO_COLLECTIVE_MEMORY_URL}
+core_skills:
+- kernel-doc-retrieval
+- voice-clone
+delegation:
+  coding_agents: true
+  enabled: false
+  kernel_peers: true
+  openclaw: true
+  prefer_local: true
+discovery:
+  coding_agents: true
+  enabled: true
+  interval_s: 120
+  mdns: false
+  port_scan: true
+  timeout_s: 1
+ecosystem:
+  bootstrap_on_startup: true
+  branch: main
+  cache_dir: ~/.kernel-evolving/ecosystem
+  community: fabiopacifici-bot/microclaw_community_ecosystem
+  private: fabiopacifici-bot/microclaw_private_ecosystem
+  routines_dir: ~/.kernel-evolving/ecosystem
+  skills_dir: ~/.kernel-evolving/ecosystem
+embedding_backend: native
+embedding_model_path: ${KERNEL_EVO_HF_HUB}/hub_cache/models--unsloth--embeddinggemma-300m-qat-q8_0-unquantized/snapshots/dc4294deb8cbaad174042a020037fb3a5b008976
+embedding_server_url: http://localhost:8770/embeddings
+evolution:
+  finetune_gate:
+    adapter_active_dir: ~/.kernel-evolving/workspace/artifacts/adapter_active
+    adapter_output_dir: ~/.kernel-evolving/workspace/artifacts/finetune
+    enabled: false
+    min_improvement: 0
+    shadow_port: 8780
+    shadow_socket: /tmp/kernel_evo_shadow.sock
+    state_file: ~/.kernel-evolving/workspace/data/finetune_gate_state.json
+    trajectory_threshold: 50
+  min_candidate_score: 0.35
+  recommendation_boost: 0.05
+goal_discovery:
+  boot_pattern_cap: 0
+  deferred_drain_per_cycle: 1
+inference:
+  backend: transformers
+  gpu_memory_utilization: 0.65
+  max_model_len: 115536
+  speculative_decoding: false
+  speculative_drafter: ''
+  speculative_num_speculative_tokens: 5
 kernel_workspace: ~/.kernel-evolving/workspace
-olly_workspace: ~/.openclaw/workspace
-
 logging:
   file: /tmp/eva.log
   level: INFO
-
-
-
-# ── 2. MODEL CONFIGURATION ───────────────────────────────────────────────
-# model, model_slots, stt_model, model_catalog, model_context_lengths,
-# model_server, inference, embedding
+memory:
+  context_budget_mb: 512
+  max_replicas: 3
+  replica_depth_limit: 1
 model:
   adapter_path: null
   device: cuda:0
@@ -81,14 +88,6 @@ model:
   path: ${KERNEL_EVO_HF_HUB}/models--Qwen--Qwen2.5-Omni-3B/snapshots/f75b40e3da2003cdd6e1829b1f420ca70797c34e
   quantize: 4bit
   speculative_decoding: false
-
-stt_model:
-  device: cuda:0
-  dtype: bfloat16
-  name: google/gemma-4-E2B-it
-  path: ${KERNEL_EVO_HF_HUB}/hub/models--google--gemma-4-E2B-it/snapshots/4742fe843cc01b9aed62122f6e0ddd13ea48b3d3
-  quantize: 4bit
-
 model_catalog:
 - drafter: ''
   key: nemotron3b
@@ -132,54 +131,47 @@ model_slots:
     model_path: ${KERNEL_EVO_HF_CACHE}/models--Qwen--Qwen3.5-0.8B/snapshots/2fc06364715b967f1860aea9cf38778875588b17
     quantize: null
     role: tool_calling
-inference:
-  backend: transformers
-  gpu_memory_utilization: 0.65
-  max_model_len: 115536
-  speculative_decoding: false
-  speculative_drafter: ''
-  speculative_num_speculative_tokens: 5
-
-embedding_backend: native
-embedding_model_path: ${KERNEL_EVO_HF_HUB}/hub_cache/models--unsloth--embeddinggemma-300m-qat-q8_0-unquantized/snapshots/dc4294deb8cbaad174042a020037fb3a5b008976
-embedding_server_url: http://localhost:8770/embeddings
-
-# ── 3. PROVIDERS / CLOUD ─────────────────────────────────────────────────
-# providers
-
+olly_workspace: ~/.openclaw/workspace
+paths:
+  DIGEST_HTML: ~/.openclaw/media/digest_today_improved.html
+  DIGEST_JSON: ~/.openclaw/media/digest_today.json
+  INVESTOR: ~/.openclaw/workspace/repositories/open-agentic-investor
+  MENTAL_MAP: ~/.openclaw/workspace/repositories/mental-map
+  NEVERSLAVE_POSTS: ${KERNEL_EVO_NEVERSLAVE_POSTS}
+  OLLY_WORKSPACE: ~/.openclaw/workspace
+  REPOSITORIES: ~/.openclaw/workspace/repositories
+  ROUTINES_LOG: ~/.openclaw/workspace/scripts/routines.log
+  SCOUT: ~/.openclaw/workspace/repositories/open-workspace-tracker/scripts/scout.py
+  SCRIPTS_DIR: ~/.openclaw/workspace/scripts
+  SECURITY_MONITOR: ~/.openclaw/workspace/scripts/security_monitor.sh
+  TRACKER: ~/.openclaw/workspace/repositories/open-workspace-tracker/scripts/tracker.py
+  WORKSPACE_LEGAL: ~/.openclaw/workspace-legal
+  WORKSPACE_MARKETING: ~/.openclaw/workspace-marketing
+peers:
+- description: Production kernel — user-facing, stable. Delegates evolution and skill-gap
+    tasks here. When a task is resolved here, results feed back to the base ecosystem.
+  id: kernel-base
+  role: production
+  url: http://localhost:8769
+pipeline:
+  async_enabled: true
+  job_ttl_s: 3600
+  speculative_stages: false
+planning:
+  complexity_threshold: 2
+  draft_plan: true
+  enabled: true
+  max_steps: 5
+  synthesise_with_draft: true
+private_skills_dir: ~/.kernel-evolving/ecosystem/private/skills
 providers:
-  # Local GPU temperature thresholds (Celsius) for critical and resume. If the
-  # GPU temperature exceeds the critical threshold, local inference tasks will
-  # be paused until the temperature drops below the resume threshold. This is to
-  # prevent overheating and potential damage to the GPU.
+  collect_trajectories: true
+  critic: local
+  fallback_provider: openrouter
   gpu_temp_critical_c: 85
   gpu_temp_resume_c: 78
-  # Main provider for all inference tasks (task_inference, stt, tts, vision, planning, critic).
-  # Options: local, hf, openai, anthropic, copilot, openrouter.
-  task_inference: local
-  stt: local
-  tts: local
-  vision: local
-  planning: hf
-  critic: hf
-  synthesis: hf
-  fallback_provider: openrouter
-  
-  # Default models by provider. Override per task via model_overrides.
-  models:
-    anthropic: claude-sonnet-4-6
-    copilot: claude-sonnet-4.5
-    hf: deepseek-ai/DeepSeek-V4-Flash-0731
-    local: null
-    olly: deepseek-ai/DeepSeek-V4-Flash-0731
-    openai: gpt-5.4
-    openrouter: deepseek-ai/DeepSeek-V4-Flash-0731
-    openrouter_tool: deepseek-ai/DeepSeek-V4-Flash-0731
-
-  # Inference provider used by the HF Router for the hf provider. The router
-  # endpoint is https://router.huggingface.co/v1 and the provider is selected by
-  # a ":{provider}" suffix on the model id (e.g. ":deepinfra"). deepinfra is the
-  # cheapest provider serving DeepSeek-V4-Flash-0731. Overridable via HF_ROUTER_PROVIDER.
+  hf_dataset_private: true
+  hf_dataset_repo: PacificDev/kernel-evo-trajectories
   hf_provider: deepinfra
   model_overrides:
     critic: deepseek-ai/DeepSeek-V4-Flash-0731
@@ -189,120 +181,67 @@ providers:
     task_inference: deepseek-ai/DeepSeek-V4-Flash-0731
     trajectory_teacher: deepseek-ai/DeepSeek-V4-Flash-0731
     tts: openai/tts-1
-    vision: google/gemma-4-26b-a4b-it  
-
-
-  # Training dataset configuration for trajectory teacher and critic. The dataset is private and hosted on Hugging Face.
-  hf_dataset_private: true
-  # Trajectory collection configuration for the critic and trajectory teacher. The dataset is private and hosted on Hugging Face.
-  hf_dataset_repo: PacificDev/kernel-evo-trajectories
-  collect_trajectories: true
-  trajectory_min_critic_score: 0.7
-  trajectory_require_artifact: true
-  trajectory_teacher: hf
-
-
-
-
-  
-  
+    vision: google/gemma-4-26b-a4b-it
+  models:
+    anthropic: claude-sonnet-4-6
+    copilot: claude-sonnet-4.5
+    hf: deepseek-ai/DeepSeek-V4-Flash-0731
+    local: null
+    olly: deepseek-ai/DeepSeek-V4-Flash-0731
+    openai: gpt-5.4
+    openrouter: deepseek-ai/DeepSeek-V4-Flash-0731
+    openrouter_tool: deepseek-ai/DeepSeek-V4-Flash-0731
+  planning: local
   streaming:
     enabled: true
     synthesis: false
     task_inference: true
     trajectory_teacher: true
-
-# ── 4. AGENT BEHAVIORS ───────────────────────────────────────────────────
-# audio, browser, delegation, discovery, planning, memory, goal_discovery
-
-audio:
-  enabled: true
-  input_device: default
-  output_device: default
-  wake_word: hey  eva
-browser:
-  # Agentic browser automation (browser_use tool) for multi-step web tasks.
-  # The browser runs headless by default; set enabled to false to disable the
-  # browser_use tool entirely (web_search keeps working via the skill).
-  enabled: true
-  headless: true
-  # Max agent steps per task — caps runaway loops. Overridable per call via max_steps.
-  max_steps: 15
-  # Timeout (seconds) for the whole browser_use task.
-  timeout_s: 240
-  # LLM provider used to drive the browser agent. Reuses the task_inference
-  # routing (local or cloud) so it works in cloud mode with HF Router.
-  provider: task_inference
-  # Optional: save a final screenshot to this dir (empty = disabled).
-  screenshot_dir: ~/.kernel-evolving/workspace/tmp/browser_screenshots
-delegation:
-  coding_agents: true
-  enabled: false
-  kernel_peers: true
-  openclaw: true
-  prefer_local: true
-discovery:
-  coding_agents: true
-  enabled: true
-  interval_s: 120
-  mdns: false
-  port_scan: true
-  timeout_s: 1
-
-planning:
-  complexity_threshold: 2
-  draft_plan: true
-  enabled: true
-  max_steps: 5
-  synthesise_with_draft: true
-
-memory:
-  context_budget_mb: 512
-  max_replicas: 3
-  replica_depth_limit: 1
-
-goal_discovery:
-  boot_pattern_cap: 0
-  deferred_drain_per_cycle: 1
-
-# ── 5. ECOSYSTEM / SKILLS ────────────────────────────────────────────────
-# ecosystem, skills_dir, private_skills_dir, core_skills, collective_memory
-ecosystem:
-  bootstrap_on_startup: true
-  branch: main
-  cache_dir: ~/.kernel-evolving/ecosystem
-  community: fabiopacifici-bot/microclaw_community_ecosystem
-  private: fabiopacifici-bot/microclaw_private_ecosystem
-  routines_dir: ~/.kernel-evolving/ecosystem
-  skills_dir: ~/.kernel-evolving/ecosystem
-
-skills_dir: ~/.kernel-evolving/ecosystem
-private_skills_dir: ~/.kernel-evolving/ecosystem/private/skills
-
-core_skills:
-- kernel-doc-retrieval
-- voice-clone
-
-collective_memory:
-  url: ${KERNEL_EVO_COLLECTIVE_MEMORY_URL}
-
+  stt: local
+  synthesis: local
+  task_inference: local
+  trajectory_min_critic_score: 0.7
+  trajectory_require_artifact: true
+  trajectory_teacher: local
+  tts: local
+  vision: local
 routines_dir: ~/.kernel-evolving/ecosystem
-# ── 6. EVOLUTION / THINKING ──────────────────────────────────────────────
-# evolution, thinking
-
-evolution:
-  finetune_gate:
-    adapter_active_dir: ~/.kernel-evolving/workspace/artifacts/adapter_active
-    adapter_output_dir: ~/.kernel-evolving/workspace/artifacts/finetune
-    enabled: false
-    min_improvement: 0
-    shadow_port: 8780
-    shadow_socket: /tmp/kernel_evo_shadow.sock
-    state_file: ~/.kernel-evolving/workspace/data/finetune_gate_state.json
-    trajectory_threshold: 50
-  min_candidate_score: 0.35
-  recommendation_boost: 0.05
-
+self_identity:
+  adr_active:
+  - ADR-004
+  - ADR-005
+  - ADR-006
+  - ADR-007
+  - ADR-008
+  - ADR-009
+  - ADR-010
+  - ADR-011
+  - ADR-012
+  - ADR-013
+  - ADR-014
+  codename: kernel-evolving
+  purpose: Self-evolving agent. Receives delegated tasks from the user and/or base
+    kernel. Detects skill gaps, synthesises new skills via Tier 2 with critic gate,
+    reflects during idle time, verifies before acquiring, decomposes multi-step tasks
+    via micro-planner.
+  role: agent
+  version_tag: v1.18.5-evolving
+sensors:
+  pi:
+    base: ${KERNEL_EVO_SENSORS_PI_BASE:-}
+    timeout_s: 5.0
+services:
+  voice_server:
+    install_hint: git clone https://github.com/fabiopacifici-bot/olly-voice-server
+      && cd olly-voice-server && bash setup.sh
+    url: ''
+skills_dir: ~/.kernel-evolving/ecosystem
+stt_model:
+  device: cuda:0
+  dtype: bfloat16
+  name: google/gemma-4-E2B-it
+  path: ${KERNEL_EVO_HF_HUB}/hub/models--google--gemma-4-E2B-it/snapshots/4742fe843cc01b9aed62122f6e0ddd13ea48b3d3
+  quantize: 4bit
 thinking:
   critique:
     enabled: true
@@ -313,11 +252,6 @@ thinking:
   idle_threshold_s: 300
   journal_dir: ~/.kernel-evolving/workspace/thoughts
   min_score: 0.5
-  # Which local model slot the Think-at-Rest engine uses for thought generation
-  # AND evaluation. "audio" = Gemma 4 E2B-it (multimodal, lazy-loaded — preferred);
-  # "primary" = Nemotron-Labs-Diffusion-3B; "tool_calling" = Qwen3.5-0.8B.
-  # Setting this makes the engine load only ONE local model instead of two.
-  thought_slot: audio
   observer:
     anti_seed_count: 10
     enabled: true
@@ -329,61 +263,21 @@ thinking:
   promote_threshold: 0.8
   startup_grace_s: 600
   thought_interval_s: 1800
-
-
-
-
-# ── 7. PEERS / SERVICES / CLUSTER ────────────────────────────────────────
-# peers, services, cluster
-peers:
-- description: Production kernel — user-facing, stable. Delegates evolution and skill-gap
-    tasks here. When a task is resolved here, results feed back to the base ecosystem.
-  id: kernel-base
-  role: production
-  url: http://localhost:8769
-
-services:
-  voice_server:
-    install_hint: git clone https://github.com/fabiopacifici-bot/olly-voice-server
-      && cd olly-voice-server && bash setup.sh
-    url: ''
-
-cluster:
-  discovery: mdns
-  enabled: false
-  node_id: kernel-evolving-local
-  peers: []
-
-# ── 8. HARDWARE ──────────────────────────────────────────────────────────
-# vision, sensors, paths
-
-# HARDWARE CONFIGURATION 
-# ── Vision: unified `look` tool eye registry ──────────────────────────────
-# All endpoints/IPs are config-driven (set via the companion desktop app), never
-# hardcoded — portable across installs. Eyes register/unregister as they come
-# online (plug-and-play, health-checked by the registry).
+  thought_slot: audio
 vision:
   eyes:
     left:
-      kind: object_face
-      base: "${KERNEL_EVO_EYE_LEFT_BASE:-}"        # e.g. http://<hub-ip>:5010
-      stream: "${KERNEL_EVO_EYE_LEFT_STREAM:-}"   # e.g. http://<xiao-ip>:80/stream
+      base: ${KERNEL_EVO_EYE_LEFT_BASE:-}
       health: /health
+      kind: object_face
       status: unknown
+      stream: ${KERNEL_EVO_EYE_LEFT_STREAM:-}
       timeout_s: 5.0
     right:
-      kind: plant_health
-      base: "${KERNEL_EVO_EYE_RIGHT_BASE:-}"      # e.g. http://<hub-ip>:5000
-      stream: "${KERNEL_EVO_EYE_RIGHT_STREAM:-}" # e.g. http://<hub-ip>:5000/video_feed
+      base: ${KERNEL_EVO_EYE_RIGHT_BASE:-}
       health: /
+      kind: plant_health
       status: unknown
+      stream: ${KERNEL_EVO_EYE_RIGHT_STREAM:-}
       timeout_s: 5.0
-
-# ── Sensors: unified `sensors` tool registry ─────────────────────────────
-# Config-driven Pi sensor endpoints (set via the companion desktop app), never
-# hardcoded — portable across installs. Each entry is a read source (temp/humi/
-# moisture). The registry scales to N devices like the eye registry.
-sensors:
-  pi:
-    base: "${KERNEL_EVO_SENSORS_PI_BASE:-}"   # e.g. http://<hub-ip>:5000
-    timeout_s: 5.0
+workspace: ~/.kernel-evolving/workspace

@@ -167,6 +167,9 @@ _native_agentic = False        # True when the main model can handle the full ag
                                # so we skip the Qwen two-stage detour entirely.
 _is_omni = False               # True for Qwen2.5-Omni (any-to-any) — needs its special
                                # generate(generation_mode="text") path, not the generic one.
+_is_janus = False              # True for DeepSeek Janus/Janus-Pro — uses the custom janus
+                               # package (MultiModalityCausalLM + VLChatProcessor), not standard
+                               # AutoProcessor + model.generate(**inputs).
 
 # ---------------------------------------------------------------------------
 # Multimodal slot — Gemma 4 E2B-it loaded via HF transformers.
@@ -236,7 +239,7 @@ def _sync_globals_from_slot(state: "SlotState") -> None:  # type: ignore[name-de
     request handlers reference.  This keeps every handler working unchanged
     while the slot registry manages the objects.
     """
-    global _model, _processor, _is_nemotron, _audio_capable, _model_supports_tools, _native_agentic, _is_omni
+    global _model, _processor, _is_nemotron, _audio_capable, _model_supports_tools, _native_agentic, _is_omni, _is_janus
     _model = state.model
     _processor = state.processor
     _is_nemotron = state.is_nemotron
@@ -244,6 +247,7 @@ def _sync_globals_from_slot(state: "SlotState") -> None:  # type: ignore[name-de
     _model_supports_tools = state.supports_tools
     _native_agentic = getattr(state, 'native_agentic', False)
     _is_omni = getattr(state, 'is_omni', False)
+    _is_janus = getattr(state, 'is_janus', False)
 
 
 # ---------------------------------------------------------------------------
@@ -261,9 +265,13 @@ _NATIVE_AGENTIC_PREFIXES = ("qwen2.5-omni", "qwen3-omni", "qwen3-omni-moe", "gem
 # needs generation_mode="text" for fast text-only output.
 _OMNI_PREFIXES = ("qwen2.5-omni", "qwen3-omni", "qwen3-omni-moe")
 
+# DeepSeek Janus / Janus-Pro — uses the custom `janus` package
+# (MultiModalityCausalLM + VLChatProcessor), not standard transformers loading.
+_JANUS_PREFIXES = ("deepseek-ai/janus", "janus-pro", "janus-1", "janus-7")
+
 def _detect_capabilities(model_path: str, cfg: dict):
     """Set capability flags from model_path + config."""
-    global _model_supports_tools, _audio_capable, _native_agentic, _is_omni
+    global _model_supports_tools, _audio_capable, _native_agentic, _is_omni, _is_janus
     model_name = cfg.get("model", {}).get("name", "")
     # Tool support: Gemma 4 has parse_response (detected later via processor),
     # but for vLLM path we detect by name.
@@ -299,10 +307,19 @@ def _detect_capabilities(model_path: str, cfg: dict):
             for p in _OMNI_PREFIXES
         )
     )
+    # Janus detection
+    _is_janus = (
+        any(model_name.lower().startswith(p.lower()) for p in _JANUS_PREFIXES)
+        or any(
+            model_path.lower().replace("\\", "/").find(p.lower().split("/")[-1]) != -1
+            for p in _JANUS_PREFIXES
+        )
+    )
     print(f"[model_server] Tool-calling support: {_model_supports_tools}", flush=True)
     print(f"[model_server] Audio capability: {_audio_capable}", flush=True)
     print(f"[model_server] Native agentic: {_native_agentic}", flush=True)
     print(f"[model_server] Omni any-to-any: {_is_omni}", flush=True)
+    print(f"[model_server] Janus: {_is_janus}", flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -690,6 +707,7 @@ def _load_hf_model(config_path="config.yaml", model_path_override: str | None = 
                 supports_tools=_model_supports_tools,
                 native_agentic=_native_agentic,
                 is_omni=_is_omni,
+                is_janus=_is_janus,
             )
             _slot_registry._loaded["primary"] = _state
             print("[model_server] Primary slot wired into SlotRegistry", flush=True)
@@ -705,6 +723,12 @@ def _is_nemotron_model(model_path: str) -> bool:
     """Return True if the model path/name is a Nemotron-Labs-Diffusion variant."""
     name = (model_path or "").lower()
     return "nemotron" in name or "nemotron-labs-diffusion" in name
+
+
+def _is_janus_model(model_path: str) -> bool:
+    """Return True if the model path/name is a DeepSeek Janus/Janus-Pro variant."""
+    name = (model_path or "").lower()
+    return "janus" in name
 
 
 def _load_nemotron(config_path="config.yaml", model_path_override: str | None = None):
@@ -826,6 +850,133 @@ def _load_nemotron(config_path="config.yaml", model_path_override: str | None = 
     # Nemotron stays on its tested Qwen two-stage path — not native-agentic.
     _native_agentic = False
     print(f"[model_server] Nemotron ready. mode={_nemotron_mode} block={_nemotron_block_length} threshold={_nemotron_threshold}", flush=True)
+
+
+# ---------------------------------------------------------------------------
+# DeepSeek Janus / Janus-Pro loader + inference
+# ---------------------------------------------------------------------------
+# Janus uses the custom `janus` package (vendored at third_party/janus):
+#   - MultiModalityCausalLM (loaded via AutoModelForCausalLM + trust_remote_code)
+#   - VLChatProcessor for tokenization
+# Inference is NOT model.generate(**inputs); it uses prepare_inputs_embeds() then
+# language_model.generate(inputs_embeds=...). We keep the model in _model and the
+# tokenizer/processor in _processor so existing handlers can route to it.
+_janus_processor = None   # VLChatProcessor (also exposes .tokenizer)
+
+def _load_janus(config_path="config.yaml", model_path_override: str | None = None):
+    """Load a DeepSeek Janus/Janus-Pro model via the custom `janus` package."""
+    global _model, _processor, _is_janus, _janus_processor
+    _load_config(config_path)
+    cfg = _config or {}
+    model_path = model_path_override or cfg.get("model", {}).get("path") or cfg.get("model", {}).get("name", "")
+
+    try:
+        import third_party.janus.models as _jm  # registers multi_modality + MultiModalityCausalLM
+        from transformers import AutoModelForCausalLM
+        from third_party.janus.models.processing_vlm import VLChatProcessor
+        from third_party.janus.models.image_processing_vlm import VLMImageProcessor
+    except Exception as e:
+        print(f"[model_server] WARNING: janus package not available ({e}) — aborting Janus load", flush=True)
+        raise RuntimeError(f"Janus package required: {e}")
+
+    print(f"[model_server] Loading Janus model: {model_path} ...", flush=True)
+    # Load the processor first (it carries the tokenizer)
+    try:
+        _janus_processor = VLChatProcessor.from_pretrained(model_path)
+        _processor = _janus_processor.tokenizer
+    except Exception as e:
+        print(f"[model_server] Janus processor load failed ({e})", flush=True)
+        _processor = None
+
+    # Load the model in bfloat16 on GPU
+    import torch
+    load_kwargs = {}
+    if torch.cuda.is_available():
+        load_kwargs["device_map"] = "auto"
+        load_kwargs["torch_dtype"] = torch.bfloat16
+    else:
+        load_kwargs["torch_dtype"] = torch.bfloat16
+
+    _model = AutoModelForCausalLM.from_pretrained(
+        model_path, trust_remote_code=True, **load_kwargs
+    )
+    _model.eval()
+
+    _is_janus = True
+    _audio_capable = False
+    _model_supports_tools = False
+    _native_agentic = True  # Janus drives its own flow (text + vision)
+    print(f"[model_server] Janus loaded: {type(_model).__name__}", flush=True)
+
+
+def _janus_infer_text(messages: list, max_new_tokens: int = 8192) -> str:
+    """Text-only inference for Janus via prepare_inputs_embeds + language_model.generate."""
+    import torch
+    if _janus_processor is None:
+        raise RuntimeError("Janus processor not loaded")
+    # Flatten to a single user prompt (Janus is not a chat model in the standard sense)
+    text = "\n".join(
+        str(m.get("content", "")) for m in messages if m.get("role") in ("user", "assistant")
+    ) or "Hello"
+    conversation = [
+        {"role": "<|User|>", "content": text},
+        {"role": "<|Assistant|>", "content": ""},
+    ]
+    prepare_inputs = _janus_processor(
+        conversations=conversation, images=[], force_batchify=True
+    ).to(_target_device())
+    inputs_embeds = _model.prepare_inputs_embeds(**prepare_inputs)
+    tokenizer = _janus_processor.tokenizer
+    _mark_activity_start()
+    try:
+        with torch.no_grad():
+            outputs = _model.language_model.generate(
+                inputs_embeds=inputs_embeds,
+                attention_mask=prepare_inputs.attention_mask,
+                pad_token_id=tokenizer.eos_token_id,
+                bos_token_id=tokenizer.bos_token_id,
+                eos_token_id=tokenizer.eos_token_id,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+                use_cache=True,
+            )
+    finally:
+        _mark_activity_end()
+    return tokenizer.decode(outputs[0].cpu().tolist(), skip_special_tokens=True)
+
+
+def _janus_infer_image(image_path: str, prompt: str, max_new_tokens: int = 1024) -> str:
+    """Vision inference for Janus via prepare_inputs_embeds + language_model.generate."""
+    import torch
+    if _janus_processor is None:
+        raise RuntimeError("Janus processor not loaded")
+    from PIL import Image
+    img = Image.open(image_path).convert("RGB")
+    conversation = [
+        {"role": "<|User|>", "content": f"<image_placeholder>\n{prompt}", "images": [img]},
+        {"role": "<|Assistant|>", "content": ""},
+    ]
+    prepare_inputs = _janus_processor(
+        conversations=conversation, images=[img], force_batchify=True
+    ).to(_target_device())
+    inputs_embeds = _model.prepare_inputs_embeds(**prepare_inputs)
+    tokenizer = _janus_processor.tokenizer
+    _mark_activity_start()
+    try:
+        with torch.no_grad():
+            outputs = _model.language_model.generate(
+                inputs_embeds=inputs_embeds,
+                attention_mask=prepare_inputs.attention_mask,
+                pad_token_id=tokenizer.eos_token_id,
+                bos_token_id=tokenizer.bos_token_id,
+                eos_token_id=tokenizer.eos_token_id,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+                use_cache=True,
+            )
+    finally:
+        _mark_activity_end()
+    return tokenizer.decode(outputs[0].cpu().tolist(), skip_special_tokens=True)
 
 
 def _nemotron_infer(messages: list, max_new_tokens: int = 8192) -> str:
@@ -1039,6 +1190,12 @@ def _load_model(config_path="config.yaml"):
                 print(f"[model_server] WARNING: failed to build SlotRegistry: {_sre}", flush=True)
                 _slot_registry = None
         model_path = cfg["model"].get("path") or cfg["model"].get("name", "")
+
+        # Janus uses the custom `janus` package — completely different API
+        if _is_janus_model(model_path):
+            print("[model_server] Janus detected — using janus package loader", flush=True)
+            _load_janus(config_path, model_path_override=model_path)
+            return
 
         # Nemotron uses its own loader — completely different API from HF standard
         if _is_nemotron_model(model_path):
@@ -1468,6 +1625,14 @@ def _handle_infer_plain(params: dict) -> dict:
             )
         })
         print("[model_server] _handle_infer_plain: injected default system prompt (was missing)", flush=True)
+
+    # ── Janus path
+    if _is_janus:
+        try:
+            result = _janus_infer_text(messages, max_new_tokens=8192)
+            return {"result": result}
+        except Exception as e:
+            return {"error": str(e)}
 
     # ── Nemotron path
     if _is_nemotron:
@@ -1926,8 +2091,10 @@ def _handle_infer_with_tools(params: dict, send_line) -> dict:
 
     # Native agentic models fall through to the single-model loop below, which
     # degrades gracefully when parse_response isn't available. Only non-native
-    # models with no tool support go straight to plain inference.
-    if not _model_supports_tools and not _native_agentic:
+    # models with no tool support go straight to plain inference. Janus is a
+    # VLM without a standard tool loop, so it also goes to plain inference
+    # (which routes to _janus_infer_text).
+    if not _model_supports_tools and (not _native_agentic or _is_janus):
         return _handle_infer_plain(params)
 
     messages = params["messages"]
@@ -2356,6 +2523,15 @@ def _handle_infer_with_image(params: dict) -> dict:
     # E2B vision slot, ignoring the cloud-vision config (which is for Telegram
     # images). When True, skip cloud routing entirely.
     force_local = bool(params.get("force_local", False))
+
+    # ── Janus path (custom MultiModalityCausalLM — not standard generate) ───
+    if _is_janus:
+        try:
+            result = _janus_infer_image(image_path, prompt, max_new_tokens=max_new_tokens)
+            return {"result": result}
+        except Exception as e:
+            print(f"[model_server] Janus image inference failed ({e})", flush=True)
+            return {"error": f"Janus vision failed: {e}"}
 
     # ── Cloud vision routing (only when NOT forced local) ─────────────────────
     if not force_local:
@@ -3153,6 +3329,7 @@ def _handle_swap_model(params: dict) -> dict:
                 supports_tools=_model_supports_tools,
                 native_agentic=_native_agentic,
                 is_omni=_is_omni,
+                is_janus=_is_janus,
             )
             _slot_registry._loaded["primary"] = _state
             _slot_registry._specs["primary"] = _spec
