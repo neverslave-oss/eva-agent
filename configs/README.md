@@ -39,6 +39,12 @@ Plot: `python3 scripts/plot_benchmarks.py` → `configs/benchmark_avg_latency.pn
 | Vision | ✅ (cloud) | ✅ (local) | ❌ | ✅ (local) | ✅ (local) |
 | Audio/STT | ✅ (cloud) | ✅ (local) | ❌ | ✅ (local) | ❌ |
 
+## Charts
+
+![Average latency by config](benchmark_avg_latency.png)
+
+![Per-test latency by config (log scale)](benchmark_per_test.png)
+
 ## Insights
 
 1. **Qwen2.5-Omni-3B (04) is the fastest local model — 3.06s avg**, beating even
