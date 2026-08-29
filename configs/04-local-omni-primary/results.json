@@ -1,0 +1,34 @@
+{
+  "label": "04-local-omni-primary",
+  "timestamp": "2026-08-29 23:34:18",
+  "models": null,
+  "tests_run": 4,
+  "tests_ok": 4,
+  "avg_latency_s": 3.06,
+  "results": [
+    {
+      "latency_s": 3.781,
+      "reply": "A transformer is a neural network architecture that processes sequences using a mechanism called self-attention, which weighs the importance of every token relative to all others in the input. This allows it to capture long-range dependencies in parallel rather than sequentially, making it highly efficient for language tasks. It's the foundation of modern large language models like GPT and BERT.",
+      "error": null,
+      "label": "text"
+    },
+    {
+      "latency_s": 3.572,
+      "reply": "Confirmed: 15% of 240 is **36**.",
+      "error": null,
+      "label": "tool_calc"
+    },
+    {
+      "latency_s": 1.468,
+      "reply": "Confirmed: 33% of 36 is **11.88**.",
+      "error": null,
+      "label": "tool_followup"
+    },
+    {
+      "latency_s": 3.42,
+      "reply": "Here's a brief summary of our conversation so far:\n\n1. **Verification checks** \u2014 Three quick confirmations (`context fix verified`, `unbounded verified`).\n2. **Transformer explanation** \u2014 You asked for a 3-sentence explanation of transformer neural networks.\n3. **Math calculations** \u2014 We computed 15% of 240 = **36**, then followed up with 33% of that result = **11.88**.\n\nThat's the whole thread \u2014 a mix of short confirmations, a conceptual explanation, and a couple of simple percentage calculations.",
+      "error": null,
+      "label": "memory_context"
+    }
+  ]
+}
