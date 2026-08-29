@@ -942,7 +942,10 @@ def _janus_infer_text(messages: list, max_new_tokens: int = 8192) -> str:
             )
     finally:
         _mark_activity_end()
-    return tokenizer.decode(outputs[0].cpu().tolist(), skip_special_tokens=True)
+    # Janus uses a sentencepiece tokenizer whose leading-space marker (Ġ, U+0120)
+    # is not a registered special token, so skip_special_tokens=True leaves it in
+    # the decoded text. Normalise it back to a regular space.
+    return tokenizer.decode(outputs[0].cpu().tolist(), skip_special_tokens=True).replace("\u0120", " ")
 
 
 def _janus_infer_image(image_path: str, prompt: str, max_new_tokens: int = 1024) -> str:
@@ -976,7 +979,11 @@ def _janus_infer_image(image_path: str, prompt: str, max_new_tokens: int = 1024)
             )
     finally:
         _mark_activity_end()
-    return tokenizer.decode(outputs[0].cpu().tolist(), skip_special_tokens=True)
+    # Janus uses a sentencepiece tokenizer whose leading-space marker (Ġ, U+0120)
+    # is not a registered special token, so skip_special_tokens=True leaves it in
+    # the decoded text. Normalise it back to a regular space (vision responses
+    # show this artifact e.g. 'TheĠimageĠshows...').
+    return tokenizer.decode(outputs[0].cpu().tolist(), skip_special_tokens=True).replace("\u0120", " ")
 
 
 def _nemotron_infer(messages: list, max_new_tokens: int = 8192) -> str:
