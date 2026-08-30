@@ -42,9 +42,9 @@ class TestSensorRegistry:
         assert dev.timeout_s == 5.0
 
     def test_expands_env_var(self):
-        with patch.dict(os.environ, {"KERNEL_EVO_SENSORS_PI_BASE": "http://192.168.1.120:5000"}):
+        with patch.dict(os.environ, {"KERNEL_EVO_SENSORS_PI_BASE": "http://192.0.2.120:5000"}):
             reg = SensorRegistry(config={"sensors": {"pi": {"base": "${KERNEL_EVO_SENSORS_PI_BASE:-}"}}})
-        assert reg.get("pi").base == "http://192.168.1.120:5000"
+        assert reg.get("pi").base == "http://192.0.2.120:5000"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

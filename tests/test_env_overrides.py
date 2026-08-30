@@ -42,10 +42,10 @@ class TestSaveEnvOverrides:
     def test_persists_vision_eye_wiring_keys(self, tmp_path):
         store = _fresh_store(tmp_path)
         applied = eo.save_env_overrides({
-            "KERNEL_EVO_EYE_LEFT_BASE": "http://192.168.1.50:5010",
-            "KERNEL_EVO_EYE_LEFT_STREAM": "http://192.168.1.50:80/stream",
-            "KERNEL_EVO_EYE_RIGHT_BASE": "http://192.168.1.60:5000",
-            "KERNEL_EVO_EYE_RIGHT_STREAM": "http://192.168.1.60:5000/video_feed",
+            "KERNEL_EVO_EYE_LEFT_BASE": "http://192.0.2.50:5010",
+            "KERNEL_EVO_EYE_LEFT_STREAM": "http://192.0.2.50:80/stream",
+            "KERNEL_EVO_EYE_RIGHT_BASE": "http://192.0.2.60:5000",
+            "KERNEL_EVO_EYE_RIGHT_STREAM": "http://192.0.2.60:5000/video_feed",
             "KERNEL_EVO_DESCRIBE_BASE": "http://localhost:8005",
             "KERNEL_EVO_DESCRIBE_MODEL": "google/gemma-4-26b-a4b-it",
         })
@@ -59,7 +59,7 @@ class TestSaveEnvOverrides:
         ])
         # Persisted to the JSON store.
         stored = json.loads(store.read_text())
-        assert stored["KERNEL_EVO_EYE_LEFT_BASE"] == "http://192.168.1.50:5010"
+        assert stored["KERNEL_EVO_EYE_LEFT_BASE"] == "http://192.0.2.50:5010"
         assert stored["KERNEL_EVO_DESCRIBE_MODEL"] == "google/gemma-4-26b-a4b-it"
 
     def test_rejects_unknown_key(self, tmp_path):
@@ -91,12 +91,12 @@ class TestLoadEnvOverrides:
     def test_injects_vision_keys_into_os_environ(self, tmp_path):
         store = _fresh_store(tmp_path)
         eo.save_env_overrides({
-            "KERNEL_EVO_EYE_RIGHT_BASE": "http://192.168.1.60:5000",
+            "KERNEL_EVO_EYE_RIGHT_BASE": "http://192.0.2.60:5000",
             "KERNEL_EVO_DESCRIBE_BASE": "http://localhost:8005",
         })
         loaded = eo.load_env_overrides()
         assert "KERNEL_EVO_EYE_RIGHT_BASE" in loaded
-        assert os.environ.get("KERNEL_EVO_EYE_RIGHT_BASE") == "http://192.168.1.60:5000"
+        assert os.environ.get("KERNEL_EVO_EYE_RIGHT_BASE") == "http://192.0.2.60:5000"
         assert os.environ.get("KERNEL_EVO_DESCRIBE_BASE") == "http://localhost:8005"
 
     def test_returns_empty_when_no_store(self, tmp_path):

@@ -49,7 +49,7 @@ from generate_targeted_gap_trajectories import (
 )
 
 WORKSPACE = Path.home() / ".kernel-evolving/workspace"
-VOICE_SAMPLE = str(Path.home() / ".openclaw/media/voice-samples/fabio-ita-phonetic.wav")
+VOICE_SAMPLE = str(Path.home() / ".openclaw/media/voice-samples/default-ita-phonetic.wav")
 
 # ── Gap F: vision / kernel-doc-retrieval ─────────────────────────────────────
 # Gemma 4 has native vision. kernel-doc-retrieval skill exposes it via run_skill.
@@ -102,7 +102,7 @@ GAP_F_TASKS = [
 
 # ── Gap G: voice-clone skill ──────────────────────────────────────────────────
 # Teaches Gemma 4 to use the voice-clone skill via run_skill.
-# Voice sample: fabio-ita-phonetic.wav (exists locally).
+# Voice sample: default-ita-phonetic.wav (exists locally).
 
 GAP_G_TASKS = [
     # Basic TTS clone requests

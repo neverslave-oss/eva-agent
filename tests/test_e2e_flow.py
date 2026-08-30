@@ -500,7 +500,9 @@ class TestVoicePipeline(unittest.TestCase):
     def test_voice_clone_endpoint_reachable(self):
         """olly-voice-server /tts/clone endpoint must return 200 with WAV content."""
         import requests, os
-        sample = os.path.expanduser("~/.openclaw/media/voice-samples/fabio-en-phonetic.wav")
+        sample = os.path.expanduser("~/.openclaw/media/voice-samples/default-en-phonetic.wav")
+        # Override with BENCH_AUDIO / KERNEL_DEFAULT_VOICE_SAMPLE if a real sample exists
+        sample = os.environ.get("KERNEL_DEFAULT_VOICE_SAMPLE", sample)
         if not os.path.exists(sample):
             self.skipTest(f"Voice sample not found: {sample}")
         try:

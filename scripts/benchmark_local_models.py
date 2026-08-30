@@ -38,7 +38,11 @@ if os.path.join(_REPO, "src") not in sys.path:
 
 # Test assets
 TEST_IMAGE = "/tmp/bench_assets/test_chart.png"
-TEST_AUDIO = "/home/pacificDev/.openclaw/workspace/repositories/olly-voice-server/media/voice-samples/fabio-en-phonetic.wav"
+# Audio sample path is machine-specific; override with BENCH_AUDIO env var.
+TEST_AUDIO = os.environ.get(
+    "BENCH_AUDIO",
+    os.path.expanduser("~/.openclaw/media/voice-samples/default-en-phonetic.wav"),
+)
 
 TEXT_PROMPT = "Explain in 3 short sentences what a transformer neural network is."
 TOOL_PROMPT = "What is 15% of 240? Use the calculator tool to compute it."

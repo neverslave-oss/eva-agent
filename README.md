@@ -7,19 +7,27 @@
 ![python](https://img.shields.io/badge/python-3.11%2B-blue)
 [![Hippocratic License HL3-LAW-MIL-SV](https://img.shields.io/static/v1?label=Hippocratic%20License&message=HL3-LAW-MIL-SV&labelColor=5e2751&color=bc8c3d)](https://firstdonoharm.dev/version/3/0/law-mil-sv.html)
 
-> **v1.0.0 — fresh open-source launch.** This is a scrubbed, portable release of
-> the Kernel-Evolving agent. Machine-specific paths, credentials, and internal
-> working notes have been removed and replaced with environment variables (see
-> `.env.example`). The full development history remains private; this repository
-> starts clean at v1.0.0.
+> **v1.0.0 — open-source release.** Machine-specific paths, credentials, and
+> internal working notes have been removed and replaced with environment
+> variables (see `.env.example`). This is the open-source build of the
+> **EVA** agent — see the [OSS repository](https://github.com/neverslave-oss/eva-agent)
+> and [eva.neverslave.com](https://eva.neverslave.com).
 
 ---
 
 ## What It Is
 
-Kernel-Evolving is a standalone AI agent that runs entirely on local hardware. It handles fast, frequent tasks using a local GPU model (Nemotron-Labs-Diffusion-3B or Gemma 4 E2B-it) and escalates complex synthesis and planning to cloud providers (OpenAI, Anthropic, GitHub Copilot). It is designed to grow over time — acquiring new skills, refining its behaviour through fine-tuning, and reflecting during idle periods.
+Kernel-Evolving (codenamed **EVA**) is a standalone AI agent that runs entirely on local hardware. It handles fast, frequent tasks using a local GPU model — now including **native any-to-any support** (Qwen2.5-Omni) and **unified vision-language** (Janus-Pro-7B) in addition to the classic Nemotron-Diffusion and Gemma 4 E2B-it — and escalates complex synthesis and planning to cloud providers (OpenAI, Anthropic, GitHub Copilot). It is designed to grow over time — acquiring new skills, refining its behaviour through fine-tuning, and reflecting during idle periods.
 
-**Primary model:** Nemotron-Labs-Diffusion-3B (local GPU, 4-bit, 64k context) — fast and responsive on 16GB VRAM. Gemma 4 E2B-it is available as a named slot for audio/multimodal tasks.
+**Local primaries (benchmarked):**
+
+| Model | Type | Avg latency | Capabilities |
+|---|---|---|---|
+| Qwen2.5-Omni-3B | any-to-any | **3.06s** | text, tools, vision, audio |
+| Nemotron-Diffusion-3B | diffusion | **3.68s** (cloud) | text, tools |
+| Qwen3.5-0.8B | causal LM | **4.29s** | text, tools (direct) |
+| Janus-Pro-7B | vision-language | **8.75s** | text, vision |
+| Gemma 4 E2B-it | multimodal | 118.4s | text, tools, vision, audio |
 
 **Cloud providers:** Used only for Tier 2 skill synthesis, critic evaluation, planning, and trajectory fine-tuning. Task inference is always local by default.
 
@@ -27,38 +35,69 @@ Kernel-Evolving is a standalone AI agent that runs entirely on local hardware. I
 
 ## Core Architecture
 
-```
-┌──────────────────────────────────────────────┐
-│           Kernel-Evolving  :8779             │
-│                                              │
-│  Telegram bot ──► agent.triage()            │
-│  REST API      ──► infer_with_tools()        │
-│                         │                    │
-│               ┌─────────▼──────────┐         │
-│               │  model_server.py   │         │
-│               │  Unix socket IPC   │         │
-│               │  SlotRegistry      │         │
-│               │  primary / audio   │         │
-│               └────────────────────┘         │
-│                                              │
-│  Evolution loop ──► skill gap detection      │
-│  Think-at-Rest  ──► idle reflection          │
-│  Trajectory collector ──► fine-tune pipeline │
-│  Replica spawner ──► critic / planner        │
-│  Agent discovery ──► peers (Olly, base)      │
-└──────────────────────────────────────────────┘
-         │                        │
-         │ :8769 (optional)        │ cloud providers
-         ▼                        ▼
-  Base Kernel peer          OpenAI / Anthropic
-  (production agent)        GitHub Copilot / HF
+```mermaid
+flowchart TB
+    subgraph "Kernel-Evolving :8779"
+        TG["Telegram bot"]
+        API["REST API (FastAPI)"]
+        A["agent.triage()"]
+        MS["model_server.py<br/>(Unix socket IPC)"]
+        SR["SlotRegistry<br/>primary / audio / tool_calling"]
+        EVO["Evolution loop<br/>(Tier 1/2)"]
+        TAR["Think-at-Rest"]
+        TRAJ["Trajectory collector"]
+        REP["Replica spawner<br/>(critic/planner/pipeline)"]
+        DISC["Peer discovery"]
+
+        TG --> A
+        API --> A
+        A --> MS
+        MS --> SR
+        EVO --> A
+        TAR --> EVO
+        TRAJ --> EVO
+        REP --> A
+        DISC --> A
+    end
+
+    subgraph "Local models (GPU)"
+        NEMO["Nemotron-Diffusion-3B"]
+        OMNI["Qwen2.5-Omni-3B<br/>(any-to-any)"]
+        JANUS["Janus-Pro-7B<br/>(vision-language)"]
+        GEMMA["Gemma 4 E2B-it<br/>(audio/vision slot)"]
+        QWEN["Qwen3.5-0.8B<br/>(tool_calling slot)"]
+    end
+
+    subgraph "Cloud providers"
+        OA["OpenAI"]
+        AN["Anthropic"]
+        COP["GitHub Copilot"]
+        HF["Hugging Face"]
+    end
+
+    subgraph "Peers (optional)"
+        OLLY["Olly (OpenClaw :18789)"]
+        BASE["Base Kernel (:8769)"]
+    end
+
+    SR --> NEMO
+    SR --> OMNI
+    SR --> JANUS
+    SR --> GEMMA
+    SR --> QWEN
+    A --> OA
+    A --> AN
+    A --> COP
+    A --> HF
+    DISC --> OLLY
+    DISC --> BASE
 ```
 
-Kernel-Evolving manages its own model server process via Unix socket IPC. Evolution state, skill DB, thought journal, and trajectory store are all local.
+Kernel-Evolving manages its own model server process via Unix socket IPC. Evolution state, skill DB, thought journal, and trajectory store are all local. The model server's **SlotRegistry** keeps independently-managed named slots (primary, audio, tool_calling) with LRU eviction, and capable any-to-any / vision-language models (Omni, Janus) drive the full agentic flow natively without a separate tool-calling detour.
 
 **Peer agents:**
 - **Olly** (OpenClaw, :18789) — cloud orchestrator, Claude-based. Kernel-Evo is Olly's local execution layer.
-- **Base Kernel** (:8769, optional) — production-facing peer. Can delegate skill-gap and evolution tasks here. Skills promoted from Kernel-Evo's private ecosystem can be shared with base kernel.
+- **Base Kernel** (:8769, optional) — production-facing peer. Can delegate skill-gap and evolution tasks here.
 
 ---
 
@@ -96,16 +135,17 @@ Kernel-Evolving manages its own model server process via Unix socket IPC. Evolut
 
 ## Named Model Slots (ADR-018)
 
-The model server supports independently managed named slots, each with its own weights, VRAM footprint, and capability flags.
+The model server supports independently managed named slots, each with its own weights, VRAM footprint, and capability flags. The `primary` slot can be any supported local model — the config-driven default is Nemotron-Diffusion-3B, but you can swap in Qwen2.5-Omni (any-to-any), Janus-Pro-7B (vision-language), Gemma 4 E2B-it, or Qwen3.5-0.8B via the config or `/models/swap`.
 
 | Slot | Default model | Evictable | Purpose |
 |---|---|---|---|
-| `primary` | Nemotron-Labs-Diffusion-3B | Never | All text inference, tool calls |
+| `primary` | Qwen2.5-Omni-3B / Nemotron-Diffusion-3B | Never | All text inference, tool calls, vision, audio |
+| `tool_calling` | Qwen3.5-0.8B | Yes (LRU) | Two-stage tool-calling loop (non-native primaries) |
 | `audio` | Gemma 4 E2B-it | Yes (LRU) | STT, voice notes, audio-native tasks |
 | `draft` | _(future)_ | Yes | Speculative decoding drafter |
 | `embed` | _(future)_ | Yes | Embedding generation |
 
-LRU eviction triggers only when free VRAM drops below `vram_threshold_mb` (default 3 GB). On 16 GB VRAM, Nemotron + Gemma 4 fit simultaneously (~4.5 GB combined) — eviction is a safety backstop.
+Capable any-to-any / vision-language primaries (Omni, Janus) drive the full agentic flow natively, so the `tool_calling` slot is only used when the primary lacks native tool support. LRU eviction triggers only when free VRAM drops below `vram_threshold_mb` (default 3 GB). On 16 GB VRAM, a 3B primary + Gemma 4 fit simultaneously — eviction is a safety backstop.
 
 ---
 
@@ -202,8 +242,8 @@ ADR docs: [`docs/`](docs/)
 ## Install
 
 ```bash
-git clone https://github.com/fabiopacifici-bot/kernel-evolving
-cd kernel-evolving
+git clone https://github.com/neverslave-oss/eva-agent
+cd eva-agent
 bash install.sh
 ```
 
@@ -233,8 +273,8 @@ eva                  # interactive chat REPL
 
 Fresh install one-liner:
 ```bash
-git clone https://github.com/fabiopacifici-bot/kernel-evolving && \
-  cd kernel-evolving && \
+git clone https://github.com/neverslave-oss/eva-agent && \
+  cd eva-agent && \
   bash install.sh && \
   ln -sf "$(pwd)/eva" ~/.local/bin/eva && \
   bash start.sh
@@ -333,7 +373,7 @@ All variables are read from the environment at runtime. The authoritative, comme
 | `EVOLUTION_MAX_ITERATIONS` | `10` | Max evolution iterations per cycle |
 | `TIER2_APPROVAL_SKIP_LOCAL` | `false` | Skip local approval gate for Tier 2 skills |
 | `KERNEL_GH_ALLOWLIST_PREFIX` | `https://github.com/` | Skill repo allowlist prefix |
-| `KERNEL_GH_ALLOWLIST_ORG` | `fabiopacifici-bot` | Ecosystem org allowlist |
+| `KERNEL_GH_ALLOWLIST_ORG` | `neverslave-oss` | Ecosystem org allowlist |
 | `DISCOVERY_INTERVAL_S` | `300` | Goal-discovery scan interval (s) |
 | `DISCOVERY_THRESHOLD` | `3` | Hits before a pattern is promoted |
 | `DISCOVERY_BOOT_CAP` | `3` | Max patterns seeded at boot |
@@ -343,12 +383,12 @@ All variables are read from the environment at runtime. The authoritative, comme
 | `KERNEL_*_DB` (e.g. `KERNEL_MEMORY_DB`) | config | Redirect individual SQLite DB paths |
 | `KERNEL_VOICE_ACTIVITY_FILE` | `…/tmp/voice_activity.json` | Voice-activity state file |
 | `KERNEL_VOICE_SAMPLES_DIR` | config | Cloned voice samples dir |
-| `KERNEL_DEFAULT_VOICE_SAMPLE` | `fabio-en-phonetic.wav` | Default voice clone sample |
+| `KERNEL_DEFAULT_VOICE_SAMPLE` | `default-en-phonetic.wav` | Default voice clone sample |
 | `VOICE_SERVER_URL` | config | External voice-server URL |
 | `VOICE_CHAT_TRIAGE_TIMEOUT_S` | `60` | Voice chat triage timeout |
 | `OPENCLAW_ENDPOINT` | `http://localhost:18789` | OpenClaw (Olly) endpoint |
 | `OPENCLAW_URL` | – | OpenClaw URL alias (synthesizer) |
-| `KERNEL_EVO_GITHUB_REPO` | `fabiopacifici-bot/kernel-evolving` | Repo used by `/update` |
+| `KERNEL_EVO_GITHUB_REPO` | `neverslave-oss/eva-agent` | Repo used by `/update` |
 | `KERNEL_EVO_RELEASES_URL` / `KERNEL_EVO_TAGS_URL` | derived | GitHub API URLs for updates |
 | `EVA_API` | `http://localhost:8779` | `eva` CLI API base URL |
 | `SIM_MODE` | `false` | Bypass `exec_shell` approval (trajectory collection) |
@@ -420,4 +460,17 @@ values are ignored (they never clobber an existing key).
 
 ## Repo
 
-**Kernel-Evolving:** [fabiopacifici-bot/kernel-evolving](https://github.com/fabiopacifici-bot/kernel-evolving)
+**EVA / Kernel-Evolving (open source):** [neverslave-oss/eva-agent](https://github.com/neverslave-oss/eva-agent)
+**Website:** [eva.neverslave.com](https://eva.neverslave.com)
+
+---
+
+## Credits
+
+**EVA / Kernel-Evolving** was created by [**Fabio Pacifici**](https://github.com/fabiopacifici) 🐬 — a self-evolving, local-first AI agent designed to grow, reflect, and improve on its own hardware.
+
+Thanks to the open-source ecosystem (Hugging Face, PyTorch, Transformers, FastAPI) that makes local-first AI possible, and to the contributors who helped shape it.
+
+---
+
+*EVA is released under the [Hippocratic License HL3-LAW-MIL-SV](https://firstdonoharm.dev/version/3/0/law-mil-sv.html).*

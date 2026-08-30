@@ -76,7 +76,7 @@ def test_agent_init_expands_collective_memory_env():
 
     fake_cfg = {
         "api": {"openclaw_endpoint": "http://localhost:18789"},
-        "collective_memory": {"url": "http://192.168.1.113:8010"},  # already expanded
+        "collective_memory": {"url": "http://192.0.2.113:8010"},  # already expanded
         "skills_dir": "./skills",
         "routines_dir": "./routines",
         "core_skills": [],
@@ -89,7 +89,7 @@ def test_agent_init_expands_collective_memory_env():
         agent.init("config.yaml")
 
     mock_load.assert_called_once_with("config.yaml")
-    assert agent._config["collective_memory"]["url"] == "http://192.168.1.113:8010"
+    assert agent._config["collective_memory"]["url"] == "http://192.0.2.113:8010"
     assert "${" not in agent._config["collective_memory"]["url"], (
         "collective_memory.url must not leak a ${VAR} placeholder"
     )

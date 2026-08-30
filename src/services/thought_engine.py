@@ -53,7 +53,7 @@ Generate exactly ONE exploratory curiosity thought.
 This is NOT about what capabilities you lack — it's about exploring the outside world.
 
 Good examples:
-- "I wonder what changed in the fabiopacifici.com repo this week — let me check git log"
+- "I wonder what changed in my favourite open-source repo this week — let me check git log"
 - "I should benchmark my speculative decoding speed against last week's baseline"
 - "What's the GPU temperature trend over the last 24 hours?"
 - "I want to check if there are new releases of my dependencies"

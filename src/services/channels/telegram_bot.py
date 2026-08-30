@@ -279,7 +279,7 @@ _VOICE_SAMPLES_DIR = os.path.expanduser(os.environ.get(
 ))
 _DEFAULT_VOICE_SAMPLE = os.environ.get(
     "KERNEL_DEFAULT_VOICE_SAMPLE",
-    os.path.join(_VOICE_SAMPLES_DIR, "fabio-en-phonetic.wav")
+    os.path.join(_VOICE_SAMPLES_DIR, "default-en-phonetic.wav")
 )
 # Active voice sample — can be switched via /voices
 _active_voice_sample: str = _DEFAULT_VOICE_SAMPLE

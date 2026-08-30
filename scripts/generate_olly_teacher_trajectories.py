@@ -199,7 +199,7 @@ behaviour — correct reasoning, correct tool selection, concise replies.
 {today_memory}
 
 ## The agent you are teaching (kernel-evolving)
-kernel-evolving is a local-first self-evolving AI agent running on Fabio's machine (port 8779).
+kernel-evolving is a local-first self-evolving AI agent running on the user's machine (port 8779).
 It uses Gemma 4 E2B-it as its main model and the gemma-4-E2B-it-assistant (151MB, 4-layer) as its
 MTP drafter. You are generating SFT training data for that drafter.
 
