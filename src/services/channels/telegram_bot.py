@@ -3339,8 +3339,15 @@ def _update_check_loop(chat_id: str):
 
 
 def _handle_stop(chat_id: str):
-    """Emergency stop: kills model server (freeing GPU) but keeps the bot alive
-    so you can /restart or send further commands."""
+    """Emergency stop: halts the running agent/tool loop and frees the GPU,
+    but keeps the bot alive so you can /restart or send further commands."""
+    # Signal the running tool loop (/stop must stop the agent's tools loop).
+    # Cross-process safe: the model_server process observes the same marker.
+    try:
+        from core.auth_gate import request_stop
+        request_stop(str(chat_id))
+    except Exception:
+        pass
     send_message(chat_id, "🛑 Model stopped — GPU freed. I'm still here, say /restart to bring it back.")
     import subprocess as _sp
     _sp.call(["pkill", "-f", "src/model_server.py"], stderr=_sp.DEVNULL)

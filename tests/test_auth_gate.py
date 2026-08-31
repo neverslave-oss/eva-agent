@@ -148,6 +148,18 @@ class TestApproveAll:
         import core.auth_gate as gate
         gate._pending.clear()
         gate._auto_allow.clear()
+        gate._deny_count.clear()
+        gate._stop_events.clear()
+        # Remove any leftover stop marker files
+        try:
+            import os, glob
+            for f in glob.glob(os.path.join(gate._STOP_DIR, "stop_*")):
+                try:
+                    os.remove(f)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def test_resolve_allow_all_sets_grant(self):
         """resolve_auth(allow_all=True, approved=True) sets result 'allow_all' and grants the chat."""
@@ -206,3 +218,103 @@ class TestApproveAll:
         finally:
             tools_mod._current_chat_id = ""
             gate.clear_auto_allow("chat_approve_all")
+
+
+class TestStopSignal:
+    """Tests for the per-chat stop signal (used by /stop and the 3-deny rule)."""
+
+    def setup_method(self):
+        import core.auth_gate as gate
+        gate.clear_task_state("chat_stop_test")
+
+    def test_request_stop_sets_signal(self):
+        """request_stop() makes is_stop_requested() return True."""
+        import core.auth_gate as gate
+        assert gate.is_stop_requested("chat_stop_test") is False
+        gate.request_stop("chat_stop_test")
+        assert gate.is_stop_requested("chat_stop_test") is True
+
+    def test_clear_stop_removes_signal(self):
+        """clear_stop() makes is_stop_requested() return False."""
+        import core.auth_gate as gate
+        gate.request_stop("chat_stop_test")
+        gate.clear_stop("chat_stop_test")
+        assert gate.is_stop_requested("chat_stop_test") is False
+
+    def test_clear_task_state_resets_stop(self):
+        """clear_task_state() resets the stop signal and deny counter."""
+        import core.auth_gate as gate
+        gate.request_stop("chat_stop_test")
+        gate._deny_count["chat_stop_test"] = 2
+        gate.clear_task_state("chat_stop_test")
+        assert gate.is_stop_requested("chat_stop_test") is False
+        assert gate._deny_count.get("chat_stop_test") is None
+
+    def test_empty_chat_id_never_stops(self):
+        """is_stop_requested('') returns False."""
+        import core.auth_gate as gate
+        assert gate.is_stop_requested("") is False
+
+
+class TestConsecutiveDenyStop:
+    """Tests for the 3-consecutive-denials → stop rule."""
+
+    def setup_method(self):
+        import core.auth_gate as gate
+        gate.clear_task_state("chat_deny_test")
+
+    def test_three_denials_stop_loop(self):
+        """3 consecutive denials signal a stop."""
+        import core.auth_gate as gate
+        # Blocked patterns short-circuit to a denial WITHOUT importing the bot
+        # (so tests don't hang on telegram polling). They are auto-denied by the
+        # system, NOT user denials, so they must NOT count toward the stop rule.
+        assert gate.request_auth("chat_deny_test", "rm -rf /") == "deny"
+        assert gate.request_auth("chat_deny_test", "rm -rf /") == "deny"
+        assert gate.request_auth("chat_deny_test", "rm -rf /") == "deny"
+        # Even after 3 blocked attempts, no stop is requested (not user denials).
+        assert gate.is_stop_requested("chat_deny_test") is False
+
+    def test_record_denial_increments_and_stops(self):
+        """_record_denial() increments the counter and stops at the cap.
+
+        This is the path taken when the user taps Deny or a request times out.
+        """
+        import core.auth_gate as gate
+        assert gate._record_denial("chat_deny_test") == "deny"
+        assert gate._record_denial("chat_deny_test") == "deny"
+        assert gate.is_stop_requested("chat_deny_test") is False
+        assert gate._record_denial("chat_deny_test") == "deny"
+        assert gate.is_stop_requested("chat_deny_test") is True
+
+    def test_record_denial_increments_and_stops(self):
+        """_record_denial() increments the counter and stops at the cap."""
+        import core.auth_gate as gate
+        assert gate._record_denial("chat_deny_test") == "deny"
+        assert gate._record_denial("chat_deny_test") == "deny"
+        assert gate.is_stop_requested("chat_deny_test") is False
+        assert gate._record_denial("chat_deny_test") == "deny"
+        assert gate.is_stop_requested("chat_deny_test") is True
+
+    def test_approval_resets_deny_streak(self):
+        """An approval between denials resets the streak."""
+        import core.auth_gate as gate
+        gate._record_denial("chat_deny_test")            # deny #1
+        gate._deny_count.pop("chat_deny_test", None)     # approval resets
+        gate._record_denial("chat_deny_test")            # deny #1 again
+        gate._record_denial("chat_deny_test")            # deny #2
+        assert gate.is_stop_requested("chat_deny_test") is False
+
+    def test_execute_tool_returns_stopped_when_stop_requested(self):
+        """When a stop is requested, execute_tool bails out without prompting."""
+        import core.auth_gate as gate
+        import core.tools as tools_mod
+        gate.request_stop("chat_deny_test")
+        tools_mod._current_chat_id = "chat_deny_test"
+        try:
+            result = tools_mod.execute_tool("exec_shell", {"command": "echo should_not_run"})
+            assert "stopped by user" in result
+        finally:
+            tools_mod._current_chat_id = ""
+            gate.clear_task_state("chat_deny_test")
+

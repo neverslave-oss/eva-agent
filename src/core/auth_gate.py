@@ -12,6 +12,8 @@ Usage from tools.py:
         return "(authorization denied)"
 """
 
+import os
+import tempfile
 import threading
 import time
 import uuid
@@ -31,6 +33,22 @@ _auto_allow: dict[str, float] = {}
 # safety net that guarantees a grant can never linger if a caller path
 # forgets to clear it explicitly.
 AUTO_ALLOW_TTL = 600  # 10 minutes
+
+# ── Consecutive-deny counter ─────────────────────────────────────────
+# chat_id -> number of consecutive non-approvals (Deny or timeout) for the
+# current task. Reset to 0 on any approval. When it reaches MAX_CONSECUTIVE_DENIES
+# the tool loop is signalled to stop (see request_stop).
+MAX_CONSECUTIVE_DENIES = 3
+_deny_count: dict[str, int] = {}
+
+# ── Stop signal (per chat) ───────────────────────────────────────────
+# Used by the /stop command and the 3-deny rule to halt a running tool loop.
+# The bot and model_server are separate processes, so the marker is persisted
+# to a tmp file keyed by chat_id in addition to an in-process event. The tool
+# loop checks is_stop_requested() between steps and aborts.
+_STOP_DIR = os.path.join(tempfile.gettempdir(), "kernel_evolving_stops")
+_stop_events: dict[str, threading.Event] = {}
+_STOP_LOCK = threading.Lock()
 
 # ── Configurable ──────────────────────────────────────────────────────
 DEFAULT_TIMEOUT = 60  # seconds
@@ -123,7 +141,7 @@ def request_auth(chat_id: str, command: str, timeout: int = DEFAULT_TIMEOUT) -> 
     if not _bot_available:
         _pending.pop(request_id, None)
         # No bot available — deny dangerous commands by default
-        return "deny"
+        return _record_denial(chat_id)
 
     # Escape for Markdown
     cmd_display = command.replace("`", "'")[:200]
@@ -157,6 +175,11 @@ def request_auth(chat_id: str, command: str, timeout: int = DEFAULT_TIMEOUT) -> 
     if entry and entry.get("result") is not None:
         result = entry["result"]
 
+    # Track consecutive denials — 3 in a row stops the tool loop.
+    if result in ("deny", "timeout"):
+        return _record_denial(chat_id)
+    # Any approval resets the streak.
+    _deny_count.pop(chat_id, None)
     return result
 
 
@@ -193,6 +216,88 @@ def _auto_allow_expired(chat_id: str) -> bool:
     if ts is None:
         return False
     return (time.monotonic() - ts) > AUTO_ALLOW_TTL
+
+
+def _record_denial(chat_id: str) -> str:
+    """Increment the consecutive-deny counter and stop the loop at the cap.
+
+    Returns the "deny" result string unchanged so callers behave as before;
+    the side effect is signalling the tool loop to stop after
+    MAX_CONSECUTIVE_DENIES consecutive non-approvals.
+    """
+    if chat_id:
+        n = _deny_count.get(chat_id, 0) + 1
+        _deny_count[chat_id] = n
+        if n >= MAX_CONSECUTIVE_DENIES:
+            request_stop(chat_id)
+    return "deny"
+
+
+def clear_deny_count(chat_id: str) -> None:
+    """Reset the consecutive-deny counter for a chat (called at task start)."""
+    _deny_count.pop(chat_id, None)
+
+
+def _stop_path(chat_id: str) -> str:
+    return os.path.join(_STOP_DIR, f"stop_{chat_id}")
+
+
+def request_stop(chat_id: str) -> None:
+    """Signal the agent and its tool loop to stop for the given chat.
+
+    Cross-process safe: sets an in-process event AND writes a tmp marker file
+    so the model_server process (which runs the tool loop) can observe it.
+    """
+    if not chat_id:
+        return
+    try:
+        os.makedirs(_STOP_DIR, exist_ok=True)
+        with open(_stop_path(chat_id), "w") as _f:
+            _f.write("1")
+    except Exception:
+        pass
+    with _STOP_LOCK:
+        _stop_events.setdefault(chat_id, threading.Event()).set()
+
+
+def is_stop_requested(chat_id: str) -> bool:
+    """Return True if a stop has been requested for the chat (either process)."""
+    if not chat_id:
+        return False
+    with _STOP_LOCK:
+        _ev = _stop_events.get(chat_id)
+        if _ev is not None and _ev.is_set():
+            return True
+    try:
+        return os.path.exists(_stop_path(chat_id))
+    except Exception:
+        return False
+
+
+def clear_stop(chat_id: str) -> None:
+    """Clear any stop signal for a chat (called when a new task starts)."""
+    if not chat_id:
+        return
+    try:
+        if os.path.exists(_stop_path(chat_id)):
+            os.remove(_stop_path(chat_id))
+    except Exception:
+        pass
+    with _STOP_LOCK:
+        _ev = _stop_events.pop(chat_id, None)
+        if _ev is not None:
+            _ev.clear()
+
+
+def clear_task_state(chat_id: str) -> None:
+    """Reset all transient per-task auth state for a chat.
+
+    Called at the start of each task's tool loop so nothing (approve-all grant,
+    deny counter, or a stale stop signal) leaks into an unrelated later task.
+    """
+    clear_auto_allow(chat_id)
+    clear_deny_count(chat_id)
+    clear_stop(chat_id)
 
 
 def get_pending_count() -> int:

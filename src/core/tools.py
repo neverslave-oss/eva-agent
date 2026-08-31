@@ -470,7 +470,11 @@ def execute_tool(name: str, arguments: dict, workspace: str = WORKSPACE, chat_id
         _chat_id = chat_id or _current_chat_id
         if _chat_id:
             try:
-                from core.auth_gate import request_auth
+                from core.auth_gate import request_auth, is_stop_requested
+                # If a stop has been requested (/stop or 3 consecutive denials),
+                # don't prompt for this command — bail out so the loop aborts.
+                if is_stop_requested(_chat_id):
+                    return "(stopped by user)"
                 auth_result = request_auth(_chat_id, cmd)
                 if auth_result == "deny":
                     return "(authorization denied — command blocked)"

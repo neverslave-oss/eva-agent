@@ -1734,13 +1734,13 @@ def _run_two_stage_if_available(params: dict, send_line) -> dict | None:
     # model_server runs in a separate, multi-threaded process from the
     # caller that knows the real chat_id (R5/T4).
     chat_id = params.get("chat_id", "")
-    # A new task is starting — clear any stale "Approve all" grant from a
-    # previous task in this chat so it cannot leak across tasks. (The grant
-    # is also bounded by AUTO_ALLOW_TTL as a safety net.)
+    # A new task is starting — clear any stale transient auth state
+    # (approve-all grant, deny counter, stop signal) from a previous task in
+    # this chat so it cannot leak across tasks.
     if chat_id:
         try:
-            from core.auth_gate import clear_auto_allow
-            clear_auto_allow(chat_id)
+            from core.auth_gate import clear_task_state
+            clear_task_state(chat_id)
         except Exception:
             pass
     # T7: caller-supplied max_new_tokens overrides the synthesis defaults
@@ -1824,6 +1824,19 @@ def _run_two_stage_if_available(params: dict, send_line) -> dict | None:
     print("[two_stage] Stage 1: Qwen tool-calling loop", flush=True)
 
     for step in range(max_steps):
+        # Honour a stop request (/stop or 3 consecutive denials) — abort the
+        # tool loop between steps instead of continuing to call tools.
+        if chat_id:
+            try:
+                from core.auth_gate import is_stop_requested
+                if is_stop_requested(chat_id):
+                    print(f"[two_stage] stop requested — aborting tool loop at step {step}", flush=True)
+                    return _nemotron_synthesize_answer(
+                        _original_query, "(stopped by user)", all_tool_results,
+                        send_line, _system_prompt, _history_context, max_new_tokens
+                    )
+            except Exception:
+                pass
         try:
             inputs = _tool_calling_processor.apply_chat_template(
                 current_messages,
@@ -2121,13 +2134,13 @@ def _handle_infer_with_tools(params: dict, send_line) -> dict:
     adapter_path = params.get("adapter_path")
     # Passed explicitly to execute_tool_with_meta below — see R5/T4.
     chat_id = params.get("chat_id", "")
-    # A new task is starting — clear any stale "Approve all" grant from a
-    # previous task in this chat so it cannot leak across tasks. (The grant
-    # is also bounded by AUTO_ALLOW_TTL as a safety net.)
+    # A new task is starting — clear any stale transient auth state
+    # (approve-all grant, deny counter, stop signal) from a previous task in
+    # this chat so it cannot leak across tasks.
     if chat_id:
         try:
-            from core.auth_gate import clear_auto_allow
-            clear_auto_allow(chat_id)
+            from core.auth_gate import clear_task_state
+            clear_task_state(chat_id)
         except Exception:
             pass
     # T7: honor caller-supplied max_new_tokens per generation step instead of
@@ -2215,6 +2228,16 @@ def _handle_infer_with_tools(params: dict, send_line) -> dict:
     _last_tool_result: str = ""  # latest successful tool output across all steps
 
     for step in range(max_steps):
+        # Honour a stop request (/stop or 3 consecutive denials) — abort the
+        # tool loop between steps instead of continuing to call tools.
+        if chat_id:
+            try:
+                from core.auth_gate import is_stop_requested
+                if is_stop_requested(chat_id):
+                    print(f"[tool_loop] stop requested — aborting tool loop at step {step}", flush=True)
+                    return {"type": "result", "result": "(stopped by user)"}
+            except Exception:
+                pass
         try:
             with _use_adapter(adapter_path):
                 if _vllm_enabled:

@@ -2,11 +2,12 @@
 
 **Created:** 2026-08-30
 **Status:** implemented (2026-08-31)
-**Branch:** `fix/omni-vision-processor` (currently checked out — see "Branch note" below)
+**Branch:** `feat/exec-shell-approve-all` (see "Branch note" below)
 **Author:** Fabio (pacificDev) + Kernel-Evo
 **Scope:** Feature addition to the existing `exec_shell` approval flow: a third inline button
 that auto-approves every subsequent `exec_shell` command until the current task completes
-or the hard cap on function calls is hit — whichever comes first.
+or the hard cap on function calls is hit — whichever comes first. Also adds two stop
+controls: 3 consecutive Denies halt the tool loop, and `/stop` halts the agent + tool loop.
 
 > ⚠️ **This is a design spec.** It pairs a concrete change set with the exact files and
 > mechanisms already in the codebase. No code changes were made; implementation should
@@ -235,3 +236,58 @@ _auto_allow: dict[str, bool] = {}
 The currently checked-out branch is `fix/omni-vision-processor` (an unrelated vision fix).
 Recommended: implement this feature on a dedicated branch
 `feat/exec-shell-approve-all` cut from `dev` / the release line that owns `auth_gate.py`.
+
+---
+
+## 9. Stop controls (added 2026-08-31)
+
+Two additional controls so the user can halt a runaway tool loop:
+
+### 9.1 3 consecutive Denies → stop the tool loop
+
+- `auth_gate.py` tracks a per-chat consecutive-deny counter (`_deny_count`).
+- `request_auth` routes every **user Deny** and **timeout** result through `_record_denial()`,
+  which increments the counter. Any approval (`allow`/`allow_all`) resets it.
+- When the counter reaches `MAX_CONSECUTIVE_DENIES = 3`, `_record_denial()` calls
+  `request_stop(chat_id)`.
+- The tool loop checks `is_stop_requested(chat_id)` between steps and aborts.
+- **Blocked patterns (`rm -rf /` etc.) are NOT counted** — they are auto-denied by the
+  system, not user denials, and must not trip the stop rule.
+
+### 9.2 `/stop` halts the agent + tool loop
+
+- `_handle_stop(chat_id)` in `telegram_bot.py` now calls `request_stop(chat_id)` **before**
+  killing the model server, so the running tool loop aborts at the next step boundary.
+- The stop signal is **cross-process safe**: `request_stop` sets an in-process event AND
+  writes a tmp marker file (`/tmp/kernel_evolving_stops/stop_{chat_id}`) so the separate
+  model_server process (which runs the tool loop) observes it via `is_stop_requested()`.
+
+### 9.3 Stop mechanism (`auth_gate.py`)
+
+- `request_stop(chat_id)` — set in-process event + write marker file.
+- `is_stop_requested(chat_id)` — check in-process event then marker file.
+- `clear_stop(chat_id)` / `clear_task_state(chat_id)` — reset at task start so a stale
+  stop can't leak into an unrelated later task.
+- `tools.py` `execute_tool` also checks `is_stop_requested` before prompting, so no new
+  auth prompt is sent after a stop.
+
+### 9.4 Files affected (stop controls)
+
+| File | Change |
+|---|---|
+| `src/core/auth_gate.py` | `_deny_count`, `MAX_CONSECUTIVE_DENIES`, `_record_denial`, `clear_deny_count`, `request_stop`, `is_stop_requested`, `clear_stop`, `clear_task_state` |
+| `src/core/tools.py` | `execute_tool` checks `is_stop_requested` before prompting |
+| `src/core/inference/model.py` | Stop check at each loop step; `clear_task_state` at task start |
+| `src/core/inference/model_server.py` | Stop check at each loop step in `_handle_infer_with_tools` + `_run_two_stage_if_available`; `clear_task_state` at task start |
+| `src/services/channels/telegram_bot.py` | `_handle_stop` calls `request_stop` before killing the server |
+| `tests/test_auth_gate.py` | `TestStopSignal`, `TestConsecutiveDenyStop` |
+
+### 9.5 Success criteria (stop controls)
+
+- [x] 3 consecutive Denies request a stop; the tool loop aborts.
+- [x] An approval between Denies resets the streak.
+- [x] Blocked patterns do NOT count toward the deny-stop rule.
+- [x] `/stop` requests a stop that the tool loop observes (cross-process).
+- [x] `execute_tool` returns `"(stopped by user)"` instead of prompting after a stop.
+- [x] `clear_task_state` prevents a stale stop from leaking into the next task.
+- [x] New unit tests pass; existing tests still pass.
