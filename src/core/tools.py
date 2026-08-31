@@ -479,6 +479,11 @@ def execute_tool(name: str, arguments: dict, workspace: str = WORKSPACE, chat_id
                 elif auth_result.startswith("deny"):
                     return f"(authorization failed: {auth_result})"
                 # auth_result == "allow" → proceed
+                # auth_result == "allow_all" → proceed (current + all subsequent
+                # exec_shell calls in this task are pre-approved by the user via
+                # the "✅ Approve all" button; the grant is scoped to the task
+                # loop and cleared when it ends or expires in auth_gate).
+                # The chain above falls through to execution for both.
             except ImportError:
                 pass  # auth_gate not available (tests) → proceed without gate
             except Exception as e:

@@ -752,6 +752,13 @@ def handle_callback(chat_id: str, data: str, message_id: int):
     try:
         print(f"[bot] callback: chat={chat_id} data={data}", flush=True)
         # ── Shell command authorization ──────────────────────────────────
+        if data.startswith("auth_allow_all_"):
+            from core.auth_gate import resolve_auth
+            request_id = data.split("_", 3)[-1]
+            resolve_auth(request_id, True, allow_all=True)
+            if message_id:
+                edit_message(chat_id, message_id, "✅ Shell command approved — *all* commands for this task will run automatically")
+            return
         if data.startswith("auth_allow_") or data.startswith("auth_deny_"):
             from core.auth_gate import resolve_auth
             approved = data.startswith("auth_allow_")

@@ -18,6 +18,7 @@ from core.auth_gate import (
     is_safe_command,
     request_auth,
     resolve_auth,
+    clear_auto_allow,
     _pending,
     DEFAULT_TIMEOUT,
 )
@@ -130,3 +131,78 @@ class TestExecShellAuthIntegration:
         result = tools_mod.execute_tool("exec_shell", {"command": f"rm {tmp.name}"})
         # Should proceed — no auth gate without chat_id
         assert not os.path.exists(tmp.name) or "(no output)" in result or "authorization" not in result.lower()
+
+
+class TestApproveAll:
+    """Tests for the '✅ Approve all' auto-approve grant."""
+
+    def _resolve(self, request_id, approved, allow_all=False):
+        import core.auth_gate as gate
+        gate._pending.clear()
+        event = threading.Event()
+        gate._pending[request_id] = {"event": event, "result": None, "chat_id": "chat_approve_all"}
+        resolve_auth(request_id, approved, allow_all=allow_all)
+        return gate._pending[request_id]["result"]
+
+    def setup_method(self):
+        import core.auth_gate as gate
+        gate._pending.clear()
+        gate._auto_allow.clear()
+
+    def test_resolve_allow_all_sets_grant(self):
+        """resolve_auth(allow_all=True, approved=True) sets result 'allow_all' and grants the chat."""
+        import core.auth_gate as gate
+        result = self._resolve("req1", True, allow_all=True)
+        assert result == "allow_all"
+        assert gate._auto_allow.get("chat_approve_all") is not None
+
+    def test_resolve_allow_all_with_deny_no_grant(self):
+        """allow_all with approved=False behaves like a normal deny (no grant)."""
+        import core.auth_gate as gate
+        result = self._resolve("req2", False, allow_all=True)
+        assert result == "deny"
+        assert gate._auto_allow.get("chat_approve_all") is None
+
+    def test_request_auth_consumes_grant(self):
+        """Under an active grant, request_auth returns 'allow' without a prompt."""
+        import core.auth_gate as gate
+        gate._auto_allow["chat_approve_all"] = time.monotonic()
+        result = request_auth("chat_approve_all", "pip install something")
+        assert result == "allow"
+
+    def test_grant_does_not_bypass_blocked_patterns(self):
+        """Dangerous BLOCKED_PATTERNS still short-circuit to deny under a grant."""
+        import core.auth_gate as gate
+        gate._auto_allow["chat_approve_all"] = time.monotonic()
+        # rm -rf / is in BLOCKED_PATTERNS → is_safe_command False → not auto-allowed.
+        # Without a bot (test env) request_auth returns 'deny'.
+        result = request_auth("chat_approve_all", "rm -rf /")
+        assert result == "deny"
+
+    def test_clear_auto_allow_removes_grant(self):
+        """clear_auto_allow() removes an active grant."""
+        import core.auth_gate as gate
+        gate._auto_allow["chat_approve_all"] = time.monotonic()
+        clear_auto_allow("chat_approve_all")
+        assert gate._auto_allow.get("chat_approve_all") is None
+
+    def test_grant_expires_after_ttl(self):
+        """An expired grant is dropped and no longer auto-allows."""
+        import core.auth_gate as gate
+        gate._auto_allow["chat_approve_all"] = time.monotonic() - (gate.AUTO_ALLOW_TTL + 1)
+        # Expired → clear_auto_allow is invoked inside request_auth
+        request_auth("chat_approve_all", "pip install something")
+        assert gate._auto_allow.get("chat_approve_all") is None
+
+    def test_execute_tool_allow_all_proceeds(self):
+        """execute_tool treats 'allow_all' as proceed (falls through to execution)."""
+        import core.auth_gate as gate
+        import core.tools as tools_mod
+        gate._auto_allow["chat_approve_all"] = time.monotonic()
+        tools_mod._current_chat_id = "chat_approve_all"
+        try:
+            result = tools_mod.execute_tool("exec_shell", {"command": "echo approve_all_proceeds"})
+            assert "approve_all_proceeds" in result
+        finally:
+            tools_mod._current_chat_id = ""
+            gate.clear_auto_allow("chat_approve_all")

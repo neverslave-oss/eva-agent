@@ -159,6 +159,16 @@ def infer_with_tools(
     # Fallback: in-process loading (original behaviour)
     import json
 
+    # A new task is starting — clear any stale "Approve all" grant from a
+    # previous task in this chat so it cannot leak across tasks. (The grant
+    # is also bounded by AUTO_ALLOW_TTL as a safety net.)
+    if chat_id:
+        try:
+            from core.auth_gate import clear_auto_allow
+            clear_auto_allow(chat_id)
+        except Exception:
+            pass
+
     current_messages = []
     for m in messages:
         role = m["role"]

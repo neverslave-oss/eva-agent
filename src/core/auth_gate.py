@@ -20,6 +20,18 @@ from datetime import datetime
 # ── Global registry: request_id → {event, result} ───────────────────
 _pending: dict[str, dict] = {}
 
+# ── Auto-approve ("Approve all") grant ───────────────────────────────
+# chat_id -> monotonically-increasing timestamp when the grant was set.
+# Transient: lives only for the currently-executing tool loop and is
+# cleared when the loop ends or expires (see AUTO_ALLOW_TTL). Never
+# persisted to disk.
+_auto_allow: dict[str, float] = {}
+
+# How long (seconds) an "Approve all" grant stays valid. This is the
+# safety net that guarantees a grant can never linger if a caller path
+# forgets to clear it explicitly.
+AUTO_ALLOW_TTL = 600  # 10 minutes
+
 # ── Configurable ──────────────────────────────────────────────────────
 DEFAULT_TIMEOUT = 60  # seconds
 
@@ -51,21 +63,52 @@ def is_safe_command(cmd: str) -> bool:
     return False
 
 
+def is_blocked_command(cmd: str) -> bool:
+    """Return True if the command matches a BLOCKED_PATTERNS entry.
+
+    Dangerous commands in BLOCKED_PATTERNS are never allowed — not even under
+    an active "Approve all" grant. This is checked separately from
+    is_safe_command() so a blocked pattern short-circuits to deny even when
+    the auto-approve grant would otherwise let the command through.
+    """
+    cmd_stripped = cmd.strip()
+    for pattern in BLOCKED_PATTERNS:
+        if pattern in cmd_stripped:
+            return True
+    return False
+
+
 def request_auth(chat_id: str, command: str, timeout: int = DEFAULT_TIMEOUT) -> str:
     """
     Send an authorization request to Telegram and block until response.
 
     Returns:
-        "allow"  — user approved
-        "deny"   — user denied
-        "timeout" — no response within timeout
+        "allow"     — user approved (current command only)
+        "allow_all" — current command and every subsequent exec_shell
+                      in the current task loop runs without prompting
+        "deny"      — user denied
+        "timeout"   — no response within timeout
     """
+    # Dangerous blocked patterns are never auto-approved, even under an
+    # active "Approve all" grant.
+    if is_blocked_command(command):
+        return "deny"
+
     if is_safe_command(command):
+        return "allow"
+
+    # ── Auto-approve grant ("Approve all") ────────────────────────────
+    # Checked AFTER the blocked/safe checks above so that dangerous
+    # commands (BLOCKED_PATTERNS) still short-circuit to deny even under
+    # an active grant. An expired grant is dropped immediately.
+    if _auto_allow_expired(chat_id):
+        clear_auto_allow(chat_id)
+    elif _auto_allow.get(chat_id) is not None:
         return "allow"
 
     request_id = str(uuid.uuid4())[:8]
     event = threading.Event()
-    _pending[request_id] = {"event": event, "result": None}
+    _pending[request_id] = {"event": event, "result": None, "chat_id": chat_id}
 
     # Import here to avoid circular imports at module level.
     # If the bot is not available (e.g. during tests), deny dangerous commands.
@@ -95,6 +138,7 @@ def request_auth(chat_id: str, command: str, timeout: int = DEFAULT_TIMEOUT) -> 
     buttons = [
         [
             {"text": "✅ Allow", "callback_data": f"auth_allow_{request_id}"},
+            {"text": "✅ Approve all", "callback_data": f"auth_allow_all_{request_id}"},
             {"text": "❌ Deny", "callback_data": f"auth_deny_{request_id}"},
         ]
     ]
@@ -116,14 +160,39 @@ def request_auth(chat_id: str, command: str, timeout: int = DEFAULT_TIMEOUT) -> 
     return result
 
 
-def resolve_auth(request_id: str, approved: bool) -> None:
+def resolve_auth(request_id: str, approved: bool, allow_all: bool = False) -> None:
     """
     Called by the Telegram callback handler when the user taps Allow/Deny.
+
+    Args:
+        request_id: the pending request to resolve.
+        approved: True for Allow, False for Deny.
+        allow_all: when True (and approved), grants auto-approval for the
+            current task loop in addition to approving the current command.
     """
     entry = _pending.get(request_id)
     if entry:
-        entry["result"] = "allow" if approved else "deny"
+        if allow_all and approved:
+            entry["result"] = "allow_all"
+            chat_id = entry.get("chat_id")
+            if chat_id:
+                _auto_allow[chat_id] = time.monotonic()
+        else:
+            entry["result"] = "allow" if approved else "deny"
         entry["event"].set()
+
+
+def clear_auto_allow(chat_id: str) -> None:
+    """Clear any active auto-approve grant for the given chat."""
+    _auto_allow.pop(chat_id, None)
+
+
+def _auto_allow_expired(chat_id: str) -> bool:
+    """Return True if an active grant for chat_id has exceeded AUTO_ALLOW_TTL."""
+    ts = _auto_allow.get(chat_id)
+    if ts is None:
+        return False
+    return (time.monotonic() - ts) > AUTO_ALLOW_TTL
 
 
 def get_pending_count() -> int:

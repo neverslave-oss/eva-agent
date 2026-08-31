@@ -1734,6 +1734,15 @@ def _run_two_stage_if_available(params: dict, send_line) -> dict | None:
     # model_server runs in a separate, multi-threaded process from the
     # caller that knows the real chat_id (R5/T4).
     chat_id = params.get("chat_id", "")
+    # A new task is starting — clear any stale "Approve all" grant from a
+    # previous task in this chat so it cannot leak across tasks. (The grant
+    # is also bounded by AUTO_ALLOW_TTL as a safety net.)
+    if chat_id:
+        try:
+            from core.auth_gate import clear_auto_allow
+            clear_auto_allow(chat_id)
+        except Exception:
+            pass
     # T7: caller-supplied max_new_tokens overrides the synthesis defaults
     # (2048/4096) below when given. None means "use the synthesis default".
     max_new_tokens = params.get("max_new_tokens")
@@ -2112,6 +2121,15 @@ def _handle_infer_with_tools(params: dict, send_line) -> dict:
     adapter_path = params.get("adapter_path")
     # Passed explicitly to execute_tool_with_meta below — see R5/T4.
     chat_id = params.get("chat_id", "")
+    # A new task is starting — clear any stale "Approve all" grant from a
+    # previous task in this chat so it cannot leak across tasks. (The grant
+    # is also bounded by AUTO_ALLOW_TTL as a safety net.)
+    if chat_id:
+        try:
+            from core.auth_gate import clear_auto_allow
+            clear_auto_allow(chat_id)
+        except Exception:
+            pass
     # T7: honor caller-supplied max_new_tokens per generation step instead of
     # always hardcoding 8192.
     max_new_tokens = params.get("max_new_tokens", 8192)
