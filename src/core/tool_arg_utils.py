@@ -78,8 +78,9 @@ def normalize_tool_args(tool_name: str, args: dict) -> dict:
 
     if tname == "sensors":
         _move("intent", "action")
-        _move("command", "action")
-        _move("device", "target")
+        # NOTE: `command` and `device` are now real control-action parameters
+        # (actuator + command), so we do NOT alias them to `action`/`target`.
+        # Use `which` as an alias for `target` (the sensor device id).
         _move("which", "target")
 
     if tname == "http_get":

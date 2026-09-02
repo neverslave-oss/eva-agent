@@ -2,10 +2,11 @@
 sensors/pi.py — Pi sensor client for the `sensors` tool.
 
 Calls the Pi's `sensors_data_api.py` endpoints (config-driven via the eye's
-`base`). The Pi exposes environmental sensor data at `/pico/sensors`:
+`base`). The Pi exposes environmental sensor data at `/pico/sensors` and
+actuator control at `/pico/control`:
 
-  GET /pico/sensors → {temp, humi, moisture, moisture_percent}
-  POST /pico/sensors → {relay: bool, watering: bool} (pump override — deferred)
+  GET  /pico/sensors   -> {temp, humi, moisture, moisture_percent, ...}
+  POST /pico/control   -> {device, command, params} proxied to the Pico-W
 
 Endpoints are config-driven via the sensor registry's `base`, never hardcoded.
 """
@@ -60,4 +61,36 @@ def set_relay(base: str, relay: bool, watering: bool, timeout_s: float = 5.0) ->
         return {"ok": True, "relay": bool(relay), "watering": bool(watering)}
     except Exception as exc:  # pragma: no cover - network errors
         logger.warning("[sensors] relay control failed from %s: %s", url, exc)
+        return {"error": str(exc)}
+
+
+def control(base: str, device: str, command: str, params: Dict[str, Any] = None,
+            timeout_s: float = 5.0) -> Dict[str, Any]:
+    """POST /pico/control to actuate a device via the Pi proxy.
+
+    The Pi proxies the call to the Pico-W. Supported devices/commands:
+
+      - device="relay",  command="on"|"off"          -> Pico POST /relay (pump)
+      - device="motor",  command="move", params={"angle": 0..180}
+                                                      -> Pico POST /motor (servo head)
+      - device="lcd",    command="message", params={"line1","line2"}
+                                                      -> Pico POST /message (LCD)
+
+    Returns the proxy's JSON on success, or a dict with an "error" key on
+    failure so the caller can surface a helpful message.
+    """
+    import requests  # type: ignore
+
+    url = f"{base.rstrip('/')}/pico/control"
+    payload = {"device": device, "command": command, "params": params or {}}
+    try:
+        r = requests.post(url, json=payload, timeout=timeout_s)
+        if r.status_code >= 500:
+            return {"error": f"control endpoint returned HTTP {r.status_code}"}
+        try:
+            return r.json()
+        except Exception:
+            return {"ok": True, "raw": r.text}
+    except Exception as exc:  # pragma: no cover - network errors
+        logger.warning("[sensors] control failed from %s: %s", url, exc)
         return {"error": str(exc)}
