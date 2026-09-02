@@ -61,3 +61,7 @@ package-lock.json
 hot_fields.json
 # Local machine overrides — never commit (contains local paths/keys)
 config.local.yaml
+
+# Experimental & spec artifacts — not part of the shipped repo
+/specs/
+/experiments/
