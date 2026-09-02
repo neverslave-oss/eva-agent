@@ -277,18 +277,31 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "sensors",
-            "description": "Read environmental sensor data from connected devices (e.g. the Pi: temperature, humidity, soil moisture). Actions: 'read' returns the latest sensor readings (temp/humi/moisture/moisture_percent). 'water on' / 'water off' (pump override) are reserved for a later phase and currently return a 'deferred' note. Endpoints are config-driven via the sensor registry.",
+            "description": "Read environmental sensor data from connected devices (e.g. the Pi: temperature, humidity, soil moisture) and control actuators (relay/pump, motor/head, LCD) via the Pi proxy. Actions: 'read' returns the latest sensor readings (temp/humi/moisture/moisture_percent, plus servo_angle/distance_cm/uv when present). 'control' actuates a device: device='relay' command='on'/'off' (pump), device='motor' command='move' params={'angle':0..180} (servo head), device='lcd' command='message' params={'line1','line2'} (LCD). 'water on'/'water off' are aliases for relay control. Endpoints are config-driven via the sensor registry.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["read", "water on", "water off"],
-                        "description": "What to do: 'read' fetches current sensor readings."
+                        "enum": ["read", "control", "water on", "water off"],
+                        "description": "What to do: 'read' fetches sensor readings; 'control' actuates a device; 'water on'/'water off' control the pump relay."
                     },
                     "target": {
                         "type": "string",
                         "description": "Optional device id hint (default 'pi'). Router falls back to the default device if omitted."
+                    },
+                    "device": {
+                        "type": "string",
+                        "enum": ["relay", "motor", "lcd"],
+                        "description": "Actuator to control (used with action='control'). 'relay' = pump, 'motor' = servo head, 'lcd' = display."
+                    },
+                    "command": {
+                        "type": "string",
+                        "description": "Command for the device (used with action='control'): 'on'/'off' for relay, 'move' for motor, 'message' for lcd."
+                    },
+                    "params": {
+                        "type": "object",
+                        "description": "Free-form params for the command, e.g. {'angle': 90} for motor move, {'line1': '...', 'line2': '...'} for lcd message."
                     }
                 },
                 "required": ["action"]
@@ -428,11 +441,15 @@ def _run_sensors(arguments: dict) -> str:
     if not action:
         return "(error: sensors requires 'action' argument)"
     target = arguments.get("target") or None
+    device = arguments.get("device") or None
+    command = arguments.get("command") or None
+    params = arguments.get("params")
     try:
         from core.sensors.registry import SensorRegistry
         from core.sensors.router import route_sensors
         registry = SensorRegistry()
-        result = route_sensors(action, registry, target=target)
+        result = route_sensors(action, registry, target=target,
+                               device=device, command=command, params=params)
         return json.dumps(result, ensure_ascii=False)
     except Exception as exc:
         return f"(error: sensors failed: {exc})"

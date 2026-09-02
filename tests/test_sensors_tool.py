@@ -138,3 +138,109 @@ class TestSensorsToolDispatch:
         assert parsed["status"] == "ok"
         assert parsed["sensor"] == "pi"
         assert parsed["observations"]["temp"] == 25.0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Control action (relay/motor/lcd) — added 2026-09-02
+# ─────────────────────────────────────────────────────────────────────────────
+class TestPiControlClient:
+    def test_control_posts_correct_payload(self):
+        with patch("requests.post") as m_post:
+            m_post.return_value = MagicMock(status_code=200, json=lambda: {"ok": True, "state": "on"})
+            out = pi_client.control("http://hub:5000", device="relay", command="on")
+        m_post.assert_called_once()
+        url = m_post.call_args.args[0]
+        assert url == "http://hub:5000/pico/control"
+        assert m_post.call_args.kwargs["json"] == {"device": "relay", "command": "on", "params": {}}
+        assert out["ok"] is True
+
+    def test_control_passes_params(self):
+        with patch("requests.post") as m_post:
+            m_post.return_value = MagicMock(status_code=200, json=lambda: {"ok": True, "angle": 120})
+            out = pi_client.control("http://hub:5000", device="motor", command="move",
+                                    params={"angle": 120})
+        assert m_post.call_args.kwargs["json"] == {
+            "device": "motor", "command": "move", "params": {"angle": 120}
+        }
+        assert out["angle"] == 120
+
+    def test_control_error_on_http_500(self):
+        with patch("requests.post") as m_post:
+            m_post.return_value = MagicMock(status_code=500)
+            out = pi_client.control("http://hub:5000", device="relay", command="on")
+        assert "error" in out
+
+
+class TestRouterControl:
+    def test_control_relay_on_calls_client(self):
+        reg = SensorRegistry(config={"sensors": {"pi": {"base": "http://hub:5000"}}})
+        with patch.object(pi_client, "control", return_value={"ok": True, "state": "on"}) as m_ctl:
+            result = route_sensors("control", reg, target="pi", device="relay", command="on")
+        m_ctl.assert_called_once()
+        assert m_ctl.call_args.kwargs["device"] == "relay"
+        assert m_ctl.call_args.kwargs["command"] == "on"
+        assert result["status"] == "ok"
+        assert result["action"] == "control"
+        assert result["observations"]["state"] == "on"
+
+    def test_control_requires_device(self):
+        reg = SensorRegistry(config={"sensors": {"pi": {"base": "http://hub:5000"}}})
+        result = route_sensors("control", reg, target="pi", command="on")
+        assert result["status"] == "error"
+        assert "device" in result["error"]
+
+    def test_control_requires_command(self):
+        reg = SensorRegistry(config={"sensors": {"pi": {"base": "http://hub:5000"}}})
+        result = route_sensors("control", reg, target="pi", device="relay")
+        assert result["status"] == "error"
+        assert "command" in result["error"]
+
+    def test_control_offline_on_error(self):
+        reg = SensorRegistry(config={"sensors": {"pi": {"base": "http://hub:5000"}}})
+        with patch.object(pi_client, "control", return_value={"error": "Pico unreachable"}):
+            result = route_sensors("control", reg, target="pi", device="relay", command="on")
+        assert result["status"] == "offline"
+
+    def test_water_on_alias_maps_to_relay(self):
+        reg = SensorRegistry(config={"sensors": {"pi": {"base": "http://hub:5000"}}})
+        with patch.object(pi_client, "control", return_value={"ok": True, "state": "on"}) as m_ctl:
+            result = route_sensors("water on", reg, target="pi")
+        m_ctl.assert_called_once()
+        assert m_ctl.call_args.kwargs["device"] == "relay"
+        assert m_ctl.call_args.kwargs["command"] == "on"
+        assert result["status"] == "ok"
+
+    def test_water_off_alias_maps_to_relay(self):
+        reg = SensorRegistry(config={"sensors": {"pi": {"base": "http://hub:5000"}}})
+        with patch.object(pi_client, "control", return_value={"ok": True, "state": "off"}) as m_ctl:
+            result = route_sensors("water off", reg, target="pi")
+        assert m_ctl.call_args.kwargs["command"] == "off"
+        assert result["status"] == "ok"
+
+
+class TestSensorsSchemaControl:
+    def test_schema_has_control_action(self):
+        entry = next(t for t in tools_mod.TOOLS if t["function"]["name"] == "sensors")
+        enum = entry["function"]["parameters"]["properties"]["action"]["enum"]
+        assert "control" in enum
+        assert "water on" in enum
+        assert "water off" in enum
+
+    def test_schema_has_device_command_params(self):
+        entry = next(t for t in tools_mod.TOOLS if t["function"]["name"] == "sensors")
+        props = entry["function"]["parameters"]["properties"]
+        assert "device" in props
+        assert "command" in props
+        assert "params" in props
+        assert props["device"]["enum"] == ["relay", "motor", "lcd"]
+
+    def test_execute_tool_sensors_control(self):
+        env = {"KERNEL_EVO_SENSORS_PI_BASE": "http://hub:5000"}
+        with patch.dict(os.environ, env):
+            with patch.object(pi_client, "control", return_value={"ok": True, "state": "on"}):
+                result = tools_mod.execute_tool(
+                    "sensors", {"action": "control", "device": "relay", "command": "on"})
+        parsed = json.loads(result)
+        assert parsed["status"] == "ok"
+        assert parsed["action"] == "control"
+        assert parsed["observations"]["state"] == "on"
