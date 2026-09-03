@@ -29,6 +29,68 @@ try:
 except Exception:
     inject_field_context = lambda chat_id="", text="": ""
 
+
+# ── Native-tool discovery (single source of truth) ─────────────────────
+# The authoritative tool registry lives in tools.py (TOOLS). Instead of
+# hardcoding the tool list here (which drifts every time a tool is added or
+# removed), we derive the agent-facing list from that registry at runtime so
+# the injected system prompt always reflects the real, current tool set.
+def _native_tool_names() -> list:
+    """Return the ordered list of native tool names from the registry."""
+    try:
+        from core.tools import TOOLS
+        return [t["function"]["name"] for t in TOOLS]
+    except Exception:
+        return []
+
+
+def _render_tools_table() -> list:
+    """Render the `| Tool | Description |` table from the live TOOLS registry.
+
+    Returns a list of markdown lines (already newline-terminated) ready to be
+    appended to the system prompt. Falls back to the static list if the registry
+    is unavailable (e.g. during import).
+    """
+    try:
+        from core.tools import TOOLS
+    except Exception:
+        TOOLS = []
+    if not TOOLS:
+        # Fallback so the prompt is never empty if the registry import fails.
+        _fallback = [
+            "exec_shell", "read_file", "write_file", "http_get", "web_search",
+            "browser_use", "look", "sensors", "send_file", "run_skill",
+            "run_routine", "search_skills", "list_routines", "recall_memory",
+        ]
+        TOOLS = [{"function": {"name": n, "description": ""}} for n in _fallback]
+
+    lines = ["| Tool | Description |", "|---|---|"]
+    for t in TOOLS:
+        fn = t.get("function", {})
+        name = fn.get("name", "?")
+        desc = fn.get("description", "").strip()
+        # Build a short call signature from required params when available.
+        params = fn.get("parameters", {}).get("properties", {})
+        required = fn.get("parameters", {}).get("required", [])
+        sig = ", ".join(
+            p if p in required else f"{p}?" for p in params.keys()
+        )
+        call = f"{name}({sig})" if sig else f"{name}()"
+        lines.append(f"| `{call}` | {desc} |")
+    return lines
+
+
+def _render_native_tool_names() -> list:
+    """Render the compact 'YOUR NATIVE TOOLS' name list from the registry."""
+    names = _native_tool_names()
+    if not names:
+        names = [
+            "exec_shell", "read_file", "write_file", "http_get", "web_search",
+            "browser_use", "look", "sensors", "send_file", "run_skill",
+            "run_routine", "search_skills", "list_routines", "recall_memory",
+        ]
+    return [f"  - `{n}`" for n in names]
+
 # TTL cache for expensive per-message service-status checks (PD4)
 _STATUS_CACHE: dict = {}  # key -> (value, expiry_ts)
 _STATUS_TTL = 45  # seconds
@@ -592,29 +654,17 @@ def build_system_prompt(
     # =========================================================================
     # ## Tools and capabilities
     # =========================================================================
+    # Tool list is derived live from the TOOLS registry (single source of truth)
+    # so it never drifts from the actual implemented tools.
+    _tools = _native_tool_names()
     p += [
         "## Tools and capabilities",
         "",
-        "You have **14 tools** available — use them proactively:",
-        "",
-        "| Tool | Description |",
-        "|---|---|",
-        "| `exec_shell(command)` | Run shell commands: git, bash, systemctl, curl, etc. |",
-        "| `read_file(path)` | Read any file — logs, configs, plans, memory |",
-        "| `write_file(path, content)` | Write files — notes, configs, scripts |",
-        "| `http_get(url)` | HTTP GET — health checks, APIs |",
-        "| `run_skill(skill_name, input)` | Execute an installed skill by exact name |",
-        "| `run_routine(routine_name)` | Execute a routine by exact name |",
-        "| `send_file(path, caption)` | Send a file to the user via Telegram |",
-        "| `web_search(query)` | Search the web using browser-automation |",
-        "| `browser_use(task, url?)` | Agentic multi-step browser task (click, fill forms, web apps) |",
-        "| `look(intent)` | Perceive the world through connected cameras (eyes) |",
-        "| `sensors(action)` | Read environmental sensor data and control actuators (relay/pump, motor/head, LCD) on connected devices |",
-        "| `search_skills(query)` | Find skills by keyword before calling run_skill |",
-        "| `list_routines()` | List all available routines before calling run_routine |",
-        "| `recall_memory(query)` | Search past conversations and long-term memory |",
+        f"You have **{len(_tools)} tools** available — use them proactively:",
         "",
     ]
+    p += _render_tools_table()
+    p += [""]
     if not sim_mode:
         p += [
             "> ⚠️ **`exec_shell` requires user approval** via Telegram inline buttons before running.",
@@ -756,20 +806,20 @@ def build_system_prompt(
         "### Critical — read before every response",
         "",
         "- **YOUR NATIVE TOOLS — memorise these exact names:**",
-        "  - `exec_shell`    → run shell commands (requires approval)",
-        "  - `read_file`     → read any local file",
-        "  - `write_file`    → write any local file",
-        "  - `http_get`      → HTTP GET request",
-        "  - `web_search`    → search the web or fetch a URL",
-        "  - `browser_use`   → agentic multi-step browser task (web apps, forms)",
-        "  - `look`          → perceive the world through connected cameras (eyes)",
-        "  - `sensors`       → read sensor data and control actuators (relay/pump, motor/head, LCD)",
-        "  - `send_file`     → send a local file to the user via Telegram",
-        "  - `run_skill`     → execute a named skill",
-        "  - `run_routine`   → execute a named routine",
-        "  - `search_skills` → find a skill by keyword before calling run_skill",
-        "  - `list_routines` → list available routines before calling run_routine",
-        "  - `recall_memory` → search long-term memory from past sessions",
+    ]
+    # Derive the native-tool name list live from the registry (single source of
+    # truth), so it never drifts from the implemented tools.
+    try:
+        from core.tools import TOOLS as _TOOLS_REG
+    except Exception:
+        _TOOLS_REG = []
+    for _t in _TOOLS_REG:
+        _fn = _t.get("function", {})
+        _n = _fn.get("name", "?")
+        _d = (_fn.get("description", "") or "").strip()
+        _short = _d.split(". ")[0].split(".")[0] if _d else ""
+        p.append(f"  - `{_n}` → {_short}")
+    p += [
         "  These are NOT skills. Never look for them in the skill list. Call them directly by name.",
         "",
         "- **TOOL FIRST:** If a task requires writing a file, running a command, or reading data — call the tool. Do not describe what you would do. Do it.",
