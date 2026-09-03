@@ -12,6 +12,9 @@ Usage from tools.py:
         return "(authorization denied)"
 """
 
+import json
+import os
+import tempfile
 import threading
 import time
 import uuid
@@ -19,6 +22,21 @@ from datetime import datetime
 
 # ── Global registry: request_id → {event, result} ───────────────────
 _pending: dict[str, dict] = {}
+
+# ── Cross-process pending-auth persistence ───────────────────────────
+# request_auth() runs in the model_server process (the tool loop), while
+# resolve_auth() — invoked by the Telegram bot's callback handler — runs in the
+# API process. Each process has its OWN in-memory `_pending` dict, so a button
+# tap in the API process could never resolve the blocking request in the
+# model_server process (it would always time out, and the 'stop on denials'
+# rule would then abort the tool loop and lose the conversation). We bridge the
+# two processes by persisting each pending request to a tmp file keyed by
+# request_id. request_auth() writes the request; resolve_auth() writes the
+# decision to the same file (and also sets the in-process event so same-process
+# callers — e.g. unit tests — keep working). request_auth() waits on its event
+# AND polls the file for the cross-process decision.
+_AUTH_DIR = os.path.join(tempfile.gettempdir(), "kernel_evolving_auth")
+_POLL_INTERVAL = 0.25  # seconds between cross-process file polls
 
 # ── Configurable ──────────────────────────────────────────────────────
 DEFAULT_TIMEOUT = 60  # seconds
@@ -51,6 +69,55 @@ def is_safe_command(cmd: str) -> bool:
     return False
 
 
+# ── Cross-process pending-auth persistence helpers ───────────────────
+
+def _auth_path(request_id: str) -> str:
+    """Return the tmp file path backing a pending auth request."""
+    return os.path.join(_AUTH_DIR, f"{request_id}.json")
+
+
+def _persist_pending(request_id: str, chat_id: str) -> None:
+    """Write a pending auth request to disk so the bot process can resolve it."""
+    try:
+        os.makedirs(_AUTH_DIR, exist_ok=True)
+        with open(_auth_path(request_id), "w") as _f:
+            json.dump({"chat_id": chat_id, "result": None}, _f)
+    except Exception:
+        pass
+
+
+def _read_persisted_result(request_id: str):
+    """Return the persisted decision for a request, or None if not yet decided.
+
+    Written by request_auth() (model_server process) and updated by resolve_auth()
+    (API/bot process). Returns None while still pending.
+    """
+    try:
+        with open(_auth_path(request_id)) as _f:
+            data = json.load(_f)
+        return data.get("result")
+    except Exception:
+        return None
+
+
+def _persist_decision(request_id: str, result: str) -> None:
+    """Write a decision for a pending request so the model_server can observe it."""
+    try:
+        with open(_auth_path(request_id), "w") as _f:
+            json.dump({"chat_id": None, "result": result}, _f)
+    except Exception:
+        pass
+
+
+def _drop_pending(request_id: str) -> None:
+    """Remove the persisted pending-request file (after resolution/timeout)."""
+    try:
+        if os.path.exists(_auth_path(request_id)):
+            os.remove(_auth_path(request_id))
+    except Exception:
+        pass
+
+
 def request_auth(chat_id: str, command: str, timeout: int = DEFAULT_TIMEOUT) -> str:
     """
     Send an authorization request to Telegram and block until response.
@@ -65,7 +132,9 @@ def request_auth(chat_id: str, command: str, timeout: int = DEFAULT_TIMEOUT) -> 
 
     request_id = str(uuid.uuid4())[:8]
     event = threading.Event()
-    _pending[request_id] = {"event": event, "result": None}
+    _pending[request_id] = {"event": event, "result": None, "chat_id": chat_id}
+    # Persist so the bot process (different process) can resolve this request.
+    _persist_pending(request_id, chat_id)
 
     # Import here to avoid circular imports at module level.
     # If the bot is not available (e.g. during tests), deny dangerous commands.
@@ -79,18 +148,27 @@ def request_auth(chat_id: str, command: str, timeout: int = DEFAULT_TIMEOUT) -> 
 
     if not _bot_available:
         _pending.pop(request_id, None)
+        _drop_pending(request_id)
         # No bot available — deny dangerous commands by default
         return "deny"
 
-    # Escape for Markdown
+    # Use HTML parse mode (not Markdown) because the command is arbitrary shell
+    # text that frequently contains `_`, `*`, backticks, etc. — Telegram's legacy
+    # Markdown parser rejects those with "can't parse entities", silently dropping
+    # the message and its buttons.
     cmd_display = command.replace("`", "'")[:200]
     if len(command) > 200:
         cmd_display += "…"
+    cmd_html = (
+        cmd_display.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
 
     text = (
-        f"⚠️ *Shell Authorization Required*\n\n"
-        f"```\n{cmd_display}\n```\n\n"
-        f"Approve this command?"
+        "⚠️ <b>Shell Authorization Required</b>\n\n"
+        f"<pre>{cmd_html}</pre>\n\n"
+        "Approve this command?"
     )
     buttons = [
         [
@@ -100,29 +178,50 @@ def request_auth(chat_id: str, command: str, timeout: int = DEFAULT_TIMEOUT) -> 
     ]
 
     try:
-        send_buttons(chat_id, text, buttons)
+        send_buttons(chat_id, text, buttons, parse_mode="HTML")
     except Exception as e:
         _pending.pop(request_id, None)
+        _drop_pending(request_id)
         return f"deny (send error: {e})"
 
-    # Block until callback or timeout
-    event.wait(timeout=timeout)
+    # Block until callback or timeout. The event is set by resolve_auth() in THIS
+    # process (same-process callers / tests); the persisted file is written by
+    # resolve_auth() in the bot process (cross-process). Poll both so a button tap
+    # in the separate API process resolves this request.
+    deadline = time.monotonic() + timeout
+    result = None
+    while True:
+        if event.is_set():
+            break
+        persisted = _read_persisted_result(request_id)
+        if persisted is not None:
+            result = persisted
+            break
+        if time.monotonic() >= deadline:
+            break
+        event.wait(timeout=min(_POLL_INTERVAL, max(0.0, deadline - time.monotonic())))
 
-    entry = _pending.pop(request_id, None)
-    result = "timeout"
-    if entry and entry.get("result") is not None:
-        result = entry["result"]
-
+    _pending.pop(request_id, None)
+    _drop_pending(request_id)
+    if result is None:
+        result = "timeout"
     return result
 
 
 def resolve_auth(request_id: str, approved: bool) -> None:
     """
     Called by the Telegram callback handler when the user taps Allow/Deny.
+
+    Writes the decision to the persisted request file so the model_server
+    process (which runs request_auth in a separate process) can observe it, in
+    addition to setting the local in-process event for same-process callers.
     """
+    result = "allow" if approved else "deny"
+    # Persist the decision for the model_server process to observe (cross-process).
+    _persist_decision(request_id, result)
     entry = _pending.get(request_id)
     if entry:
-        entry["result"] = "allow" if approved else "deny"
+        entry["result"] = result
         entry["event"].set()
 
 

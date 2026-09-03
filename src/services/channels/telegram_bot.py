@@ -199,17 +199,26 @@ def edit_message(chat_id: str, message_id: int, text: str, parse_mode: str = "Ma
     return False
 
 
-def send_buttons(chat_id: str, text: str, buttons: list):
-    """Send a message with inline keyboard buttons."""
+def send_buttons(chat_id: str, text: str, buttons: list, parse_mode: str = "Markdown"):
+    """Send a message with inline keyboard buttons.
+
+    `parse_mode` defaults to "Markdown" for backward compatibility. Callers
+    embedding arbitrary user/model content (e.g. the exec_shell auth prompt)
+    should pass parse_mode="HTML" and HTML-escape their content, since Telegram's
+    legacy Markdown parser rejects unescaped `_`/`*`/backticks with "can't parse
+    entities" — silently dropping the message (and its buttons).
+    """
     try:
+        payload = {
+            "chat_id": chat_id,
+            "text": text,
+            "reply_markup": {"inline_keyboard": buttons},
+        }
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
         r = requests.post(
             f"{API_BASE}/sendMessage",
-            json={
-                "chat_id": chat_id,
-                "text": text,
-                "parse_mode": "Markdown",
-                "reply_markup": {"inline_keyboard": buttons},
-            },
+            json=payload,
             timeout=10,
         )
         if not r.ok:
