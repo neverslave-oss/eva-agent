@@ -5,15 +5,12 @@ Scenario (reported as DEBUG NOTES):
   During the tools loop, exec_shell authorization requests are not delivered to
   the user for approval (cross-process: request_auth runs in the model_server
   process, resolve_auth in the API/bot process — separate in-memory registries).
-  Every approval therefore TIMES OUT. With the 'stop on 3 consecutive denials'
-  rule, 3 timeouts trigger a stop that aborts the tool loop, and the conversation
-  turn is lost.
+  Every approval therefore TIMES OUT and the conversation turn is lost.
 
 This test asserts the correct behaviour:
-  1. A user approval for a pending request RESOLVES request_auth (does not time
-     out) — i.e. the decision reaches the blocking caller even across the
-     model_server/API process boundary.
-  2. A resolved approval does NOT spuriously trip the consecutive-deny stop.
+  A user approval for a pending request RESOLVES request_auth (does not time
+  out) — i.e. the decision reaches the blocking caller even across the
+  model_server/API process boundary.
 """
 
 import os
@@ -28,8 +25,6 @@ sys.path.insert(0, SRC)
 from core.auth_gate import (
     request_auth,
     resolve_auth,
-    clear_task_state,
-    is_stop_requested,
 )
 
 
@@ -69,8 +64,6 @@ class TestConversationFlowAuth:
     def setup_method(self):
         import core.auth_gate as gate
         gate._pending.clear()
-        gate._auto_allow.clear()
-        gate._deny_count.clear()
         # _AUTH_DIR only exists once the cross-process fix is present; clean it
         # defensively so this test runs on both pre-fix and post-fix branches.
         auth_dir = getattr(gate, "_AUTH_DIR", None)
@@ -81,7 +74,6 @@ class TestConversationFlowAuth:
                     os.remove(f)
                 except Exception:
                     pass
-        clear_task_state("chat_flow")
 
     def test_approval_resolves_across_processes(self):
         """A user approval must resolve request_auth instead of timing out.
@@ -107,13 +99,3 @@ class TestConversationFlowAuth:
             )
         finally:
             ctx.stop()
-
-    def test_resolved_approval_does_not_trip_stop(self):
-        """A resolved approval must NOT count as a denial toward the stop rule."""
-        import core.auth_gate as gate
-        # Simulate 2 denials, then a real approval — the approval resets the streak.
-        gate._record_denial("chat_flow")
-        gate._record_denial("chat_flow")
-        # A resolved approval resets the deny counter.
-        gate._deny_count.pop("chat_flow", None)
-        assert is_stop_requested("chat_flow") is False
