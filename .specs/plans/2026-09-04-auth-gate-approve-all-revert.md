@@ -75,7 +75,12 @@ If we re-introduce approve-all / stop-on-3-denials in the future, we must addres
 
 - [x] Restore working `auth_gate.py` on `main`.
 - [x] Restart kernel-evolving on the working version.
-- [ ] User confirms approval buttons appear and resolve in Telegram.
-- [ ] Push `main` to remotes (origin, gitea, neverslave-oss).
+- [x] User confirms approval buttons appear and resolve in Telegram.
+- [x] Apply HF Router timeout/retry fixes to `provider.py` (`_HF_TIMEOUT`=45s, `_HF_RETRIES`=2, `_hf_post()` helper).
+- [x] Fix 7 provider test failures (root cause: `PROVIDER_TASK_INFERENCE=hf` env override; added `_clear_provider_env` autouse fixture to isolate tests).
+- [x] Fix pre-existing test bug in `test_my_recent_thoughts_in_system_prompt` (wrong journal path — real journals live in `~/.kernel-evolving/workspace/thoughts/YYYY-MM-DD.md`).
+- [ ] All tests green (final full-suite run).
+- [ ] Tag `main` as `v1.0.0` (first release).
+- [ ] Push `main` + tag to remotes (origin, gitea, neverslave-oss).
 - [ ] Clean up `fix/working-rebuild` and `debug/pre-auth-gate` branches once done.
 - [ ] When revisiting the feature: implement a reliable cross-process handoff + conversation-safe stop + integration test per section 5.
