@@ -308,12 +308,15 @@ class TestThoughtAwarenessInPrompt:
         and that's acceptable — the assertion should only fire when there's data.
         """
         prompt = build_system_prompt({}, [], [])
-        # Check if a thoughts file exists — if not, the section is correctly absent
+        # Check if a thoughts journal file exists for today. The journal lives in
+        # the `thoughts/` subdir as YYYY-MM-DD.md (see core/memory/context.py
+        # _load_recent_thoughts / ThoughtJournal), NOT as thoughts-*.md in the
+        # workspace root. If no journal exists, the section is correctly omitted.
         from pathlib import Path
         import datetime
-        journal_dir = Path.home() / ".kernel-evolving" / "workspace"
-        today_file = journal_dir / f"thoughts-{datetime.date.today().isoformat()}.md"
-        if today_file.exists() or any(journal_dir.glob("thoughts-*.md")):
+        journal_dir = Path.home() / ".kernel-evolving" / "workspace" / "thoughts"
+        today_file = journal_dir / f"{datetime.date.today().isoformat()}.md"
+        if today_file.exists() or any(journal_dir.glob("*.md")):
             assert "## My recent thoughts" in prompt, \
                 "Thought-awareness section missing from system prompt (journal file exists)"
         else:

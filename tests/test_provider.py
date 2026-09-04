@@ -17,6 +17,19 @@ def _make_cfg(providers_block=None):
     return cfg
 
 
+@pytest.fixture(autouse=True)
+def _clear_provider_env(monkeypatch):
+    """Isolate routing tests from the live shell environment.
+
+    InferenceProvider.get_provider() reads PROVIDER_<CALL_TYPE> env vars
+    (e.g. PROVIDER_TASK_INFERENCE) which, if set in the test runner's shell,
+    would override the config under test. Clear them so each test asserts
+    against its own controlled config, not the environment.
+    """
+    for key in [k for k in os.environ if k.startswith("PROVIDER_")]:
+        monkeypatch.delenv(key, raising=False)
+
+
 # ── Routing tests ─────────────────────────────────────────────────────────────
 
 def test_provider_routes_local_by_default():
