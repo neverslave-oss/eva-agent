@@ -1,80 +1,46 @@
 # Changelog
 
-All notable changes to **kernel-evolving** are documented here.
+All notable changes to **kernel-evolving (EVA)** are documented here.
 
-## [1.19.0] - 2026-05-25
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-### Added
-- `/voice-clone` bare command: inline sample picker with usage hint and one-tap voice switching
-- `voice-clone` skill: `exec:` field for direct script dispatch (bypasses LLM), `intents:` for natural language routing
-- `clone_voice.sh` v2: smart arg parsing — auto-detects sample from text (ricky/italian/english), no path required
-- Core skills dispatch test suite: 31 tests covering presence, commands, intents, exec paths for voice-clone, collective-memory, security-scanner etc.
-- New test files: `test_core_skills_dispatch.py`, `test_memory.py`, `test_provider_infer_with_tools.py`, `test_model_client_unit.py`
-
-### Fixed
-- `skills.py`: `{skill_dir}` token was not substituted in exec templates → `No such file or directory`
-- `skills.py`: `skill_dir` assignment was after its use → `UnboundLocalError`
-- `memory.py`: `_sanitise()` strips error/VRAM-guard assistant turns and orphan consecutive user turns that caused stuck/looping responses
-- `/new` command: now scopes clear to `chat_id` only — previously cleared all sessions via `clear_all()`
-- `/status` command: model name now read live from `model_client.health()` instead of hardcoded `Gemma 4 E2B-it`
-- `telegram_bot.py`: double memory persistence for plain chat turns removed
-- Ecosystem cleanup: removed 37 synthesised noise/duplicate skills (80 → 43)
-- Telegram command picker: dynamic `/skill_<slug>` + `/run_<slug>` for all installed skills/routines (100-command budget, correct 32-char slug limits)
-
-
-## [1.18.6] - 2026-05-25
-
-### Changed
-- Added and structured this changelog for release tracking.
-- Normalized release documentation after the Docker + ADR-015 rollout.
-
-## [1.18.5] - 2026-05-25
-
-### Changed
-- Version alignment across runtime and docs:
-  - `src/version.py` → `1.18.5`
-  - `config.yaml` and `config.container.yaml` `self_identity.version_tag` → `v1.18.5-evolving`
-  - README version badge updated accordingly.
-
-## [1.10.1-evolving] - 2026-05-25
-
-### Documentation
-- README aligned to the shipped architecture:
-  - Docker startup via `entrypoint.sh`
-  - writable `/models` cache for first-run Nemotron download
-  - sandbox profile usage
-  - discovery/network notes for containerized deployments
-- Sim14 section updated with current snapshot and caveats.
-
-## [1.10.0-evolving] - 2026-05-25
+## [1.1.0] - 2026-09-05
 
 ### Added
-- ADR-015 auto-discovery implementation:
-  - `src/discovery.py` (port-scan + optional mDNS + coding agent probes)
-  - `src/mcp_client.py`
-  - `/peers` endpoint in API
-  - passive delegation hook in agent routing
-  - `docs/PEER_PROTOCOL.md`
-  - unit tests: `tests/test_discovery.py`
-
-### Changed
-- Docker portability pass:
-  - new `entrypoint.sh`
-  - compose/env wiring cleanup
-  - container config portability updates
-  - full dependency alignment for container runtime
-- Think-at-Rest observability:
-  - logging setup improvements
-  - manual `/think/trigger` endpoint
-- Eval hygiene:
-  - provider-switch unload behavior improvements in eval flow.
-- Local default model set to **Nemotron-Labs-Diffusion-3B**.
-
-## [1.18.4] - 2026-05-25
+- HF Router request tuning in `provider.py`: `_hf_post()` helper with configurable
+  per-attempt timeout (`HF_TIMEOUT`, default 45s) and retries (`HF_RETRIES`, default 2)
+  with brief backoff, used by `_call_hf` and `_hf_tool_loop`. The HF Router
+  (`router.huggingface.co`) intermittently hangs; a fixed 120s timeout previously
+  blocked the tool loop for minutes before falling back to local.
 
 ### Fixed
-- Telegram chat-id propagation to avoid cross-session memory contamination.
+- Restored the known-working pre-auth-gate `auth_gate.py` (in-process Allow/Deny
+  approval) on `main`, reverting the `feat/exec-shell-approve-all` regression that
+  caused approval buttons to not appear and conversation turns to be lost.
+- Provider tests no longer depend on the live shell environment: added a
+  `_clear_provider_env` autouse fixture to `tests/test_provider.py` and
+  `tests/test_provider_infer_with_tools.py` so tests assert against their own
+  controlled config (the `PROVIDER_TASK_INFERENCE` env var was overriding test config).
+- `tests/integration/test_telegram_integration.py::test_my_recent_thoughts_in_system_prompt`
+  checked the wrong journal path; now looks in `~/.kernel-evolving/workspace/thoughts/`
+  where journals are actually written.
 
----
+### Tests
+- Full suite green: 719 passed, 16 skipped, 1 xfailed, 0 failures.
+
+## [1.0.0] - 2026-08-16
+
+### Added
+- Fresh open-source launch of the **EVA** agent (Kernel-Evolving): a self-evolving,
+  local-first AI agent with autonomous skill acquisition, Think-at-Rest idle
+  reflection, multi-provider inference, and a Telegram-native control plane.
+- Machine-specific paths, credentials, and internal working notes removed and
+  replaced with environment variables (see `.env.example`).
+- Native any-to-any support (Qwen2.5-Omni) and unified vision-language
+  (Janus-Pro-7B) alongside the classic Nemotron-Diffusion and Gemma 4 E2B-it.
+- ADR-driven architecture docs, Mermaid architecture diagram, and Hippocratic
+  License HL3-LAW-MIL-SV.
+
 
 > Note: historical pre-1.18.4 entries are available in git history and release notes.
