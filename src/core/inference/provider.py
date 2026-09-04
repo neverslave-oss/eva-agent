@@ -26,6 +26,17 @@ from core.voice_activity import is_voice_active
 logger = logging.getLogger(__name__)
 
 
+# ── HF Router request tuning ────────────────────────────────────────────────
+# The HF Router (router.huggingface.co) occasionally hangs on a chat/completions
+# call. A long timeout (previously fixed 120s) blocks the tool loop for minutes
+# before falling back to local, making tasks feel very slow. These are
+# configurable via env:
+#   HF_TIMEOUT  — per-request timeout in seconds (default 45)
+#   HF_RETRIES  — how many times to retry a timed-out request (default 2)
+_HF_TIMEOUT = int(os.environ.get("HF_TIMEOUT", "45"))
+_HF_RETRIES = int(os.environ.get("HF_RETRIES", "2"))
+
+
 # ── GPU temperature monitor ────────────────────────────────────────────────────────
 
 _gpu_temp_cache: dict = {"temp": None, "ts": 0.0}  # module-level cache, refreshed every 30s
@@ -298,29 +309,65 @@ class InferenceProvider:
         """Return the HF Router OpenAI-compatible base URL (router root)."""
         return "https://router.huggingface.co/v1"
 
-    def _call_hf(self, messages: list, model: str | None) -> str:
+    def _hf_post(self, payload: dict, timeout: int | None = None) -> dict:
+        """POST to the HF Router chat/completions with retry on timeout.
+
+        The HF Router occasionally hangs on a request (no response until the
+        client timeout). Instead of blocking the tool loop for up to 120s and
+        then falling back to local, we use a shorter per-attempt timeout and
+        retry a few times for transient network blips. Only after the retries
+        are exhausted do we raise, letting the caller fall through the chain.
+
+        Args:
+            payload: the JSON body to send.
+            timeout: per-attempt timeout in seconds (default _HF_TIMEOUT).
+        Returns:
+            The parsed JSON response dict.
+
+        Raises:
+            RuntimeError if the request ultimately fails after retries.
+        """
         api_key = os.environ.get("HF_TOKEN")
         if not api_key:
             raise RuntimeError("No HF_TOKEN")
-        if not model:
-            raise RuntimeError("No HF model configured")
-        payload = json.dumps({
-            "model": self._hf_model(model),
-            "messages": messages,
-            "max_tokens": 8192,
-        }).encode()
+        timeout = timeout or _HF_TIMEOUT
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",
             # urllib's default User-Agent is blocked by the HF Router (403); send a real one.
             "User-Agent": "kernel-evolving/1.0",
         }
-        req = urllib.request.Request(
-            f"{self._hf_base_url()}/chat/completions",
-            data=payload, headers=headers, method="POST"
-        )
-        resp = urllib.request.urlopen(req, timeout=120)
-        data = json.loads(resp.read())
+        body = json.dumps(payload).encode()
+        last_err = None
+        for attempt in range(1, _HF_RETRIES + 1):
+            try:
+                req = urllib.request.Request(
+                    f"{self._hf_base_url()}/chat/completions",
+                    data=body, headers=headers, method="POST"
+                )
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    return json.loads(resp.read())
+            except (urllib.error.URLError, TimeoutError, OSError) as e:
+                last_err = e
+                logger.warning(
+                    "[provider] HF Router attempt %d/%d failed (timeout=%ss): %s",
+                    attempt, _HF_RETRIES, timeout, str(e)[:120],
+                )
+                if attempt < _HF_RETRIES:
+                    time.sleep(1)  # brief backoff between retries
+        raise RuntimeError(f"HF Router request failed after {_HF_RETRIES} attempts: {last_err}")
+
+    def _call_hf(self, messages: list, model: str | None) -> str:
+        api_key = os.environ.get("HF_TOKEN")
+        if not api_key:
+            raise RuntimeError("No HF_TOKEN")
+        if not model:
+            raise RuntimeError("No HF model configured")
+        data = self._hf_post({
+            "model": self._hf_model(model),
+            "messages": messages,
+            "max_tokens": 8192,
+        })
         return data["choices"][0]["message"]["content"]
 
     def _call_copilot(self, messages: list, model: str | None) -> str:
@@ -633,25 +680,13 @@ class InferenceProvider:
         current_messages = list(messages)
 
         for step in range(max_steps):
-            payload = json.dumps({
+            data = self._hf_post({
                 "model": self._hf_model(model),
                 "messages": current_messages,
                 "tools": tools,
                 "tool_choice": "auto",
                 "max_tokens": 8192,
-            }).encode()
-            headers = {
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}",
-                # urllib's default User-Agent is blocked by the HF Router (403); send a real one.
-                "User-Agent": "kernel-evolving/1.0",
-            }
-            req = urllib.request.Request(
-                f"{self._hf_base_url()}/chat/completions",
-                data=payload, headers=headers, method="POST"
-            )
-            resp = urllib.request.urlopen(req, timeout=120)
-            data = json.loads(resp.read())
+            })
             choice = data["choices"][0]
             msg = choice["message"]
 
