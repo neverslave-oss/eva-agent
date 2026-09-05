@@ -47,6 +47,19 @@ def _esc(text: str) -> str:
     return str(text).replace("_", "\\_")
 
 
+def _html(text: str) -> str:
+    """HTML-escape text for Telegram parse_mode="HTML".
+
+    Telegram's legacy Markdown parser rejects messages containing unescaped
+    markdown specials (`_`, `*`, backticks, `[`) with a 400 "can't parse
+    entities" error. HTML parse mode only requires escaping `<`, `>`, and `&`,
+    so it's far more robust for arbitrary model-generated text (which is full
+    of code, links, and punctuation).
+    """
+    import html as _html_lib
+    return _html_lib.escape(str(text), quote=False)
+
+
 # ── Tool step display (Telegram) ─────────────────────────────────────
 # Per-tool emoji + verb so tool-call progress messages are informative
 # ("what tool, to do what") instead of a bare "🔧 tool1 → tool2".
@@ -102,21 +115,26 @@ def _tool_args_label(name: str, args) -> str:
 
 
 def _format_tool_step(n, tool_name, args=None, result=None) -> str:
-    """Format one tool-call step as a readable, emoji-tagged Telegram line."""
+    """Format one tool-call step as a readable, emoji-tagged Telegram line.
+
+    Uses HTML formatting (Telegram HTML parse mode) — the tool name is in
+    <code>, the step number is <b>bold</b>, and dynamic values are HTML-escaped
+    so arbitrary model output never breaks the entity parser.
+    """
     name = str(tool_name or "?")
     emoji = _TOOL_EMOJI.get(name, "🔧")
     verb = _TOOL_VERB.get(name, name.replace("_", " "))
-    # Show the tool name in backticks (precise) with a friendly verb prefix.
-    line = f"*Step {n}* {emoji} `{_esc(verb)}` (`{_esc(name)}`)"
+    # Show the tool name in <code> (precise) with a friendly verb prefix.
+    line = f"<b>Step {n}</b> {emoji} <code>{_html(verb)}</code> (<code>{_html(name)}</code>)"
     label = _tool_args_label(name, args)
     if label:
-        line += f" — `{_esc(label)}`"
+        line += f" — <code>{_html(label)}</code>"
     if result is not None:
         r = str(result).strip()
         if r and not r.lower().startswith("(error") and "error:" not in r.lower()[:60]:
             line += "\n  ✅ ok"
         else:
-            line += f"\n  ⚠️ {_esc(r[:120])}"
+            line += f"\n  ⚠️ {_html(r[:120])}"
     return line
 
 
@@ -3175,13 +3193,13 @@ def handle_message(chat_id: str, text: str, sender_name: str = "", photo_file_id
                 if _stream_char_count[0] >= _STREAM_EDIT_EVERY:
                     _stream_char_count[0] = 0
                     preview = _stream_buf[0]
-                    snippet = ("🔍 " + "\n\n".join(log_lines[-3:]) + f"\n\n✍️ {preview}"
-                               if log_lines else f"✍️ {preview}")
+                    snippet = ("🔍 " + "\n\n".join(log_lines[-3:]) + f"\n\n✍️ {_html(preview)}"
+                               if log_lines else f"✍️ {_html(preview)}")
                     if working_id[0]:
-                        edit_message(chat_id, working_id[0], snippet[:4000])
+                        edit_message(chat_id, working_id[0], snippet[:4000], parse_mode="HTML")
                     else:
                         # First output — create the message now, no prior placeholder
-                        working_id[0] = send_message(chat_id, snippet[:4000])
+                        working_id[0] = send_message(chat_id, snippet[:4000], parse_mode="HTML")
 
             def _step_cb(n, tool_name, args=None, result=None):
                 step_num[0] = n
@@ -3193,9 +3211,9 @@ def handle_message(chat_id: str, text: str, sender_name: str = "", photo_file_id
                 # Keep the last few steps so the message stays readable.
                 snippet = "🔍 " + "\n\n".join(log_lines[-4:])
                 if working_id[0]:
-                    edit_message(chat_id, working_id[0], snippet[:4000])
+                    edit_message(chat_id, working_id[0], snippet[:4000], parse_mode="HTML")
                 else:
-                    working_id[0] = send_message(chat_id, snippet[:4000])
+                    working_id[0] = send_message(chat_id, snippet[:4000], parse_mode="HTML")
 
             # Inject recent attachment context only when message references a file
             _triage_text = text
@@ -3271,19 +3289,22 @@ def handle_message(chat_id: str, text: str, sender_name: str = "", photo_file_id
                     "Check model/tool logs for this request and retry."
                 )
 
-        # Build final message: preserve all step logs then append final answer
+        # Build final message: preserve all step logs then append final answer.
+        # Escape dynamic content for Telegram HTML parse mode — legacy Markdown
+        # rejects unescaped `_`/`*`/backticks with a 400 "can't parse entities",
+        # which silently drops the final answer. HTML only needs < > & escaped.
         if log_lines:
-            _steps_section = "🔍 " + "\n\n".join(log_lines)
-            reply_text = f"{_steps_section}\n\n🐬 {_final_reply}"
+            _steps_section = "🔍 " + "\n\n".join(_html(l) for l in log_lines)
+            reply_text = f"{_steps_section}\n\n🐬 {_html(_final_reply)}"
         else:
-            reply_text = f"🐬 {_final_reply}"
+            reply_text = f"🐬 {_html(_final_reply)}"
         # Telegram hard limit is 4096 chars; truncate from beginning to keep final answer
         if len(reply_text) > 4000:
             reply_text = "…" + reply_text[-3998:]
-        if working_id[0] and not edit_message(chat_id, working_id[0], reply_text):
-            send_message(chat_id, reply_text)
+        if working_id[0] and not edit_message(chat_id, working_id[0], reply_text, parse_mode="HTML"):
+            send_message(chat_id, reply_text, parse_mode="HTML")
         elif not working_id[0]:
-            send_message(chat_id, reply_text)
+            send_message(chat_id, reply_text, parse_mode="HTML")
     except Exception as e:
         print(f"[bot] ERROR in infer: {e}", flush=True)
         err_text = f"🐬 Error: {str(e)[:200]}"
