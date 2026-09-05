@@ -9,6 +9,7 @@ Usage: python src/telegram_bot.py
 import os
 import json
 import re
+import random
 import subprocess
 import requests
 import threading
@@ -3541,9 +3542,43 @@ def start_bot_thread():
 
 OFFSET_FILE = "/tmp/kernel_evolving_telegram_offset"
 
+# Poll loop resilience and lightweight telemetry
+_POLL_BACKOFF_BASE_SECONDS = float(os.environ.get("KERNEL_EVO_POLL_BACKOFF_BASE_SECONDS", "5"))
+_POLL_BACKOFF_MAX_SECONDS = float(os.environ.get("KERNEL_EVO_POLL_BACKOFF_MAX_SECONDS", "60"))
+_POLL_BACKOFF_DNS_MULTIPLIER = float(os.environ.get("KERNEL_EVO_POLL_BACKOFF_DNS_MULTIPLIER", "2"))
+_POLL_BACKOFF_JITTER_MAX_SECONDS = float(os.environ.get("KERNEL_EVO_POLL_BACKOFF_JITTER_MAX_SECONDS", "1"))
+_POLL_FAILURES_TOTAL = 0
+_POLL_DNS_FAILURES_TOTAL = 0
+_POLL_LAST_SUCCESS_EPOCH = 0.0
+
+
+def _is_dns_resolution_error(exc: Exception) -> bool:
+    """Best-effort classifier for DNS resolution failures from requests/urllib."""
+    text = str(exc)
+    return (
+        "NameResolutionError" in text
+        or "Failed to resolve" in text
+        or "Temporary failure in name resolution" in text
+    )
+
+
+def _compute_poll_backoff_seconds(failure_streak: int, dns_failure: bool = False, jitter_seconds: float | None = None) -> float:
+    """Exponential backoff with optional DNS multiplier and bounded jitter."""
+    if failure_streak <= 0:
+        return 0.0
+    delay = _POLL_BACKOFF_BASE_SECONDS * (2 ** (failure_streak - 1))
+    if dns_failure:
+        delay *= _POLL_BACKOFF_DNS_MULTIPLIER
+    delay = min(_POLL_BACKOFF_MAX_SECONDS, delay)
+    if jitter_seconds is None:
+        jitter_seconds = random.uniform(0, _POLL_BACKOFF_JITTER_MAX_SECONDS)
+    return min(_POLL_BACKOFF_MAX_SECONDS, delay + max(0.0, jitter_seconds))
+
 
 def poll():
     """Long-poll Telegram for updates."""
+    global _POLL_FAILURES_TOTAL, _POLL_DNS_FAILURES_TOTAL, _POLL_LAST_SUCCESS_EPOCH
+
     # Restore offset from last run so we don't replay already-seen updates
     offset = None
     try:
@@ -3554,7 +3589,10 @@ def poll():
         pass
     print(f"[bot] Kernel Telegram bot starting...")
 
+    failure_streak = 0
+
     while True:
+        poll_started = time.monotonic()
         try:
             # Telegram expects allowed_updates as a JSON-encoded array, not repeated query params.
             # If encoded incorrectly, normal messages may work while callback_query updates never arrive.
@@ -3564,8 +3602,19 @@ def poll():
 
             resp = requests.get(f"{API_BASE}/getUpdates", params=params, timeout=35)
             data = resp.json()
+            updates = data.get("result", [])
+            latency_ms = int((time.monotonic() - poll_started) * 1000)
 
-            for update in data.get("result", []):
+            _POLL_LAST_SUCCESS_EPOCH = time.time()
+            if failure_streak > 0:
+                print(
+                    f"[bot] Poll recovered after {failure_streak} failure(s): "
+                    f"latency_ms={latency_ms} updates={len(updates)}"
+                )
+            failure_streak = 0
+            print(f"[bot] Poll ok: latency_ms={latency_ms} updates={len(updates)}", flush=True)
+
+            for update in updates:
                 offset = update["update_id"] + 1
                 # Persist offset so restarts don't replay seen updates
                 try:
@@ -3632,8 +3681,19 @@ def poll():
             print("[bot] Stopped.")
             break
         except Exception as e:
-            print(f"[bot] Poll error: {e}")
-            time.sleep(5)
+            failure_streak += 1
+            _POLL_FAILURES_TOTAL += 1
+            dns_failure = _is_dns_resolution_error(e)
+            if dns_failure:
+                _POLL_DNS_FAILURES_TOTAL += 1
+            backoff = _compute_poll_backoff_seconds(failure_streak, dns_failure=dns_failure)
+            print(
+                f"[bot] Poll error: type={type(e).__name__} dns={dns_failure} "
+                f"streak={failure_streak} backoff_s={backoff:.1f} "
+                f"dns_failures_total={_POLL_DNS_FAILURES_TOTAL} err={e}",
+                flush=True,
+            )
+            time.sleep(backoff)
 
 
 if __name__ == "__main__":
