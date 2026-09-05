@@ -19,6 +19,12 @@ from pathlib import Path
 from runtime_paths import DOCUMENTS_DIR
 from core.voice_activity import voice_activity
 
+# Recency window (seconds) for treating an attachment as "recent" context.
+# Attachments older than this are stale and must not be injected as if freshly
+# uploaded, nor force the reply to reference them (bug: a days-old photo was
+# surfaced for an unrelated later turn).
+_ATTACHMENT_RECENCY_SECONDS = int(os.environ.get("KERNEL_EVO_ATTACHMENT_RECENCY_SECONDS", "86400"))
+
 # Add src/ to path
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -1366,7 +1372,7 @@ def handle_message(chat_id: str, text: str, sender_name: str = "", photo_file_id
                     chat_id=str(chat_id),
                 )
                 # Inject recent-attachment context into the prompt
-                att_ctx = _memory_mod.attachment_context_block(chat_id=str(chat_id), limit=3)
+                att_ctx = _memory_mod.attachment_context_block(chat_id=str(chat_id), limit=3, max_age_seconds=_ATTACHMENT_RECENCY_SECONDS)
                 if att_ctx:
                     full_prompt = f"{att_ctx}\n\n{full_prompt}"
 
@@ -3202,7 +3208,7 @@ def handle_message(chat_id: str, text: str, sender_name: str = "", photo_file_id
                 "the one i sent", "what i sent", "that i sent",
             )
             if any(kw in _text_lower for kw in _ATT_REF_KEYWORDS):
-                _att_ctx = _memory_mod.attachment_context_block(chat_id=str(chat_id), limit=3)
+                _att_ctx = _memory_mod.attachment_context_block(chat_id=str(chat_id), limit=3, max_age_seconds=_ATTACHMENT_RECENCY_SECONDS)
             if _att_ctx:
                 _triage_text = f"{_att_ctx}\n\n{text}"
 
@@ -3211,7 +3217,7 @@ def handle_message(chat_id: str, text: str, sender_name: str = "", photo_file_id
             # --- Completion gates ---
             # 1. Attachment guard: if user referenced a file, did reply use it?
             if _att_ctx:
-                _guard = _memory_mod.attachment_guard(text, reply, chat_id=str(chat_id))
+                _guard = _memory_mod.attachment_guard(text, reply, chat_id=str(chat_id), max_age_seconds=_ATTACHMENT_RECENCY_SECONDS)
                 if not _guard["ok"]:
                     print(f"[bot] chat guard FAIL (retrying): {_guard['reason']}", flush=True)
                     _retry_text = (
@@ -3220,7 +3226,7 @@ def handle_message(chat_id: str, text: str, sender_name: str = "", photo_file_id
                         f"{text}"
                     )
                     reply = _agent_mod.triage(_retry_text, step_callback=_step_cb, chat_id=str(chat_id), chunk_callback=_chunk_cb)
-                    _guard2 = _memory_mod.attachment_guard(text, reply, chat_id=str(chat_id))
+                    _guard2 = _memory_mod.attachment_guard(text, reply, chat_id=str(chat_id), max_age_seconds=_ATTACHMENT_RECENCY_SECONDS)
                     if not _guard2["ok"]:
                         reply = reply + "\n\n⚠️ (Note: I may not have fully used your uploaded file — please confirm or re-ask if needed.)"
 
