@@ -1,0 +1,23 @@
+{
+  "enabled": true,
+  "drivers": {
+    "pyautogui": {"enabled": true, "default": true},
+    "pywinauto": {"enabled": false},
+    "playwright": {"enabled": true},
+    "openclaw": {"enabled": false}
+  },
+  "defaults": {
+    "target_kind": "desktop",
+    "driver_order": ["pyautogui", "pywinauto", "playwright", "openclaw"],
+    "state_scope": "per_chat",
+    "max_steps": 30,
+    "timeout_seconds": 180,
+    "run_mode": "dry_run"
+  },
+  "features": {
+    "ocr": true,
+    "dom": true,
+    "recovery": true,
+    "dry_run": true
+  }
+}

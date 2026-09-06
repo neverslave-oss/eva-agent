@@ -1,0 +1,6 @@
+{
+  "desktop_app_allowlist": [
+    "notepad.exe",
+    "calc.exe"
+  ]
+}
