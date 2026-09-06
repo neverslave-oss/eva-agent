@@ -23,16 +23,17 @@ def test_inject_context_empty_text_edge_case():
 
 def test_run_computer_task_happy_path():
     _reset_bridge_cache()
-    out = bridge.run_computer_task(chat_id="chat-1", goal="open docs", target={"kind": "browser"})
+    out = bridge.run_computer_task(chat_id="chat-1", goal="open https://docs.openclaw.ai", target={"kind": "browser"})
     assert out["ok"] is True
-    assert out["mode"] == "scaffold"
+    assert out["status"] in {"ok", "done"}
     assert out["dry_run"] is True
+    assert out["run_id"]
 
 
 def test_run_computer_task_explicit_live_mode_edge_case():
     _reset_bridge_cache()
     out = bridge.run_computer_task(
-        chat_id="chat-1", goal="open docs", target={"kind": "browser"}, dry_run=False
+        chat_id="chat-1", goal="click and wait", target={"kind": "desktop"}, dry_run=False
     )
     assert out["ok"] is True
     assert out["dry_run"] is False
@@ -41,5 +42,6 @@ def test_run_computer_task_explicit_live_mode_edge_case():
 def test_debug_snapshot_shape_happy_path():
     _reset_bridge_cache()
     snap = bridge.debug_snapshot(chat_id="chat-2", query="test")
-    assert "available" in snap
+    assert snap["available"] is True
     assert "chat_id" in snap
+    assert "registry" in snap

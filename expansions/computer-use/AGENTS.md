@@ -1,4 +1,9 @@
 # AGENTS.md (expansion local notes)
 
-This expansion is scaffold-only in v0.1.
-Implement behavior through tests first; keep bridge integration no-op safe.
+Computer-use expansion baseline is implemented for:
+- desktop-first execution mode,
+- browser interoperability,
+- per-chat state retention,
+- dry-run-by-default orchestration.
+
+Next milestones are tracked in `SPEC.md` roadmap.

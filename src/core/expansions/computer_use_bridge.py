@@ -10,7 +10,9 @@ import sys
 from pathlib import Path
 
 _KERNEL_ROOT = Path(__file__).resolve().parents[3]
-_SIDECAR_SRC = _KERNEL_ROOT / "expansions" / "computer-use" / "src"
+_SIDECAR_ROOT = _KERNEL_ROOT / "expansions" / "computer-use"
+_SIDECAR_SRC = _SIDECAR_ROOT / "src"
+_STATE_FILE = _SIDECAR_ROOT / "tmp" / "chat_state.json"
 
 _sidecar = None
 
@@ -46,13 +48,16 @@ def inject_computer_use_context(chat_id: str = "", text: str = "") -> str:
         return ""
     if not text.strip():
         return ""
-    return "Computer-use expansion available (scaffold). Prefer tool-first safe actions."
+    return (
+        "Computer-use expansion active: desktop-first, browser-interoperable, "
+        "per-chat state retention, dry-run default."
+    )
 
 
 def helper_plan_hint(chat_id: str = "", text: str = "") -> str:
     if not _ensure_loaded() or not text.strip():
         return ""
-    return "Computer-use helper: plan atomic steps and verify each step."
+    return "Plan atomic actions, validate by policy, verify each post-condition."
 
 
 def run_computer_task(
@@ -63,14 +68,50 @@ def run_computer_task(
 ) -> dict:
     if not _ensure_loaded():
         return {"ok": False, "reason": "computer-use sidecar unavailable"}
+
+    from computer_use.drivers.pyautogui_driver import PyAutoGUIDriver  # type: ignore
+    from computer_use.orchestrator import Orchestrator  # type: ignore
+    from computer_use.planner import Planner  # type: ignore
+    from computer_use.safety import PolicyEngine  # type: ignore
+    from computer_use.state_store import StateStore  # type: ignore
+
+    driver = PyAutoGUIDriver()
+    planner = Planner()
+    policy = PolicyEngine(
+        {
+            "allow_actions": [
+                "observe",
+                "click",
+                "double_click",
+                "type",
+                "hotkey",
+                "navigate",
+                "scroll",
+                "wait",
+                "assert_text",
+                "assert_url",
+                "upload",
+                "submit",
+                "done",
+                "abort",
+            ],
+            "deny_actions": ["delete", "purchase", "send_money"],
+        }
+    )
+    store = StateStore(_STATE_FILE)
+    orch = Orchestrator(planner=planner, driver=driver, policy=policy, state_store=store)
+    result = orch.run_once(goal=goal, target=target or {"kind": "desktop"}, chat_id=(chat_id or "default"), dry_run=dry_run)
+
     return {
-        "ok": True,
-        "mode": "scaffold",
+        "ok": result.status in {"ok", "done"},
+        "status": result.status,
+        "message": result.message,
+        "completed": result.completed,
         "chat_id": chat_id,
         "goal": goal,
-        "target": target or {},
+        "target": target or {"kind": "desktop"},
         "dry_run": dry_run,
-        "result": "execution stub",
+        "run_id": result.data.get("run_id"),
     }
 
 
@@ -82,10 +123,9 @@ def debug_snapshot(chat_id: str = "", query: str = "") -> dict:
             "chat_id": chat_id,
             "query": query,
         }
-    return {
-        "available": True,
-        "chat_id": chat_id,
-        "query": query,
-        "sidecar_src": str(_SIDECAR_SRC),
-        "mode": "scaffold",
-    }
+
+    from computer_use.debug import snapshot  # type: ignore
+
+    snap = snapshot(_SIDECAR_ROOT)
+    snap.update({"chat_id": chat_id, "query": query, "sidecar_src": str(_SIDECAR_SRC)})
+    return snap

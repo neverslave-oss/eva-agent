@@ -2,7 +2,7 @@
 
 > **Author:** Olly + Fabio
 > **Date:** 2026-09-06
-> **Status:** Draft v0.1 (scaffold-first)
+> **Status:** Implemented baseline v0.1 (desktop-first + dry-run default)
 > **Target repo:** `repositories/kernel-evolving`
 > **Expansion root:** `expansions/computer-use/`
 
@@ -266,10 +266,10 @@ All tests isolated; no production state touched.
 
 ## 9) Milestone plan
 
-### M0 — Spec + scaffold
+### M0 — Foundation (completed)
 - create folder structure
 - define schema and interfaces
-- add empty bridge stub in kernel core
+- add no-op-safe bridge in kernel core
 
 ### M1 — Desktop-first path (locked)
 - implement pyautogui driver baseline
@@ -307,4 +307,45 @@ Locked by user:
 - Bridge seam defined and no-op behavior explicitly required.
 - Safety and testing sections present before implementation.
 - Milestones clear enough for planner/builder subagents.
+
+---
+
+## 12) Completed tasks checklist
+
+- [x] Spec created and aligned with sidecar + bridge architecture
+- [x] Expansion folder structure created under `expansions/computer-use/`
+- [x] Core modules implemented (`schema`, `planner`, `orchestrator`, `router`, `safety`, `state_store`, `verifier`, `debug`, `telemetry`)
+- [x] Driver contracts and baseline drivers implemented (`pyautogui`, `pywinauto`, `playwright`, `openclaw`)
+- [x] Perception adapters implemented (`screen`, `dom`, `ocr`, `matcher`)
+- [x] Kernel bridge implemented at `src/core/expansions/computer_use_bridge.py`
+- [x] Desktop-first default configured
+- [x] Browser interoperability path retained
+- [x] Per-chat state retention implemented with per-run checkpoints
+- [x] Dry-run default implemented (`dry_run=true`)
+- [x] Dependency policy documented with official docs + latest-version audit (`docs/dependencies.md`)
+- [x] Happy-path + edge-case tests added and passing
+
+---
+
+## 13) Roadmap
+
+### Phase 1 (current baseline complete)
+- Deterministic planning pipeline
+- Policy validation gates
+- Driver routing and bridge execution
+
+### Phase 2 (next)
+- Real screenshot capture in driver path with OCR-backed assertions
+- Rich expectation model (`assert_element`, `assert_window_focus`, retry windows)
+- Persistent run resume API from per-chat cursor
+
+### Phase 3
+- Playwright-driven browser parity for module-driven browser tasks
+- Domain allowlist enforcement + navigation policy hardening
+- Unified action result schema across desktop + browser
+
+### Phase 4
+- OpenClaw native tool driver execution path (`browser`/`computer` action mapping)
+- Recovery strategies for stale refs, focus loss, and partial failures
+- Telemetry export for post-run analytics and evaluation
 
