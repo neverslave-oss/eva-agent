@@ -29,6 +29,12 @@ try:
 except Exception:
     inject_field_context = lambda chat_id="", text="": ""
 
+# Computer-use context-provider bridge (Phase 4 wiring)
+try:
+    from core.expansions.computer_use_bridge import inject_computer_use_context
+except Exception:
+    inject_computer_use_context = lambda chat_id="", text="": ""
+
 
 # ── Native-tool discovery (single source of truth) ─────────────────────
 # The authoritative tool registry lives in tools.py (TOOLS). Instead of
@@ -868,6 +874,16 @@ def build_system_prompt(
         _exp_block = inject_field_context(chat_id=chat_id)
         if _exp_block:
             p += ["## Active expertise fields", "", _exp_block, ""]
+    except Exception:
+        pass
+
+    # =========================================================================
+    # ## Computer-use expansion (Phase 4 wiring)
+    # =========================================================================
+    try:
+        _cu_block = inject_computer_use_context(chat_id=chat_id, text="active")
+        if _cu_block:
+            p += ["## Computer-use expansion", "", _cu_block, ""]
     except Exception:
         pass
 

@@ -307,6 +307,31 @@ TOOLS = [
                 "required": ["action"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "computer",
+            "description": "Drive the desktop/browser via the computer-use expansion. Given a natural-language goal, the orchestrator plans atomic actions (observe/click/type/hotkey/navigate/scroll/wait/assert_text/assert_url/upload/submit), validates each against policy, and executes them through the configured driver. Dry-run by default: pass dry_run=false only to actually move the mouse/keyboard. Returns a JSON envelope with status, message, completed and run_id. Use for GUI automation, clicking UI elements, filling forms, navigating apps, or browser tasks that need real screen control.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "goal": {
+                        "type": "string",
+                        "description": "The natural-language task to accomplish, e.g. 'open Firefox and type example.com in the address bar'."
+                    },
+                    "target": {
+                        "type": "object",
+                        "description": "Optional target descriptor, e.g. {'kind': 'desktop'} or {'kind': 'browser'}."
+                    },
+                    "dry_run": {
+                        "type": "boolean",
+                        "description": "Plan + validate only, without executing (default true). Set false to actually perform the actions."
+                    }
+                },
+                "required": ["goal"]
+            }
+        }
     }
 ]
 
@@ -453,6 +478,31 @@ def _run_sensors(arguments: dict) -> str:
         return json.dumps(result, ensure_ascii=False)
     except Exception as exc:
         return f"(error: sensors failed: {exc})"
+
+
+def _run_computer(arguments: dict, chat_id: str = "") -> str:
+    """Run the computer-use expansion for a natural-language GUI/browser goal.
+
+    Delegates to the computer_use_bridge, which routes to the sidecar
+    orchestrator (desktop-first, dry-run default). Degrades to a safe error
+    string if the sidecar is unavailable, so the live kernel never breaks.
+    """
+    goal = arguments.get("goal")
+    if not goal:
+        return "(error: computer requires 'goal' argument)"
+    target = arguments.get("target") or None
+    dry_run = bool(arguments.get("dry_run", True))
+    try:
+        from core.expansions.computer_use_bridge import run_computer_task
+        result = run_computer_task(
+            chat_id=chat_id or _current_chat_id,
+            goal=str(goal),
+            target=target,
+            dry_run=dry_run,
+        )
+        return json.dumps(result, ensure_ascii=False)
+    except Exception as exc:
+        return f"(error: computer failed: {exc})"
 
 
 def execute_tool_with_meta(name: str, arguments: dict, workspace: str = WORKSPACE, chat_id: str = "") -> dict:
@@ -844,6 +894,9 @@ def execute_tool(name: str, arguments: dict, workspace: str = WORKSPACE, chat_id
 
     elif name == "sensors":
         return _run_sensors(arguments)
+
+    elif name == "computer":
+        return _run_computer(arguments, chat_id=chat_id)
 
     return f"Unknown tool: {name}"
 

@@ -656,6 +656,26 @@ def debug_fields(chat_id: str = "", query: str = ""):
             "routed": None,
         }
 
+
+@app.get("/debug/computer")
+def debug_computer(chat_id: str = "", query: str = ""):
+    """(Phase 4) Inspect the computer-use expansion state.
+
+    Exposes whether the sidecar is loaded, the driver/registry config, and a
+    debug snapshot. Degrades to a safe no-op JSON if the module is absent or
+    errors, so the live kernel never breaks.
+    """
+    try:
+        from core.expansions.computer_use_bridge import debug_snapshot
+        return debug_snapshot(chat_id=chat_id, query=query)
+    except Exception as e:
+        return {
+            "available": False,
+            "reason": f"/debug/computer handler error: {e}",
+            "chat_id": chat_id,
+            "query": query,
+        }
+
 # ── Memory & Workspace endpoints ────────────────────────────────────────────
 
 from runtime_paths import WORKSPACE_ROOT as _WORKSPACE_ROOT

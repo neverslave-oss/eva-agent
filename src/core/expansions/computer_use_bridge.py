@@ -69,13 +69,26 @@ def run_computer_task(
     if not _ensure_loaded():
         return {"ok": False, "reason": "computer-use sidecar unavailable"}
 
-    from computer_use.drivers.pyautogui_driver import PyAutoGUIDriver  # type: ignore
     from computer_use.orchestrator import Orchestrator  # type: ignore
     from computer_use.planner import Planner  # type: ignore
     from computer_use.safety import PolicyEngine  # type: ignore
     from computer_use.state_store import StateStore  # type: ignore
+    from computer_use.telemetry import TraceCollector  # type: ignore
+    from computer_use.router import choose_driver  # type: ignore
+    from computer_use.drivers.playwright_driver import PlaywrightDriver  # type: ignore
+    from computer_use.drivers.pyautogui_driver import PyAutoGUIDriver  # type: ignore
 
-    driver = PyAutoGUIDriver()
+    target = target or {"kind": "desktop"}
+    kind = (target or {}).get("kind", "desktop")
+
+    # Route to a real driver. Browser targets use Playwright (real Chromium);
+    # desktop targets use pyautogui (only meaningful on a host with a display).
+    driver_choice = choose_driver(target)
+    if kind == "browser" or driver_choice == "playwright":
+        driver = PlaywrightDriver()
+    else:
+        driver = PyAutoGUIDriver()
+
     planner = Planner()
     policy = PolicyEngine(
         {
@@ -99,8 +112,16 @@ def run_computer_task(
         }
     )
     store = StateStore(_STATE_FILE)
-    orch = Orchestrator(planner=planner, driver=driver, policy=policy, state_store=store)
-    result = orch.run_once(goal=goal, target=target or {"kind": "desktop"}, chat_id=(chat_id or "default"), dry_run=dry_run)
+    tracer = TraceCollector(_SIDECAR_ROOT)
+    orch = Orchestrator(planner=planner, driver=driver, policy=policy, state_store=store, tracer=tracer)
+    result = orch.run_once(goal=goal, target=target, chat_id=(chat_id or "default"), dry_run=dry_run)
+
+    # Capture the trace for this run (goal, planned actions, per-action results).
+    trace = tracer.events(result.data.get("run_id", "")) if result.data else []
+    try:
+        driver.close()
+    except Exception:
+        pass
 
     return {
         "ok": result.status in {"ok", "done"},
@@ -109,9 +130,10 @@ def run_computer_task(
         "completed": result.completed,
         "chat_id": chat_id,
         "goal": goal,
-        "target": target or {"kind": "desktop"},
+        "target": target,
         "dry_run": dry_run,
         "run_id": result.data.get("run_id"),
+        "trace": trace,
     }
 
 
