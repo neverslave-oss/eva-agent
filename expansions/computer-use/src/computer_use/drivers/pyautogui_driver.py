@@ -129,6 +129,22 @@ class PyAutoGUIDriver(BaseDriver):
                 pg.press("enter")
                 return {"status": "ok", "driver": "pyautogui", "action": kind}
 
+            if kind == "launch":
+                import shutil
+                import subprocess
+                app = (action.text or action.metadata.get("app") or "").strip()
+                if not app:
+                    return {"status": "error", "driver": "pyautogui", "action": kind,
+                            "error": "launch requires an app name"}
+                # Resolve the app command; fall back to xdg-open for GUI apps.
+                cmd = shutil.which(app)
+                if cmd:
+                    subprocess.Popen([cmd], env={**os.environ, "DISPLAY": self.display or ":0"})
+                else:
+                    subprocess.Popen(["xdg-open", app], env={**os.environ, "DISPLAY": self.display or ":0"})
+                time.sleep(2)
+                return {"status": "ok", "driver": "pyautogui", "action": kind, "app": app}
+
             if kind in ("done", "abort"):
                 return {"status": "ok", "driver": "pyautogui", "action": kind}
 

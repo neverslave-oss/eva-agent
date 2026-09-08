@@ -17,6 +17,7 @@ ActionKind = Literal[
     "assert_url",
     "upload",
     "submit",
+    "launch",
     "done",
     "abort",
 ]
