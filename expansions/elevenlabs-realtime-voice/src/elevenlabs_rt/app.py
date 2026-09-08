@@ -6,6 +6,7 @@ it does NOT clash with the existing Olly voice server. Exposes:
   GET  /health
   POST /tts            {text} -> stream back audio (streaming TTS)
   POST /tts-synth      {text} -> one-shot HTTP fallback
+  POST /stt            (multipart audio file) -> {text} speech-to-text
   POST /rt/start       {agent_id?} -> opens a realtime session, returns session_id
   POST /rt/audio       {session_id, pcm_b64} -> forward mic PCM to the agent
   POST /rt/text        {session_id, text} -> forward text to the agent
@@ -20,7 +21,8 @@ import os
 import uuid
 from typing import Dict, Optional
 
-from fastapi import FastAPI, HTTPException
+import aiohttp
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel
@@ -111,6 +113,68 @@ async def tts_synth(body: TTSBody):
     )
     data = await client.synth_http(body.text)
     return _pcm_response(data)
+
+
+STT_URL = "https://api.elevenlabs.io/v1/speech-to-text"
+STT_MODEL = "scribe_v1"  # current default ElevenLabs speech-to-text model
+
+
+async def _elevenlabs_stt(audio_bytes: bytes, filename: str = "audio.wav") -> str:
+    """Transcribe audio via the ElevenLabs Speech-to-Text API.
+
+    Sends a multipart request with the audio file + model_id and returns the
+    transcribed text. Raises HTTPException on upstream failure.
+    """
+    key = _api_key()
+    data = aiohttp.FormData()
+    data.add_field("file", audio_bytes, filename=filename, content_type="application/octet-stream")
+    data.add_field("model_id", STT_MODEL)
+    headers = {"xi-api-key": key}
+    async with aiohttp.ClientSession() as http:
+        async with http.post(STT_URL, data=data, headers=headers) as resp:
+            if resp.status != 200:
+                detail = await resp.text()
+                raise HTTPException(status_code=502, detail=f"ElevenLabs STT failed ({resp.status}): {detail[:300]}")
+            payload = await resp.json()
+    text = (payload or {}).get("text") or ""
+    return text.strip()
+
+
+@app.post("/stt")
+async def stt(request: Request):
+    """Speech-to-text: audio -> {text}.
+
+    Accepts either a multipart file upload (`file`) or a JSON body with
+    `{audio_b64, format}`. Returns `{"text": "..."}`. Both paths are handled
+    from the raw request so a single endpoint serves the browser and simple
+    curl/JSON clients.
+    """
+    content_type = request.headers.get("content-type", "").lower()
+    if "multipart/form-data" in content_type:
+        form = await request.form()
+        upload = form.get("file")
+        if upload is None:
+            raise HTTPException(status_code=400, detail="multipart request missing 'file' field")
+        audio_bytes = await upload.read()
+        filename = getattr(upload, "filename", None) or "audio.wav"
+    elif "application/json" in content_type:
+        try:
+            payload = await request.json()
+        except Exception:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail="invalid JSON body")
+        audio_b64 = (payload or {}).get("audio_b64")
+        if not audio_b64:
+            raise HTTPException(status_code=400, detail="JSON body must include 'audio_b64'")
+        audio_bytes = base64.b64decode(audio_b64)
+        filename = f"audio.{(payload.get('format') or 'wav')}"
+    else:
+        raise HTTPException(status_code=400, detail="provide multipart 'file' or JSON {audio_b64}")
+
+    if not audio_bytes:
+        raise HTTPException(status_code=400, detail="empty audio payload")
+
+    text = await _elevenlabs_stt(audio_bytes, filename)
+    return {"text": text}
 
 
 @app.post("/rt/start")
