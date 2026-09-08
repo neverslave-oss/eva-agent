@@ -21,6 +21,7 @@ import uuid
 from typing import Dict, Optional
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel
 
@@ -28,6 +29,17 @@ from . import realtime
 from .tts_stream import TTSStreamClient
 
 app = FastAPI(title="elevenlabs-realtime-voice", version="0.1.0")
+
+# The desktop app is served from a different origin (e.g. localhost:8000) and
+# calls this server cross-origin from the browser. Allow all origins so the
+# browser doesn't block the fetch (mirrors kernel-evolving's API).
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Active realtime sessions keyed by an internal session_id -> RealtimeSession.
 _SESSIONS: Dict[str, realtime.RealtimeSession] = {}
