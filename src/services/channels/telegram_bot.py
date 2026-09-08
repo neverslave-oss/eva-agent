@@ -77,6 +77,7 @@ _TOOL_EMOJI = {
     "search_skills": "🔎",
     "list_routines": "📋",
     "recall_memory": "🧠",
+    "computer": "🖥️",
 }
 _TOOL_VERB = {
     "read_file": "read",
@@ -91,6 +92,7 @@ _TOOL_VERB = {
     "search_skills": "find skill",
     "list_routines": "list routines",
     "recall_memory": "recall memory",
+    "computer": "drive",
 }
 # Arg fields to surface first when summarising a tool call.
 _TOOL_ARG_PRIORITY = (
