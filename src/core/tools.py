@@ -327,6 +327,14 @@ TOOLS = [
                     "dry_run": {
                         "type": "boolean",
                         "description": "Plan + validate only, without executing (default true). Set false to actually perform the actions."
+                    },
+                    "llm": {
+                        "type": "boolean",
+                        "description": "Use the LLM vision planner (perceive->decide->act loop, MiniMax-M3). Default true. Set false to use the deterministic planner."
+                    },
+                    "step_cap": {
+                        "type": "integer",
+                        "description": "Max LLM-planner steps (default 10)."
                     }
                 },
                 "required": ["goal"]
@@ -492,6 +500,8 @@ def _run_computer(arguments: dict, chat_id: str = "") -> str:
         return "(error: computer requires 'goal' argument)"
     target = arguments.get("target") or None
     dry_run = bool(arguments.get("dry_run", True))
+    llm = bool(arguments.get("llm", True))
+    step_cap = int(arguments.get("step_cap", 10) or 10)
     try:
         from core.expansions.computer_use_bridge import run_computer_task
         result = run_computer_task(
@@ -499,6 +509,8 @@ def _run_computer(arguments: dict, chat_id: str = "") -> str:
             goal=str(goal),
             target=target,
             dry_run=dry_run,
+            llm=llm,
+            step_cap=step_cap,
         )
         return json.dumps(result, ensure_ascii=False)
     except Exception as exc:
