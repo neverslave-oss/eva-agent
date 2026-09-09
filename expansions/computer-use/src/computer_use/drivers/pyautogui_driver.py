@@ -30,6 +30,29 @@ def _load_pyautogui():
     return _pyautogui
 
 
+def _detect_display() -> str | None:
+    """Auto-detect the active X display by scanning /tmp/.X11-unix sockets.
+
+    WSLg exposes its socket as X1 (display :1), not :0, and the kernel process
+    often has no DISPLAY env var. Defaulting to :0 silently breaks desktop
+    control, so scan the X socket dir and pick the highest-numbered display.
+    """
+    xdir = "/tmp/.X11-unix"
+    try:
+        nums = []
+        for e in os.listdir(xdir):
+            if e.startswith("X"):
+                try:
+                    nums.append(int(e[1:]))
+                except ValueError:
+                    continue
+        if nums:
+            return f":{max(nums)}"
+    except Exception:
+        pass
+    return None
+
+
 class PyAutoGUIDriver(BaseDriver):
     """Real desktop driver. Requires a live X/WSLg display.
 
@@ -38,7 +61,7 @@ class PyAutoGUIDriver(BaseDriver):
     """
 
     def __init__(self, display: str | None = None):
-        self.display = display or os.environ.get("DISPLAY") or ":0"
+        self.display = display or os.environ.get("DISPLAY") or _detect_display() or ":0"
 
     def _ensure(self):
         if self.display:
