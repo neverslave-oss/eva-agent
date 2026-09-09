@@ -68,7 +68,7 @@ class InferenceProvider:
         self._models = self._cfg.get("models", {})
         # Build routing dict: call_type -> provider name
         self._routing = {}
-        for call_type in ("task_inference", "synthesis", "critic", "planning", "trajectory_teacher"):
+        for call_type in ("task_inference", "synthesis", "critic", "planning", "trajectory_teacher", "computer_use"):
             val = self._cfg.get(call_type)
             if val:
                 self._routing[call_type] = val
