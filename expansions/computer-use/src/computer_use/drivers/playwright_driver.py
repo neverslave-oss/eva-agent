@@ -40,6 +40,26 @@ def _default_chromium() -> str | None:
     return None
 
 
+def _parse_coords(sel: str) -> tuple[int, int] | None:
+    """Parse an 'x,y' screen-coordinate selector into (x, y), else None.
+
+    The vision brain emits click coordinates as "x,y" (e.g. "1191,73").
+    Playwright must treat these as mouse coordinates, not CSS selectors.
+    """
+    if not sel:
+        return None
+    s = sel.strip()
+    if "," not in s:
+        return None
+    parts = s.split(",")
+    if len(parts) != 2:
+        return None
+    try:
+        return (int(parts[0].strip()), int(parts[1].strip()))
+    except Exception:
+        return None
+
+
 class PlaywrightDriver(BaseDriver):
     """Real browser driver. Each instance owns one browser context.
 
@@ -147,12 +167,20 @@ class PlaywrightDriver(BaseDriver):
 
             if kind == "click":
                 sel = action.selector or "body"
-                self._page.click(sel, timeout=action.timeout_ms)
+                coord = _parse_coords(sel)
+                if coord:
+                    self._page.mouse.click(coord[0], coord[1])
+                else:
+                    self._page.click(sel, timeout=action.timeout_ms)
                 return {"status": "ok", "driver": "playwright", "action": kind, "selector": sel}
 
             if kind == "double_click":
                 sel = action.selector or "body"
-                self._page.dblclick(sel, timeout=action.timeout_ms)
+                coord = _parse_coords(sel)
+                if coord:
+                    self._page.mouse.dblclick(coord[0], coord[1])
+                else:
+                    self._page.dblclick(sel, timeout=action.timeout_ms)
                 return {"status": "ok", "driver": "playwright", "action": kind, "selector": sel}
 
             if kind == "type":

@@ -139,15 +139,19 @@ class PyAutoGUIDriver(BaseDriver):
         try:
             if kind == "click":
                 sel = action.selector or "auto"
-                if sel != "auto":
-                    # Best-effort: treat selector as a screen coordinate "x,y"
-                    try:
-                        x, y = (int(v) for v in str(sel).split(","))
-                        pg.click(x, y)
-                    except Exception:
-                        pg.click()
-                else:
-                    pg.click()
+                if sel == "auto" or not sel:
+                    # 'auto' means 'click wherever the cursor is' — that's a
+                    # blind click with no target and produces false success.
+                    # Require real screen coordinates so the planner can't
+                    # claim a click landed when it hit empty space.
+                    return {"status": "error", "driver": "pyautogui", "action": kind,
+                            "error": "click requires screen coordinates (selector 'x,y'), got 'auto'"}
+                try:
+                    x, y = (int(v) for v in str(sel).split(","))
+                except Exception:
+                    return {"status": "error", "driver": "pyautogui", "action": kind,
+                            "error": f"invalid click coordinates: {sel!r}"}
+                pg.click(x, y)
                 return {"status": "ok", "driver": "pyautogui", "action": kind, "selector": sel}
 
             if kind == "double_click":
