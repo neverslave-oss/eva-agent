@@ -499,6 +499,14 @@ def _run_computer(arguments: dict, chat_id: str = "") -> str:
     if not goal:
         return "(error: computer requires 'goal' argument)"
     target = arguments.get("target") or None
+    # The tool arg parser may hand `target` through as a JSON string
+    # (e.g. '{"kind": "desktop"}') rather than a dict. Coerce it so
+    # downstream target.get("kind") doesn't crash on a str.
+    if isinstance(target, str):
+        try:
+            target = json.loads(target)
+        except Exception:
+            target = None
     dry_run = bool(arguments.get("dry_run", True))
     llm = bool(arguments.get("llm", True))
     step_cap = int(arguments.get("step_cap", 10) or 10)
