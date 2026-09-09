@@ -164,7 +164,7 @@ class InferenceProvider:
                 elif p == "openrouter":
                     return self._call_openrouter(messages, model)
                 elif p == "hf":
-                    return self._call_hf(messages, model)
+                    return self._call_hf(messages, model, call_type)
                 elif p == "copilot":
                     return self._call_copilot(messages, model)
                 else:
@@ -280,16 +280,20 @@ class InferenceProvider:
         data = json.loads(resp.read())
         return data["content"][0]["text"]
 
-    def _hf_router_provider(self) -> str:
+    def _hf_router_provider(self, call_type: str | None = None) -> str:
         """Resolve the Hugging Face Router inference-provider name.
 
         The HF OpenAI-compatible endpoint is https://router.huggingface.co/v1 with
         the provider selected by a ":{provider}" suffix on the model id, e.g.
         "deepseek-ai/DeepSeek-V4-Flash-0731:deepinfra". Providers: deepinfra,
         together, novita, fireworks-ai, hf-inference, ... Not every provider serves
-        every model. Priority: env HF_ROUTER_PROVIDER -> config providers.hf_provider
-        -> 'deepinfra' (cheapest).
+        every model. Priority: per-call-type override (hf_provider_overrides) -> env
+        HF_ROUTER_PROVIDER -> config providers.hf_provider -> 'deepinfra' (cheapest).
         """
+        if call_type:
+            overrides = self._cfg.get("hf_provider_overrides", {})
+            if overrides.get(call_type):
+                return str(overrides[call_type]).strip().rstrip("/")
         env_val = os.environ.get("HF_ROUTER_PROVIDER")
         if env_val:
             return env_val.strip().rstrip("/")
@@ -298,9 +302,9 @@ class InferenceProvider:
             return str(cfg_val).strip().rstrip("/")
         return "deepinfra"
 
-    def _hf_model(self, model: str) -> str:
+    def _hf_model(self, model: str, call_type: str | None = None) -> str:
         """Append the ":{provider}" suffix to the model id for the HF Router."""
-        provider = self._hf_router_provider()
+        provider = self._hf_router_provider(call_type)
         if provider and not model.endswith(f":{provider}"):
             return f"{model}:{provider}"
         return model
@@ -357,14 +361,14 @@ class InferenceProvider:
                     time.sleep(1)  # brief backoff between retries
         raise RuntimeError(f"HF Router request failed after {_HF_RETRIES} attempts: {last_err}")
 
-    def _call_hf(self, messages: list, model: str | None) -> str:
+    def _call_hf(self, messages: list, model: str | None, call_type: str | None = None) -> str:
         api_key = os.environ.get("HF_TOKEN")
         if not api_key:
             raise RuntimeError("No HF_TOKEN")
         if not model:
             raise RuntimeError("No HF model configured")
         data = self._hf_post({
-            "model": self._hf_model(model),
+            "model": self._hf_model(model, call_type),
             "messages": messages,
             "max_tokens": 8192,
         })

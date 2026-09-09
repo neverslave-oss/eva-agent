@@ -160,12 +160,17 @@ providers:
   # a ":{provider}" suffix on the model id (e.g. ":deepinfra"). deepinfra is the
   # cheapest provider serving DeepSeek-V4-Flash-0731. Overridable via HF_ROUTER_PROVIDER.
   hf_provider: deepinfra
+  # Per-call-type HF Router provider override. computer_use (vision pipeline)
+  # uses novita (fastest) serving MiniMax-M3; chat stays on deepinfra/DeepSeek.
+  hf_provider_overrides:
+    computer_use: novita
   model_overrides:
     critic: deepseek-ai/DeepSeek-V4-Flash-0731
     planning: deepseek-ai/DeepSeek-V4-Flash-0731
     stt: google/gemini-2.5-pro
     synthesis: deepseek-ai/DeepSeek-V4-Flash-0731
     task_inference: deepseek-ai/DeepSeek-V4-Flash-0731
+    computer_use: MiniMaxAI/MiniMax-M3
     trajectory_teacher: deepseek-ai/DeepSeek-V4-Flash-0731
     tts: openai/tts-1
     vision: google/gemma-4-26b-a4b-it
