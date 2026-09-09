@@ -95,6 +95,42 @@ def _build_messages(goal: str, screenshot: str | None, history: list[dict]) -> l
     ]
 
 
+def _extract_first_json(text: str) -> str | None:
+    """Extract the first complete, balanced JSON object from a string.
+
+    The model sometimes wraps its answer in <actions>...</actions> tags or
+    emits several JSON objects, and occasionally truncates mid-object. A
+    plain regex can't handle nested braces (e.g. metadata objects), so we
+    scan for the first '{' and walk to its matching '}' accounting for
+    nesting and string literals.
+    """
+    start = text.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    in_str = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_str:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+    return None
+
+
 def _parse_action(raw: str) -> Action | None:
     """Parse the LLM's JSON reply into a schema-valid Action, or None if invalid."""
     text = (raw or "").strip()
@@ -102,14 +138,20 @@ def _parse_action(raw: str) -> Action | None:
     fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
     if fence:
         text = fence.group(1)
-    # Find the first {...} block as a fallback.
-    if not text.startswith("{"):
-        m = re.search(r"\{.*\}", text, re.DOTALL)
-        if m:
-            text = m.group(0)
+    # Try the whole thing first; if that fails, extract the first complete
+    # balanced JSON object (handles <actions> wrappers, multiple objects, and
+    # trailing truncated content).
+    data = None
     try:
         data = json.loads(text)
     except Exception:
+        obj = _extract_first_json(text)
+        if obj:
+            try:
+                data = json.loads(obj)
+            except Exception:
+                data = None
+    if data is None:
         logger.warning("[vision_brain] could not parse LLM JSON: %r", raw[:200])
         return None
     kind = data.get("kind")
