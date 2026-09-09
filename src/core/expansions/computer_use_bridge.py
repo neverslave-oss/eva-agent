@@ -77,6 +77,15 @@ def _default_watch_callback(chat_id: str):
         return None
 
     def _watch(screenshot, caption):
+        # Always stream a text update so the user sees live progress even when
+        # no screenshot is available (e.g. screenshot null / driver has no
+        # capture). This turns the silent typing-indicator wait into a
+        # readable step-by-step feed of what Eva is doing.
+        try:
+            if caption:
+                _tb.send_message(chat_id, f"🖥️ {caption}")
+        except Exception as e:
+            print(f"[bridge] watch text send failed: {e}", flush=True)
         if not screenshot:
             return
         try:

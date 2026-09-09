@@ -140,12 +140,13 @@ class PyAutoGUIDriver(BaseDriver):
             if kind == "click":
                 sel = action.selector or "auto"
                 if sel == "auto" or not sel:
-                    # 'auto' means 'click wherever the cursor is' — that's a
-                    # blind click with no target and produces false success.
-                    # Require real screen coordinates so the planner can't
-                    # claim a click landed when it hit empty space.
-                    return {"status": "error", "driver": "pyautogui", "action": kind,
-                            "error": "click requires screen coordinates (selector 'x,y'), got 'auto'"}
+                    # 'auto' = click at the current cursor position. This is
+                    # legitimate for the deterministic planner (bare "click"
+                    # goal), so allow it here. False-success protection for
+                    # the LLM vision planner lives in the brain, which is
+                    # instructed to always emit real x,y coordinates for clicks.
+                    pg.click()
+                    return {"status": "ok", "driver": "pyautogui", "action": kind, "selector": sel}
                 try:
                     x, y = (int(v) for v in str(sel).split(","))
                 except Exception:
