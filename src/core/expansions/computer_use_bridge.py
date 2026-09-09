@@ -6,6 +6,7 @@ fallback values so kernel boot and normal tool loops are unaffected.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -58,6 +59,78 @@ def helper_plan_hint(chat_id: str = "", text: str = "") -> str:
     if not _ensure_loaded() or not text.strip():
         return ""
     return "Plan atomic actions, validate by policy, verify each post-condition."
+
+
+def _default_watch_callback(chat_id: str):
+    """Return a watch callback that streams screenshots to Telegram.
+
+    Returns None (no-op) when there's no chat_id or the telegram channel can't
+    be imported, so the LLM planner degrades gracefully outside a chat context.
+    The screenshot may be a base64 data-URI (from the driver) or a local path;
+    we write it to a temp PNG and send it as a document.
+    """
+    if not chat_id:
+        return None
+    try:
+        from core.services.channels import telegram_bot as _tb
+    except Exception:
+        return None
+
+    def _watch(screenshot, caption):
+        if not screenshot:
+            return
+        try:
+            import base64 as _b64
+            import tempfile
+            if screenshot.startswith("data:image"):
+                b64 = screenshot.split(",", 1)[1]
+                data = _b64.b64decode(b64)
+                fd, path = tempfile.mkstemp(suffix=".png")
+                with open(fd, "wb") as f:
+                    f.write(data)
+                try:
+                    _tb.send_file(chat_id, path, caption=caption or "")
+                finally:
+                    try:
+                        os.remove(path)
+                    except Exception:
+                        pass
+            elif Path(screenshot).exists():
+                _tb.send_file(chat_id, screenshot, caption=caption or "")
+        except Exception as e:
+            print(f"[bridge] watch send failed: {e}", flush=True)
+
+    return _watch
+
+
+def _default_confirm_callback(chat_id: str):
+    """Return a confirm callback for risky actions.
+
+    Fail-closed: without a real interactive callback, risky actions are denied
+    (the LLMPlanner already auto-denies when confirm_callback is None, so this
+    returns None and relies on that behavior). A caller can pass an interactive
+    callback to allow risky actions.
+    """
+    # No chat_id -> no way to prompt -> fail closed (return None, planner denies).
+    if not chat_id:
+        return None
+    try:
+        from core.services.channels import telegram_bot as _tb
+    except Exception:
+        return None
+
+    def _confirm(action):
+        try:
+            _tb.send_message(
+                chat_id,
+                f"⚠️ Risky computer-use action `{action.kind}` not auto-approved. "
+                "Auto-denied (fail-closed). Pass an interactive confirm callback to allow.",
+            )
+        except Exception as e:
+            print(f"[bridge] confirm send failed: {e}", flush=True)
+        return False
+
+    return _confirm
 
 
 def run_computer_task(
@@ -124,6 +197,16 @@ def run_computer_task(
         # is unavailable (no provider / inference failure).
         from computer_use.llm_planner import LLMPlanner  # type: ignore
         from computer_use.vision_brain import VisionBrain  # type: ignore
+
+        # Default watch mode: stream each step's screenshot to Telegram (only
+        # when a chat_id is present and the telegram channel is importable).
+        if watch_callback is None:
+            watch_callback = _default_watch_callback(chat_id)
+        # Default confirm gate: prompt on Telegram and auto-deny (fail-closed).
+        # A caller can supply a real interactive confirm_callback to allow risky
+        # actions; without one, risky actions are blocked.
+        if confirm_callback is None:
+            confirm_callback = _default_confirm_callback(chat_id)
 
         planner = LLMPlanner(
             brain=VisionBrain(),
