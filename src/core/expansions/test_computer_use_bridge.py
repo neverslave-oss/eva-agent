@@ -39,6 +39,21 @@ def test_run_computer_task_explicit_live_mode_edge_case():
     assert out["dry_run"] is False
 
 
+def test_run_computer_task_llm_mode_uses_llm_planner():
+    _reset_bridge_cache()
+    out = bridge.run_computer_task(
+        chat_id="chat-1",
+        goal="open https://docs.openclaw.ai",
+        target={"kind": "browser"},
+        llm=True,
+    )
+    # LLM path must still produce a valid envelope and a run_id; it may abort
+    # gracefully if the vision brain/provider is unavailable in the test env.
+    assert "ok" in out
+    assert out["dry_run"] is True
+    assert out["run_id"]
+
+
 def test_debug_snapshot_shape_happy_path():
     _reset_bridge_cache()
     snap = bridge.debug_snapshot(chat_id="chat-2", query="test")

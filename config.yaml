@@ -149,6 +149,7 @@ embedding_server_url: http://localhost:8770/embeddings
 
 providers:
   collect_trajectories: true
+  computer_use: hf
   critic: hf
   fallback_provider: openrouter
   gpu_temp_critical_c: 85

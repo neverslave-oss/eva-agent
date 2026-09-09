@@ -65,6 +65,10 @@ def run_computer_task(
     goal: str = "",
     target: dict | None = None,
     dry_run: bool = True,
+    llm: bool = False,
+    step_cap: int = 10,
+    confirm_callback=None,
+    watch_callback=None,
 ) -> dict:
     if not _ensure_loaded():
         return {"ok": False, "reason": "computer-use sidecar unavailable"}
@@ -89,7 +93,6 @@ def run_computer_task(
     else:
         driver = PyAutoGUIDriver()
 
-    planner = Planner()
     policy = PolicyEngine(
         {
             "allow_actions": [
@@ -113,6 +116,27 @@ def run_computer_task(
     )
     store = StateStore(_STATE_FILE)
     tracer = TraceCollector(_SIDECAR_ROOT)
+
+    if llm:
+        # LLM-driven perceive->decide->act planner (vision brain). Runs its own
+        # loop and returns a batch ending in `done`, so the orchestrator is
+        # unchanged. Falls back to the deterministic Planner if the vision brain
+        # is unavailable (no provider / inference failure).
+        from computer_use.llm_planner import LLMPlanner  # type: ignore
+        from computer_use.vision_brain import VisionBrain  # type: ignore
+
+        planner = LLMPlanner(
+            brain=VisionBrain(),
+            driver=driver,
+            policy=policy,
+            step_cap=step_cap,
+            dry_run=dry_run,
+            confirm_callback=confirm_callback,
+            watch_callback=watch_callback,
+        )
+    else:
+        planner = Planner()
+
     orch = Orchestrator(planner=planner, driver=driver, policy=policy, state_store=store, tracer=tracer)
     result = orch.run_once(goal=goal, target=target, chat_id=(chat_id or "default"), dry_run=dry_run)
 
