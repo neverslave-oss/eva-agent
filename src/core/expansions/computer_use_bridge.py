@@ -181,6 +181,7 @@ def run_computer_task(
                 "assert_url",
                 "upload",
                 "submit",
+                "launch",
                 "done",
                 "abort",
             ],
