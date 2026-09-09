@@ -104,31 +104,24 @@ def _default_watch_callback(chat_id: str):
 
 
 def _default_confirm_callback(chat_id: str):
-    """Return a confirm callback for risky actions.
+    """Return an interactive confirm callback for risky actions.
 
-    Fail-closed: without a real interactive callback, risky actions are denied
-    (the LLMPlanner already auto-denies when confirm_callback is None, so this
-    returns None and relies on that behavior). A caller can pass an interactive
-    callback to allow risky actions.
+    Sends an Allow/Deny inline-button request to Telegram and blocks until the
+    user responds (or times out, which denies fail-closed). Mirrors the
+    auth_gate pattern. Returns None when there's no chat_id or the bot can't
+    be reached, so the planner degrades to auto-deny outside a chat context.
     """
-    # No chat_id -> no way to prompt -> fail closed (return None, planner denies).
     if not chat_id:
-        return None
-    try:
-        from core.services.channels import telegram_bot as _tb
-    except Exception:
         return None
 
     def _confirm(action):
         try:
-            _tb.send_message(
-                chat_id,
-                f"⚠️ Risky computer-use action `{action.kind}` not auto-approved. "
-                "Auto-denied (fail-closed). Pass an interactive confirm callback to allow.",
-            )
+            from core.computer_confirm_gate import request_confirm
+            desc = action.text or action.selector or action.url or ""
+            return request_confirm(chat_id, action.kind, desc)
         except Exception as e:
-            print(f"[bridge] confirm send failed: {e}", flush=True)
-        return False
+            print(f"[bridge] confirm gate error: {e}", flush=True)
+            return False
 
     return _confirm
 

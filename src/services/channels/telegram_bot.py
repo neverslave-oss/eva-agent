@@ -797,6 +797,16 @@ def handle_callback(chat_id: str, data: str, message_id: int):
             if message_id:
                 edit_message(chat_id, message_id, f"*Shell command* — {status}")
             return
+        # ── Computer-use risky action confirmation ────────────────────────
+        if data.startswith("cu_allow_") or data.startswith("cu_deny_"):
+            from core.computer_confirm_gate import resolve_confirm
+            approved = data.startswith("cu_allow_")
+            request_id = data.split("_", 2)[-1]
+            resolve_confirm(request_id, approved)
+            status = "✅ Allowed" if approved else "❌ Denied"
+            if message_id:
+                edit_message(chat_id, message_id, f"*Risky computer-use action* — {status}")
+            return
         if data.startswith("install_"):
             parts = data.split("_", 2)
             item_type = parts[1] if len(parts) > 1 else None

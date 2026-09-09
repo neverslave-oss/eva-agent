@@ -136,6 +136,9 @@ class VisionBrain:
     def __init__(self, provider=None, call_type: str = "computer_use"):
         self._provider = provider  # InferenceProvider instance (injected for tests)
         self.call_type = call_type
+        # Last failure reason from next_action(), so callers can surface WHY a
+        # vision decision failed instead of a generic "unavailable".
+        self.last_error: str | None = None
 
     def _get_provider(self):
         if self._provider is not None:
@@ -156,7 +159,13 @@ class VisionBrain:
     def next_action(self, goal: str, screenshot: str | None,
                     history: list[dict] | None = None,
                     max_new_tokens: int = 512) -> Action | None:
-        """Return the next Action for the current screenshot, or None on failure."""
+        """Return the next Action for the current screenshot, or None on failure.
+
+        On failure, sets self.last_error to the specific reason (inference
+        error, empty/unavailable response, or parse failure) so callers can
+        log/surface WHY the vision brain failed rather than masking it.
+        """
+        self.last_error = None
         messages = _build_messages(goal, screenshot, history or [])
         provider = self._get_provider()
         try:
@@ -164,8 +173,20 @@ class VisionBrain:
                 messages, max_new_tokens=max_new_tokens, call_type=self.call_type
             )
         except Exception as e:
-            logger.warning("[vision_brain] inference failed: %s", e)
+            self.last_error = f"inference failed: {e}"
+            logger.error("[vision_brain] %s", self.last_error)
             return None
-        if not raw or raw == "(inference unavailable)":
+        if not raw:
+            self.last_error = "inference returned empty response"
+            logger.error("[vision_brain] %s", self.last_error)
             return None
-        return _parse_action(raw)
+        if raw == "(inference unavailable)":
+            self.last_error = "inference unavailable (provider returned the unavailable sentinel)"
+            logger.error("[vision_brain] %s", self.last_error)
+            return None
+        action = _parse_action(raw)
+        if action is None:
+            self.last_error = f"could not parse valid action from model output: {raw[:200]!r}"
+            logger.error("[vision_brain] %s", self.last_error)
+            return None
+        return action

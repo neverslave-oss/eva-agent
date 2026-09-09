@@ -156,9 +156,11 @@ class LLMPlanner:
             # 2. Decide — ask the vision brain for ONE next action.
             action = self.brain.next_action(goal, screenshot, self._history)
             if action is None:
-                self._watch(screenshot, f"Step {step}: brain returned no valid action — aborting")
+                reason = getattr(self.brain, "last_error", None) or "no valid action"
+                logger.error("[llm_planner] step %d: vision brain failed — %s", step, reason)
+                self._watch(screenshot, f"Step {step}: vision brain failed ({reason}) — aborting")
                 self._record_trajectory(goal, "error", target)
-                return ActionBatch(actions=[Action(kind="abort", text="vision brain unavailable")])
+                return ActionBatch(actions=[Action(kind="abort", text=f"vision brain unavailable: {reason}")])
 
             # 3. Watch mode — stream the screenshot + decision.
             self._watch(screenshot, f"Step {step}: {action.kind} {action.text or action.selector or action.url or ''}")
