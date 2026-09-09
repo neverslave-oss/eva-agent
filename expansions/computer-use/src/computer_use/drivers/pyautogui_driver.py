@@ -83,16 +83,42 @@ class PyAutoGUIDriver(BaseDriver):
             return Observation(source="desktop", text=f"error: {e}", state_hash=None)
 
     def screenshot(self, path: str | None = None) -> str | None:
+        """Capture the screen as PNG (base64 data-URI, or to a path).
+
+        pyautogui's screenshot backend requires gnome-screenshot (sudo install),
+        which is often absent on WSLg — so we fall back to mss, which grabs the
+        X display directly via XCB with no system dependency.
+        """
         try:
-            pg = self._ensure()
-            if path:
-                pg.screenshot(path)
-                return path
             import base64
             import io
+            img = self._capture()
+            if img is None:
+                return None
+            if path:
+                img.save(path)
+                return path
             buf = io.BytesIO()
-            pg.screenshot().save(buf, format="PNG")
+            img.save(buf, format="PNG")
             return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+        except Exception:
+            return None
+
+    def _capture(self):
+        """Return a PIL Image of the screen, trying pyautogui then mss."""
+        try:
+            pg = self._ensure()
+            return pg.screenshot()
+        except Exception:
+            pass
+        # Fallback: mss grabs the X display directly (no gnome-screenshot needed).
+        try:
+            import mss
+            from PIL import Image
+            with mss.mss() as sct:
+                mon = sct.monitors[1]
+                raw = sct.grab(mon)
+                return Image.frombytes("RGB", raw.size, raw.rgb)
         except Exception:
             return None
 
