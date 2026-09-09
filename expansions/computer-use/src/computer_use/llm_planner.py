@@ -38,6 +38,16 @@ logger = logging.getLogger(__name__)
 # Default risky actions that require explicit human confirmation.
 _DEFAULT_RISKY = {"delete", "purchase", "send_money", "submit", "hotkey"}
 
+# Hotkeys that are safe to run without human confirmation. Navigation / text
+# editing shortcuts are harmless; destructive or system-level ones stay denied.
+# Matched case-insensitively against the action's `text` (e.g. "ctrl+l").
+_SAFE_HOTKEYS = {
+    "enter", "return", "tab", "escape", "esc",
+    "ctrl+l", "ctrl+t", "ctrl+w", "ctrl+enter", "ctrl+a", "ctrl+c", "ctrl+v",
+    "ctrl+x", "ctrl+z", "ctrl+y", "ctrl+f", "ctrl+shift+t",
+    "alt+tab", "alt+left", "alt+right", "super", "win",
+}
+
 
 class LLMPlanner:
     """Perceive->decide->act loop planner backed by a vision LLM."""
@@ -96,8 +106,15 @@ class LLMPlanner:
             logger.warning("[llm_planner] trajectory write failed: %s", e)
 
     def _confirm(self, action: Action) -> bool:
-        """Explicit confirm gate for risky actions."""
+        """Explicit confirm gate for risky actions.
+
+        Safe hotkeys (navigation / text editing) pass without confirmation;
+        other risky actions still require the confirm callback and are denied
+        (fail-closed) when none is supplied.
+        """
         if action.kind not in self.risky_actions:
+            return True
+        if action.kind == "hotkey" and self._is_safe_hotkey(action.text):
             return True
         if self.confirm_callback is None:
             logger.info("[llm_planner] risky action %s auto-denied (no confirm callback)", action.kind)
@@ -107,6 +124,13 @@ class LLMPlanner:
         except Exception as e:
             logger.warning("[llm_planner] confirm callback error: %s", e)
             return False
+
+    @staticmethod
+    def _is_safe_hotkey(text: str | None) -> bool:
+        """Return True when the hotkey combo is on the safe allowlist."""
+        if not text:
+            return False
+        return text.strip().lower() in _SAFE_HOTKEYS
 
     def _watch(self, screenshot: str | None, caption: str) -> None:
         if self.watch_callback is None:
