@@ -198,6 +198,24 @@ def send_message(chat_id: str, text: str, parse_mode: str = "Markdown") -> int |
     return None
 
 
+def delete_message(chat_id: str, message_id: int) -> bool:
+    """Delete a Telegram message (e.g. to replace a stale screenshot).
+
+    Returns True on success. Failures are non-fatal — callers should treat a
+    delete failure as "keep the old message" rather than erroring.
+    """
+    try:
+        r = requests.post(
+            f"{API_BASE}/deleteMessage",
+            json={"chat_id": chat_id, "message_id": message_id},
+            timeout=10,
+        )
+        data = r.json()
+        return bool(data.get("ok"))
+    except Exception:
+        return False
+
+
 def edit_message(chat_id: str, message_id: int, text: str, parse_mode: str = "Markdown") -> bool:
     """Edit an existing message. Falls back silently if it fails."""
     try:

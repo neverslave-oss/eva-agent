@@ -44,13 +44,21 @@ _SYSTEM = (
     "- wait: timeout_ms is how long to wait.\n"
     "- done: the goal is achieved; include a short text summary.\n"
     "- abort: the goal cannot be achieved; include a short reason.\n\n"
+    "CRITICAL RULES:\n"
+    "- NEVER emit a click/double_click without real 'x,y' screen coordinates in selector. "
+    "A click with null/empty selector is a blind click and is rejected. If you cannot "
+    "identify exact coordinates, return done or wait instead.\n"
+    "- NEVER repeat an action you already performed. If the screen has not changed and "
+    "your previous action already achieved the goal, return done.\n"
+    "- Prefer returning done as soon as the goal is met; do not keep acting.\n\n"
     "Return format (exact):\n"
     '{"kind": "<one of the above>", "selector": null, "text": null, "url": null, '
     '"timeout_ms": 5000, "metadata": {}}'
 )
 
 
-def _build_messages(goal: str, screenshot: str | None, history: list[dict]) -> list[dict]:
+def _build_messages(goal: str, screenshot: str | None, history: list[dict],
+                    hint: str | None = None) -> list[dict]:
     """Build the multimodal message list for the vision model."""
     user_parts: list[dict] = []
     b64 = None
@@ -74,6 +82,9 @@ def _build_messages(goal: str, screenshot: str | None, history: list[dict]) -> l
             "image_url": {"url": f"data:image/png;base64,{b64}"},
         })
     user_parts.append({"type": "text", "text": f"Goal: {goal}"})
+
+    if hint:
+        user_parts.append({"type": "text", "text": f"Controller feedback: {hint}"})
 
     if history:
         # Compact recent history so the model knows what it already did.
@@ -182,6 +193,10 @@ class VisionBrain:
         # Last failure reason from next_action(), so callers can surface WHY a
         # vision decision failed instead of a generic "unavailable".
         self.last_error: str | None = None
+        # Exact raw output the model returned for the most recent next_action(),
+        # so callers/audit can see precisely what the LLM emitted (before
+        # parsing). Set even on empty/unavailable responses.
+        self.last_raw: str | None = None
 
     def _get_provider(self):
         if self._provider is not None:
@@ -201,6 +216,7 @@ class VisionBrain:
 
     def next_action(self, goal: str, screenshot: str | None,
                     history: list[dict] | None = None,
+                    hint: str | None = None,
                     max_new_tokens: int = 512) -> Action | None:
         """Return the next Action for the current screenshot, or None on failure.
 
@@ -209,7 +225,7 @@ class VisionBrain:
         log/surface WHY the vision brain failed rather than masking it.
         """
         self.last_error = None
-        messages = _build_messages(goal, screenshot, history or [])
+        messages = _build_messages(goal, screenshot, history or [], hint=hint)
         provider = self._get_provider()
         try:
             raw = provider.infer(
@@ -219,6 +235,7 @@ class VisionBrain:
             self.last_error = f"inference failed: {e}"
             logger.error("[vision_brain] %s", self.last_error)
             return None
+        self.last_raw = raw
         if not raw:
             self.last_error = "inference returned empty response"
             logger.error("[vision_brain] %s", self.last_error)

@@ -88,6 +88,10 @@ class PyAutoGUIDriver(BaseDriver):
         pyautogui's screenshot backend requires gnome-screenshot (sudo install),
         which is often absent on WSLg — so we fall back to mss, which grabs the
         X display directly via XCB with no system dependency.
+
+        The image is downscaled (max dimension capped) and re-encoded with
+        lossless PNG optimization so the streamed screenshot stays small
+        (a raw 1920x1080 frame is ~2MB; the downscale cuts that dramatically).
         """
         try:
             import base64
@@ -95,17 +99,90 @@ class PyAutoGUIDriver(BaseDriver):
             img = self._capture()
             if img is None:
                 return None
+            # Downscale to keep the payload small while preserving detail.
+            img = self._downscale(img)
             if path:
-                img.save(path)
+                img.save(path, format="PNG", optimize=True)
                 return path
             buf = io.BytesIO()
-            img.save(buf, format="PNG")
+            img.save(buf, format="PNG", optimize=True)
             return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
         except Exception:
             return None
 
+    @staticmethod
+    def _downscale(img, max_dim: int = 1280):
+        """Losslessly downscale an image so its largest side is <= max_dim.
+
+        Keeps the aspect ratio and uses PNG (lossless) so no detail is lost,
+        only resolution — which cuts the streamed payload from ~2MB to a few
+        hundred KB.
+        """
+        try:
+            from PIL import Image
+            w, h = img.size
+            longest = max(w, h)
+            if longest <= max_dim:
+                return img
+            ratio = max_dim / float(longest)
+            nw, nh = max(1, int(w * ratio)), max(1, int(h * ratio))
+            return img.resize((nw, nh), Image.LANCZOS)
+        except Exception:
+            return img
+
+    def is_frame_black(self, threshold: float = 6.0) -> bool:
+        """True when the captured frame is effectively black/locked.
+
+        A blanked/locked screen (screensaver overlay or login dialog) captures
+        as a near-black frame. Detecting it lets the planner abort BEFORE
+        sending the frame to the vision pipeline, so we don't burn cloud calls
+        on a screen Eva can't act on. Returns False on any capture error so we
+        never block on a transient failure.
+        """
+        try:
+            img = self._capture()
+            if img is None:
+                return False
+            # Mean of the luminance channel; a real desktop is well above this.
+            gray = img.convert("L")
+            px = list(gray.getdata())
+            mean = sum(px) / float(len(px)) if px else 0.0
+            return mean < threshold
+        except Exception:
+            return False
+
+
+    def _wake_screen(self) -> None:
+        """Wake/disable the screensaver so captures aren't blanked to black.
+
+        xfce4-screensaver puts a full-screen blanking window on top of the
+        desktop; every X capture (mss, ffmpeg) then reads black. Disabling the
+        screensaver and nudging the display before grabbing ensures the real
+        desktop pixels are captured. Best-effort: failures are ignored so the
+        capture path never breaks.
+        """
+        try:
+            import subprocess
+            env = dict(os.environ)
+            if self.display:
+                env["DISPLAY"] = self.display
+            for cmd in (
+                ["xset", "s", "off"],
+                ["xset", "dpms", "force", "on"],
+                ["xdotool", "key", "Return"],
+            ):
+                try:
+                    subprocess.run(cmd, env=env, timeout=3,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     def _capture(self):
         """Return a PIL Image of the screen, trying pyautogui then mss."""
+        # Wake/disable the screensaver first so the capture isn't a black frame.
+        self._wake_screen()
         try:
             pg = self._ensure()
             return pg.screenshot()

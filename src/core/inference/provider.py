@@ -128,6 +128,10 @@ class InferenceProvider:
         provider = self.get_provider(call_type)
         # Build fallback chain: primary first, then all others in priority order, excluding primary
         _CHAIN = ["local", "openai", "anthropic", "openrouter", "copilot", "hf"]
+        # computer_use must use the configured cloud provider (vision/inference) —
+        # never fall back to the local model (GPU-full/OOM poisons the chain).
+        if call_type == "computer_use":
+            _CHAIN = [p for p in _CHAIN if p != "local"]
         chain = [provider] + [p for p in _CHAIN if p != provider]
         # Skip cloud providers without API keys — faster than waiting for network timeout
         _keyless = {
@@ -187,6 +191,10 @@ class InferenceProvider:
         """
         provider = self.get_provider(call_type)
         _CHAIN = ["local", "openai", "anthropic", "openrouter", "copilot", "hf"]
+        # computer_use must use the configured cloud provider (vision/inference) —
+        # never fall back to the local model (GPU-full/OOM poisons the chain).
+        if call_type == "computer_use":
+            _CHAIN = [p for p in _CHAIN if p != "local"]
         chain = [provider] + [p for p in _CHAIN if p != provider]
         # Skip cloud providers without API keys — faster than waiting for network timeout
         _keyless = {

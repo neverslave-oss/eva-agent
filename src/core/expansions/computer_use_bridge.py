@@ -72,9 +72,14 @@ def _default_watch_callback(chat_id: str):
     if not chat_id:
         return None
     try:
-        from core.services.channels import telegram_bot as _tb
+        from services.channels import telegram_bot as _tb
     except Exception:
         return None
+
+    # Track the last screenshot message_id so each new screenshot replaces the
+    # previous one (delete-then-send), preventing the chat from filling up with
+    # screenshots during a long computer-use run.
+    _last_shot_msg_id = {"id": None}
 
     def _watch(screenshot, caption):
         # Always stream a text update so the user sees live progress even when
@@ -98,14 +103,30 @@ def _default_watch_callback(chat_id: str):
                 with open(fd, "wb") as f:
                     f.write(data)
                 try:
-                    _tb.send_file(chat_id, path, caption=caption or "")
+                    # Replace the previous screenshot (delete-then-send) so the
+                    # chat only ever holds the latest frame.
+                    if _last_shot_msg_id["id"] is not None:
+                        try:
+                            _tb.delete_message(chat_id, _last_shot_msg_id["id"])
+                        except Exception:
+                            pass
+                    _mid = _tb.send_file(chat_id, path, caption=caption or "")
+                    if _mid:
+                        _last_shot_msg_id["id"] = _mid
                 finally:
                     try:
                         os.remove(path)
                     except Exception:
                         pass
             elif Path(screenshot).exists():
-                _tb.send_file(chat_id, screenshot, caption=caption or "")
+                if _last_shot_msg_id["id"] is not None:
+                    try:
+                        _tb.delete_message(chat_id, _last_shot_msg_id["id"])
+                    except Exception:
+                        pass
+                _mid = _tb.send_file(chat_id, screenshot, caption=caption or "")
+                if _mid:
+                    _last_shot_msg_id["id"] = _mid
         except Exception as e:
             print(f"[bridge] watch send failed: {e}", flush=True)
 

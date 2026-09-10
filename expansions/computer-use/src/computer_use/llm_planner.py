@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -74,6 +75,8 @@ class LLMPlanner:
         self.watch_callback = watch_callback
         self._trajectory_dir = Path(trajectory_dir) if trajectory_dir else None
         self._history: list[dict] = []
+        self._hint: str | None = None
+        self._step_rejections = 0
 
     def _trajectory_path(self) -> Path | None:
         if self._trajectory_dir is not None:
@@ -140,11 +143,55 @@ class LLMPlanner:
         except Exception as e:
             logger.warning("[llm_planner] watch callback error: %s", e)
 
+    @staticmethod
+    def _is_blind_click(action) -> bool:
+        """A click/double_click with no real x,y selector is a blind click."""
+        if action.kind not in ("click", "double_click"):
+            return False
+        sel = (action.selector or "").strip()
+        if not sel or sel.lower() == "auto":
+            return True
+        # Must look like real coordinates: "x,y"
+        try:
+            x, y = sel.split(",")
+            int(x.strip()); int(y.strip())
+            return False
+        except Exception:
+            return True
+
+    @staticmethod
+    def _action_signature(action) -> str:
+        """A canonical signature for an action, to detect repeats."""
+        if action.kind == "click":
+            return f"click:{action.selector}"
+        if action.kind == "double_click":
+            return f"double_click:{action.selector}"
+        if action.kind == "type":
+            return f"type:{action.text}"
+        if action.kind == "hotkey":
+            return f"hotkey:{action.text}"
+        if action.kind == "navigate":
+            return f"navigate:{action.url}"
+        if action.kind == "launch":
+            return f"launch:{action.text}"
+        return f"{action.kind}:{action.text or action.selector or action.url or ''}"
+
+    def _is_repeat(self, action) -> bool:
+        """True if this action's signature already appears in history."""
+        sig = self._action_signature(action)
+        return any(
+            h.get("action", {}).get("kind") == action.kind
+            and self._action_signature(Action(**h["action"])) == sig
+            for h in self._history
+        )
+
     def plan(self, goal: str, observation: Observation | None = None) -> ActionBatch:
         self._history = []
         target = {"kind": "desktop"}
 
         for step in range(1, self.step_cap + 1):
+            step_start = time.monotonic()
+
             # 1. Perceive — capture the current screen.
             screenshot = None
             if self.driver is not None:
@@ -153,8 +200,28 @@ class LLMPlanner:
                 except Exception as e:
                     logger.warning("[llm_planner] screenshot failed: %s", e)
 
+            # 1a. Black/locked-frame guard — abort BEFORE sending to the vision
+            # pipeline. A blanked/locked screen (screensaver overlay or login
+            # dialog) captures as a near-black frame; feeding it to the cloud
+            # vision model just burns API calls on a screen Eva can't act on
+            # (and can loop forever). Detect it and stop fail-closed.
+            if (self.driver is not None
+                    and hasattr(self.driver, "is_frame_black")
+                    and self.driver.is_frame_black()):
+                logger.error("[llm_planner] step %d: screen is black/locked — aborting", step)
+                self._watch(screenshot, f"Step {step}: screen is black/locked — aborting")
+                self._record_trajectory(goal, "locked", target)
+                return ActionBatch(actions=[Action(kind="abort", text="screen is black/locked; cannot act")])
+
+            # 1b. Watch mode — stream the screenshot to Telegram the moment it's
+            # captured, BEFORE the (slow) vision inference, so the user sees the
+            # live screen while the model is thinking (not after).
+            self._watch(screenshot, f"Step {step}: perceiving screen…")
+
             # 2. Decide — ask the vision brain for ONE next action.
-            action = self.brain.next_action(goal, screenshot, self._history)
+            action = self.brain.next_action(goal, screenshot, self._history, hint=self._hint)
+            elapsed_ms = int((time.monotonic() - step_start) * 1000)
+            raw_llm = getattr(self.brain, "last_raw", None)
             if action is None:
                 reason = getattr(self.brain, "last_error", None) or "no valid action"
                 logger.error("[llm_planner] step %d: vision brain failed — %s", step, reason)
@@ -162,8 +229,32 @@ class LLMPlanner:
                 self._record_trajectory(goal, "error", target)
                 return ActionBatch(actions=[Action(kind="abort", text=f"vision brain unavailable: {reason}")])
 
-            # 3. Watch mode — stream the screenshot + decision.
+            # 3. Watch mode — stream the decision.
             self._watch(screenshot, f"Step {step}: {action.kind} {action.text or action.selector or action.url or ''}")
+
+            # 3.5 Guardrails — code-enforced rejection of blind clicks and repeats.
+            # These are enforced here (not just prompted) so the model cannot
+            # emit a blind click or redo the same action. On rejection we feed
+            # corrective feedback back to the vision brain and retry; after 2
+            # consecutive rejections we abort fail-closed.
+            rejection = None
+            if self._is_blind_click(action):
+                rejection = ("blind click rejected: click/double_click must include real 'x,y' "
+                             "coordinates in selector; if you cannot identify exact coordinates, "
+                             "return done or wait instead")
+            elif self._is_repeat(action):
+                rejection = ("repeated action rejected: you already performed this exact action; "
+                             "if the goal is met return done, otherwise take a DIFFERENT action")
+            if rejection:
+                self._step_rejections += 1
+                self._hint = rejection
+                self._watch(screenshot, f"Step {step}: {rejection} — retrying")
+                if self._step_rejections >= 2:
+                    self._record_trajectory(goal, "rejected", target)
+                    return ActionBatch(actions=[Action(kind="abort", text=rejection)])
+                continue
+            self._step_rejections = 0
+            self._hint = None
 
             # 4. Terminal actions.
             if action.kind == "done":
@@ -195,8 +286,15 @@ class LLMPlanner:
                 except Exception as e:
                     result = {"status": "error", "error": str(e)}
 
-            self._history.append({"action": action.model_dump(), "result": result})
-            logger.info("[llm_planner] step %d: %s -> %s", step, action.kind, result.get("status"))
+            self._history.append({
+                "step": step,
+                "screenshot": screenshot,      # what the LLM actually saw (data-URI or path)
+                "raw_llm": raw_llm,            # exact raw output the model returned
+                "action": action.model_dump(), # parsed, schema-valid action
+                "result": result,              # execution result
+                "elapsed_ms": elapsed_ms,      # wall time for this perceive+decide step
+            })
+            logger.info("[llm_planner] step %d: %s -> %s (%dms)", step, action.kind, result.get("status"), elapsed_ms)
 
             if result.get("status") == "error":
                 self._watch(screenshot, f"Step {step}: execution error — aborting")
