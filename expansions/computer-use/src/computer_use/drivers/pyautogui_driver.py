@@ -193,10 +193,29 @@ class PyAutoGUIDriver(BaseDriver):
                 # Resolve the app command; fall back to xdg-open for GUI apps.
                 cmd = shutil.which(app)
                 if cmd:
-                    subprocess.Popen([cmd], env={**os.environ, "DISPLAY": self.display or ":0"})
+                    proc = subprocess.Popen(
+                        [cmd],
+                        env={**os.environ, "DISPLAY": self.display or ":0"},
+                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                    )
                 else:
-                    subprocess.Popen(["xdg-open", app], env={**os.environ, "DISPLAY": self.display or ":0"})
-                time.sleep(2)
+                    # No binary on PATH — try xdg-open, but capture stderr and
+                    # verify it actually succeeded instead of blindly returning ok.
+                    proc = subprocess.Popen(
+                        ["xdg-open", app],
+                        env={**os.environ, "DISPLAY": self.display or ":0"},
+                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                    )
+                time.sleep(1.5)
+                # A launch is only 'ok' if the process is still alive (didn't
+                # exit immediately with an error). xdg-open exits non-zero when
+                # the target doesn't exist — surface that as a real error.
+                rc = proc.poll()
+                if rc is not None:
+                    err = (proc.stderr.read().decode(errors="replace").strip()
+                           if proc.stderr else "") or f"exit code {rc}"
+                    return {"status": "error", "driver": "pyautogui", "action": kind,
+                            "error": f"launch failed for {app!r}: {err}"}
                 return {"status": "ok", "driver": "pyautogui", "action": kind, "app": app}
 
             if kind in ("done", "abort"):
