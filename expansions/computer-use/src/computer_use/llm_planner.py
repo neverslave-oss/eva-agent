@@ -63,6 +63,7 @@ class LLMPlanner:
         risky_actions: set[str] | None = None,
         confirm_callback=None,   # fn(action) -> bool; None => risky actions auto-denied
         watch_callback=None,     # fn(screenshot_path, caption) -> None (Telegram stream)
+        stuck_callback=None,    # fn(rejection) -> bool; None => abort on repeated rejections
         trajectory_dir: str | Path | None = None,
     ):
         self.brain = brain or VisionBrain()
@@ -73,6 +74,7 @@ class LLMPlanner:
         self.risky_actions = risky_actions or set(_DEFAULT_RISKY)
         self.confirm_callback = confirm_callback
         self.watch_callback = watch_callback
+        self.stuck_callback = stuck_callback
         self._trajectory_dir = Path(trajectory_dir) if trajectory_dir else None
         self._history: list[dict] = []
         self._hint: str | None = None
@@ -249,7 +251,22 @@ class LLMPlanner:
                 self._step_rejections += 1
                 self._hint = rejection
                 self._watch(screenshot, f"Step {step}: {rejection} — retrying")
-                if self._step_rejections >= 2:
+                # After N consecutive rejections the model is stuck (same screen,
+                # same rejected actions). Stop looping: ask the user to continue or
+                # stop. Without a stuck_callback, abort fail-closed.
+                if self._step_rejections >= 3:
+                    if self.stuck_callback is not None:
+                        try:
+                            proceed = bool(self.stuck_callback(rejection))
+                        except Exception as e:
+                            logger.warning("[llm_planner] stuck callback error: %s", e)
+                            proceed = False
+                        if proceed:
+                            # User says continue — reset the counter and keep going
+                            # with the corrective hint so the model gets a fresh shot.
+                            self._step_rejections = 0
+                            self._watch(screenshot, f"Step {step}: user said continue — retrying with hint")
+                            continue
                     self._record_trajectory(goal, "rejected", target)
                     return ActionBatch(actions=[Action(kind="abort", text=rejection)])
                 continue

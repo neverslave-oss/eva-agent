@@ -156,6 +156,30 @@ def _default_confirm_callback(chat_id: str):
     return _confirm
 
 
+def _default_stuck_callback(chat_id: str):
+    """Return an interactive callback for the 'stuck' guard.
+
+    After several consecutive rejected actions the model is looping on the
+    same screen. This asks the user to Continue or Stop via Telegram inline
+    buttons and blocks until they respond. Returns None when there's no chat
+    id or the bot can't be reached, so the planner aborts fail-closed.
+    """
+    if not chat_id:
+        return None
+
+    def _stuck(rejection):
+        try:
+            from core.computer_confirm_gate import request_confirm
+            # Reuse the confirm gate's Allow/Deny prompt: Allow = continue,
+            # Deny = stop. The description carries the rejection reason.
+            return request_confirm(chat_id, "continue", rejection)
+        except Exception as e:
+            print(f"[bridge] stuck gate error: {e}", flush=True)
+            return False
+
+    return _stuck
+
+
 def run_computer_task(
     chat_id: str = "",
     goal: str = "",
@@ -165,6 +189,7 @@ def run_computer_task(
     step_cap: int = 10,
     confirm_callback=None,
     watch_callback=None,
+    stuck_callback=None,
 ) -> dict:
     if not _ensure_loaded():
         return {"ok": False, "reason": "computer-use sidecar unavailable"}
@@ -231,6 +256,10 @@ def run_computer_task(
         # actions; without one, risky actions are blocked.
         if confirm_callback is None:
             confirm_callback = _default_confirm_callback(chat_id)
+        # Default stuck gate: after repeated rejections, ask the user to
+        # Continue or Stop instead of looping forever.
+        if stuck_callback is None:
+            stuck_callback = _default_stuck_callback(chat_id)
 
         planner = LLMPlanner(
             brain=VisionBrain(),
@@ -240,6 +269,7 @@ def run_computer_task(
             dry_run=dry_run,
             confirm_callback=confirm_callback,
             watch_callback=watch_callback,
+            stuck_callback=stuck_callback,
         )
     else:
         planner = Planner()
