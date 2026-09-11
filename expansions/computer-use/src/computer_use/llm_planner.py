@@ -23,6 +23,7 @@ Guardrails (all enforced here):
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -149,25 +150,39 @@ class LLMPlanner:
 
     @staticmethod
     def _screen_hash(screenshot) -> str | None:
-        """A cheap stable hash of the screenshot bytes, to detect a frozen screen.
+        """A perceptual hash of the screenshot, to detect a frozen screen.
 
-        Screenshots are data-URIs (base64 PNG). Two identical screenshots hash
-        identically; a changed screen hashes differently. Returns None when there
-        is no screenshot to hash (so the frozen-screen guard is skipped).
+        The old implementation hashed the raw PNG bytes, which is defeated by
+        the cursor position and pixel-level noise: two visually-identical frames
+        (a frozen screen) produce different byte-hashes every capture, so the
+        frozen-screen guard never fired. This perceptual hash downscales to a
+        tiny grayscale grid and hashes the quantized brightness bits, so two
+        visually-identical frames hash identically regardless of cursor/noise.
+        Returns None when there is no screenshot to hash (guard skipped).
         """
         if not screenshot:
             return None
         try:
+            from PIL import Image
+            import io
+            img = None
             if isinstance(screenshot, str) and screenshot.startswith("data:"):
-                # data:image/png;base64,<payload>
+                import base64
                 payload = screenshot.split(",", 1)[1]
-                return hashlib.sha256(payload.encode()).hexdigest()
-            if isinstance(screenshot, (bytes, bytearray)):
-                return hashlib.sha256(bytes(screenshot)).hexdigest()
-            # Path to a file — hash the file bytes.
-            if isinstance(screenshot, (str, os.PathLike)):
-                with open(screenshot, "rb") as fh:
-                    return hashlib.sha256(fh.read()).hexdigest()
+                img = Image.open(io.BytesIO(base64.b64decode(payload)))
+            elif isinstance(screenshot, (bytes, bytearray)):
+                img = Image.open(io.BytesIO(bytes(screenshot)))
+            elif isinstance(screenshot, (str, os.PathLike)) and Path(screenshot).exists():
+                img = Image.open(screenshot)
+            if img is None:
+                return None
+            # Perceptual hash: downscale -> grayscale -> tiny grid -> quantize.
+            # Cursor and noise vanish at this resolution; content does not.
+            img = img.convert("L").resize((16, 16), Image.LANCZOS)
+            px = list(img.getdata())
+            avg = sum(px) / float(len(px)) if px else 0.0
+            bits = "".join("1" if v > avg else "0" for v in px)
+            return hashlib.sha256(bits.encode()).hexdigest()
         except Exception:
             return None
         return None
