@@ -268,6 +268,10 @@ def _parse_plan(raw: str) -> list[Action] | None:
                 data = json.loads(arr)
             except Exception:
                 data = None
+    # Tolerate a single action object (the model sometimes ignores the "return
+    # an array" instruction and emits one object). Wrap it into a one-item plan.
+    if isinstance(data, dict):
+        data = [data]
     if not isinstance(data, list) or not data:
         logger.warning("[vision_brain] could not parse LLM plan array: %r", raw[:200])
         return None
