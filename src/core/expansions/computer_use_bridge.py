@@ -202,17 +202,25 @@ def run_computer_task(
     from computer_use.router import choose_driver  # type: ignore
     from computer_use.drivers.playwright_driver import PlaywrightDriver  # type: ignore
     from computer_use.drivers.pyautogui_driver import PyAutoGUIDriver  # type: ignore
+    from computer_use.drivers.hybrid_driver import HybridDriver  # type: ignore
 
     target = target or {"kind": "desktop"}
     kind = (target or {}).get("kind", "desktop")
 
-    # Route to a real driver. Browser targets use Playwright (real Chromium);
-    # desktop targets use pyautogui (only meaningful on a host with a display).
-    driver_choice = choose_driver(target)
-    if kind == "browser" or driver_choice == "playwright":
-        driver = PlaywrightDriver()
+    # Build the desktop and browser drivers. The desktop driver is the default
+    # (pyautogui); the browser driver (Playwright) is used when the task needs
+    # a real browser. A HybridDriver starts on the desktop and gracefully hands
+    # off to the browser when the desktop driver fails a browser-ish action,
+    # then returns to the desktop once the browser phase is done.
+    desktop = PyAutoGUIDriver()
+    browser = PlaywrightDriver()
+    if kind == "browser":
+        # Explicit browser target — start directly in the browser.
+        driver = browser
     else:
-        driver = PyAutoGUIDriver()
+        # Default: start on the desktop, switch to the browser at runtime when
+        # the goal looks browser-ish and the desktop driver can't handle it.
+        driver = HybridDriver(desktop=desktop, browser=browser, goal=goal)
 
     policy = PolicyEngine(
         {
