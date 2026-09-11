@@ -79,6 +79,8 @@ class LLMPlanner:
         self._history: list[dict] = []
         self._hint: str | None = None
         self._step_rejections = 0
+        self._last_screen_hash: str | None = None
+        self._frozen_steps = 0
 
     def _trajectory_path(self) -> Path | None:
         if self._trajectory_dir is not None:
@@ -144,6 +146,31 @@ class LLMPlanner:
             self.watch_callback(screenshot, caption)
         except Exception as e:
             logger.warning("[llm_planner] watch callback error: %s", e)
+
+    @staticmethod
+    def _screen_hash(screenshot) -> str | None:
+        """A cheap stable hash of the screenshot bytes, to detect a frozen screen.
+
+        Screenshots are data-URIs (base64 PNG). Two identical screenshots hash
+        identically; a changed screen hashes differently. Returns None when there
+        is no screenshot to hash (so the frozen-screen guard is skipped).
+        """
+        if not screenshot:
+            return None
+        try:
+            if isinstance(screenshot, str) and screenshot.startswith("data:"):
+                # data:image/png;base64,<payload>
+                payload = screenshot.split(",", 1)[1]
+                return hashlib.sha256(payload.encode()).hexdigest()
+            if isinstance(screenshot, (bytes, bytearray)):
+                return hashlib.sha256(bytes(screenshot)).hexdigest()
+            # Path to a file — hash the file bytes.
+            if isinstance(screenshot, (str, os.PathLike)):
+                with open(screenshot, "rb") as fh:
+                    return hashlib.sha256(fh.read()).hexdigest()
+        except Exception:
+            return None
+        return None
 
     @staticmethod
     def _is_blind_click(action) -> bool:
@@ -214,6 +241,41 @@ class LLMPlanner:
                 self._watch(screenshot, f"Step {step}: screen is black/locked — aborting")
                 self._record_trajectory(goal, "locked", target)
                 return ActionBatch(actions=[Action(kind="abort", text="screen is black/locked; cannot act")])
+
+            # 1a2. Frozen-screen guard — the PRIMARY defense against the churn.
+            # The model was emitting *different* valid-looking blind clicks on an
+            # unchanged screen, so action-rejection never fired. Instead, detect
+            # that the screen itself hasn't changed across consecutive steps and
+            # stop-and-ask regardless of what action the model proposes. This runs
+            # BEFORE the vision call so we don't burn API credits on a frozen
+            # screen. After N frozen steps, ask the user (or abort fail-closed).
+            cur_hash = self._screen_hash(screenshot)
+            if cur_hash is not None:
+                if cur_hash == self._last_screen_hash:
+                    self._frozen_steps += 1
+                else:
+                    self._frozen_steps = 0
+                self._last_screen_hash = cur_hash
+                if self._frozen_steps >= 3:
+                    frozen_msg = (f"screen unchanged for {self._frozen_steps} steps — the model keeps "
+                                  "guessing on a frozen screen; stop and ask the user")
+                    logger.error("[llm_planner] step %d: %s", step, frozen_msg)
+                    self._watch(screenshot, f"Step {step}: {frozen_msg}")
+                    if self.stuck_callback is not None:
+                        try:
+                            proceed = bool(self.stuck_callback(frozen_msg))
+                        except Exception as e:
+                            logger.warning("[llm_planner] stuck callback error: %s", e)
+                            proceed = False
+                        if proceed:
+                            # User says continue — reset the frozen counter and keep
+                            # going (maybe they changed the screen or want a retry).
+                            self._frozen_steps = 0
+                            self._last_screen_hash = None
+                            self._watch(screenshot, f"Step {step}: user said continue — retrying")
+                            continue
+                    self._record_trajectory(goal, "frozen", target)
+                    return ActionBatch(actions=[Action(kind="abort", text=frozen_msg)])
 
             # 1b. Watch mode — stream the screenshot to Telegram the moment it's
             # captured, BEFORE the (slow) vision inference, so the user sees the
