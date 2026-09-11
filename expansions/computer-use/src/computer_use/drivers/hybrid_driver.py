@@ -72,6 +72,12 @@ class HybridDriver(BaseDriver):
             return d.is_frame_black(threshold)
         return False
 
+    def is_frame_white(self, threshold: float = 250.0, near_white_ratio: float = 0.95) -> bool:
+        d = self._current()
+        if hasattr(d, "is_frame_white"):
+            return d.is_frame_white(threshold, near_white_ratio)
+        return False
+
     def close(self) -> None:
         for d in (self.desktop, self.browser):
             try:

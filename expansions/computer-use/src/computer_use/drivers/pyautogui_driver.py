@@ -151,6 +151,34 @@ class PyAutoGUIDriver(BaseDriver):
         except Exception:
             return False
 
+    def is_frame_white(self, threshold: float = 250.0, near_white_ratio: float = 0.95) -> bool:
+        """True when the captured frame is effectively blank-white.
+
+        Some blank/blanked screens (e.g. a browser that failed to launch and
+        left a white compositor surface, or a white screensaver overlay) capture
+        as a near-white frame. The black-guard (`is_frame_black`) misses these,
+        so a white blank would stream per-step until the frozen-guard caught it
+        after several unchanged frames. This lets the planner abort immediately
+        on a white blank too. Returns False on any capture error so we never
+        block on a transient failure.
+        """
+        try:
+            img = self._capture()
+            if img is None:
+                return False
+            gray = img.convert("L")
+            px = list(gray.getdata())
+            if not px:
+                return False
+            mean = sum(px) / float(len(px))
+            near_white = sum(1 for v in px if v > threshold) / float(len(px))
+            # Both a high overall luminance AND an overwhelming near-white
+            # majority — a normal bright desktop has dark text/icons, so it
+            # won't be >95% pure-white.
+            return mean > threshold and near_white > near_white_ratio
+        except Exception:
+            return False
+
 
     def _wake_screen(self) -> None:
         """Wake/disable the screensaver so captures aren't blanked to black.

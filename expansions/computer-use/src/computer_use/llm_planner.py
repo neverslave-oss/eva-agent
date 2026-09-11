@@ -263,6 +263,20 @@ class LLMPlanner:
                 self._record_trajectory(goal, "locked", target)
                 return ActionBatch(actions=[Action(kind="abort", text="screen is black/locked; cannot act")])
 
+            # 1a. White-blank guard — some blanked screens (a browser that
+            # failed to launch and left a white compositor surface, or a white
+            # screensaver overlay) capture as a near-white frame. The black-guard
+            # above misses these, so a white blank would stream per-step until
+            # the frozen-guard caught it after several unchanged frames. Detect
+            # it here and abort immediately, same fail-closed behavior.
+            if (self.driver is not None
+                    and hasattr(self.driver, "is_frame_white")
+                    and self.driver.is_frame_white()):
+                logger.error("[llm_planner] step %d: screen is blank-white — aborting", step)
+                self._watch(screenshot, f"Step {step}: screen is blank-white — aborting")
+                self._record_trajectory(goal, "blank", target)
+                return ActionBatch(actions=[Action(kind="abort", text="screen is blank-white; cannot act")])
+
             # 1a2. Frozen-screen guard — the PRIMARY defense against the churn.
             # The model was emitting *different* valid-looking blind clicks on an
             # unchanged screen, so action-rejection never fired. Instead, detect
