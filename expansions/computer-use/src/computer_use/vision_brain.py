@@ -57,8 +57,40 @@ _SYSTEM = (
 )
 
 
+# System prompt for PLAN mode: return a JSON ARRAY of ordered actions, not one.
+_SYSTEM_PLAN = (
+    "You are a computer-use agent controlling a real desktop/browser. You see a "
+    "screenshot of the current screen and a goal. Produce a concise, ordered PLAN "
+    "of actions that will achieve the goal, then return ONLY a JSON array of action "
+    "objects, no prose, no markdown.\n\n"
+    "Valid action kinds: click, double_click, type, hotkey, navigate, scroll, wait, "
+    "submit, launch, done, abort.\n"
+    "- click/double_click: selector MUST be real 'x,y' screen coordinates of "
+    "the target (e.g. \"1191,73\"). NEVER use \"auto\" — an auto click at the "
+    "current cursor position is a blind click and will not hit the target.\n"
+    "- type: text is what to type.\n"
+    "- hotkey: text is the key combo, e.g. 'ctrl+l'.\n"
+    "- navigate: url is the target URL (browser only).\n"
+    "- launch: text is the app name to open (desktop).\n"
+    "- wait: timeout_ms is how long to wait.\n"
+    "- done: the goal is achieved; include a short text summary.\n"
+    "- abort: the goal cannot be achieved; include a short reason.\n\n"
+    "CRITICAL RULES:\n"
+    "- NEVER emit a click/double_click without real 'x,y' screen coordinates in selector. "
+    "A click with null/empty selector is a blind click and is rejected. If you cannot "
+    "identify exact coordinates, use wait or done instead.\n"
+    "- Do not repeat the same action twice in the plan.\n"
+    "- Keep the plan short (3-8 actions). Only end with done when the goal is fully "
+    "achieved; only end with abort when it is impossible.\n\n"
+    "Return format (exact): a JSON array, e.g.\n"
+    '[{"kind": "click", "selector": "1191,73", "text": null, "url": null, '
+    '"timeout_ms": 5000, "metadata": {}}, {"kind": "type", "selector": null, '
+    '"text": "hello", "url": null, "timeout_ms": 5000, "metadata": {}}]'
+)
+
+
 def _build_messages(goal: str, screenshot: str | None, history: list[dict],
-                    hint: str | None = None) -> list[dict]:
+                    hint: str | None = None, system: str | None = None) -> list[dict]:
     """Build the multimodal message list for the vision model."""
     user_parts: list[dict] = []
     b64 = None
@@ -184,6 +216,86 @@ def _parse_action(raw: str) -> Action | None:
         return None
 
 
+def _extract_first_array(text: str) -> str | None:
+    """Extract the first complete, balanced JSON array from a string.
+
+    Mirrors _extract_first_json but for arrays (the plan mode returns a JSON
+    array of actions). Handles nesting and string literals.
+    """
+    start = text.find("[")
+    if start == -1:
+        return None
+    depth = 0
+    in_str = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_str:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+    return None
+
+
+def _parse_plan(raw: str) -> list[Action] | None:
+    """Parse the LLM's JSON-array reply into a list of schema-valid Actions.
+
+    Returns None if the output is not a valid non-empty list of actions.
+    """
+    text = (raw or "").strip()
+    fence = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", text, re.DOTALL)
+    if fence:
+        text = fence.group(1)
+    data = None
+    try:
+        data = json.loads(text)
+    except Exception:
+        arr = _extract_first_array(text)
+        if arr:
+            try:
+                data = json.loads(arr)
+            except Exception:
+                data = None
+    if not isinstance(data, list) or not data:
+        logger.warning("[vision_brain] could not parse LLM plan array: %r", raw[:200])
+        return None
+    actions: list[Action] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        kind = item.get("kind")
+        if kind not in _ALLOWED_KINDS:
+            logger.warning("[vision_brain] plan contains disallowed kind: %r", kind)
+            return None
+        try:
+            actions.append(Action(
+                kind=kind,
+                selector=item.get("selector"),
+                text=item.get("text"),
+                url=item.get("url"),
+                timeout_ms=item.get("timeout_ms", 5000),
+                metadata=item.get("metadata", {}) or {},
+            ))
+        except Exception as e:
+            logger.warning("[vision_brain] invalid plan action: %s", e)
+            return None
+    if not actions:
+        return None
+    return actions
+
+
 class VisionBrain:
     """Wraps InferenceProvider to get the next computer-use action from a screenshot."""
 
@@ -250,3 +362,41 @@ class VisionBrain:
             logger.error("[vision_brain] %s", self.last_error)
             return None
         return action
+
+    def plan_actions(self, goal: str, screenshot: str | None,
+                     history: list[dict] | None = None,
+                     hint: str | None = None,
+                     max_new_tokens: int = 1024) -> list[Action] | None:
+        """Return an ordered PLAN (list of Actions) for the current screenshot.
+
+        The model sees the goal + current screen once and returns a coherent
+        sequence of actions to achieve it, instead of one action at a time.
+        On failure sets self.last_error and returns None.
+        """
+        self.last_error = None
+        messages = _build_messages(goal, screenshot, history or [], hint=hint,
+                                   system=_SYSTEM_PLAN)
+        provider = self._get_provider()
+        try:
+            raw = provider.infer(
+                messages, max_new_tokens=max_new_tokens, call_type=self.call_type
+            )
+        except Exception as e:
+            self.last_error = f"inference failed: {e}"
+            logger.error("[vision_brain] %s", self.last_error)
+            return None
+        self.last_raw = raw
+        if not raw:
+            self.last_error = "inference returned empty response"
+            logger.error("[vision_brain] %s", self.last_error)
+            return None
+        if raw == "(inference unavailable)":
+            self.last_error = "inference unavailable (provider returned the unavailable sentinel)"
+            logger.error("[vision_brain] %s", self.last_error)
+            return None
+        plan = _parse_plan(raw)
+        if plan is None:
+            self.last_error = f"could not parse valid plan from model output: {raw[:200]!r}"
+            logger.error("[vision_brain] %s", self.last_error)
+            return None
+        return plan

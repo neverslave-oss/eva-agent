@@ -217,6 +217,12 @@ class LLMPlanner:
     def plan(self, goal: str, observation: Observation | None = None) -> ActionBatch:
         self._history = []
         target = {"kind": "desktop"}
+        # Plan-first execution: the brain returns an ordered list of actions once
+        # (instead of one stateless action per step). We execute each step,
+        # validate the result, and re-plan from the current state if a step
+        # fails — so a stale plan never gets blindly followed to the end.
+        plan: list[Action] = []
+        plan_idx = 0
 
         for step in range(1, self.step_cap + 1):
             step_start = time.monotonic()
@@ -282,16 +288,25 @@ class LLMPlanner:
             # live screen while the model is thinking (not after).
             self._watch(screenshot, f"Step {step}: perceiving screen…")
 
-            # 2. Decide — ask the vision brain for ONE next action.
-            action = self.brain.next_action(goal, screenshot, self._history, hint=self._hint)
+            # 2. Ensure we have a plan. When the current plan is exhausted (or
+            # was invalidated by a rejection/failure), ask the brain for a fresh
+            # ordered plan of actions from the current screen state.
+            if plan_idx >= len(plan):
+                plan = self.brain.plan_actions(goal, screenshot, self._history, hint=self._hint) or []
+                plan_idx = 0
+                if not plan:
+                    reason = getattr(self.brain, "last_error", None) or "no valid plan"
+                    logger.error("[llm_planner] step %d: vision brain failed — %s", step, reason)
+                    self._watch(screenshot, f"Step {step}: vision brain failed ({reason}) — aborting")
+                    self._record_trajectory(goal, "error", target)
+                    return ActionBatch(actions=[Action(kind="abort", text=f"vision brain unavailable: {reason}")])
+                self._watch(screenshot, f"Step {step}: plan of {len(plan)} actions")
+
+            # 3. Take the next action from the plan.
+            action = plan[plan_idx]
+            plan_idx += 1
             elapsed_ms = int((time.monotonic() - step_start) * 1000)
             raw_llm = getattr(self.brain, "last_raw", None)
-            if action is None:
-                reason = getattr(self.brain, "last_error", None) or "no valid action"
-                logger.error("[llm_planner] step %d: vision brain failed — %s", step, reason)
-                self._watch(screenshot, f"Step {step}: vision brain failed ({reason}) — aborting")
-                self._record_trajectory(goal, "error", target)
-                return ActionBatch(actions=[Action(kind="abort", text=f"vision brain unavailable: {reason}")])
 
             # 3. Watch mode — stream the decision.
             self._watch(screenshot, f"Step {step}: {action.kind} {action.text or action.selector or action.url or ''}")
@@ -299,8 +314,9 @@ class LLMPlanner:
             # 3.5 Guardrails — code-enforced rejection of blind clicks and repeats.
             # These are enforced here (not just prompted) so the model cannot
             # emit a blind click or redo the same action. On rejection we feed
-            # corrective feedback back to the vision brain and retry; after 2
-            # consecutive rejections we abort fail-closed.
+            # corrective feedback back to the vision brain, invalidate the rest
+            # of the plan, and re-plan; after 3 consecutive rejections we stop
+            # and ask the user (fail-closed if no callback).
             rejection = None
             if self._is_blind_click(action):
                 rejection = ("blind click rejected: click/double_click must include real 'x,y' "
@@ -312,7 +328,7 @@ class LLMPlanner:
             if rejection:
                 self._step_rejections += 1
                 self._hint = rejection
-                self._watch(screenshot, f"Step {step}: {rejection} — retrying")
+                self._watch(screenshot, f"Step {step}: {rejection} — re-planning")
                 # After N consecutive rejections the model is stuck (same screen,
                 # same rejected actions). Stop looping: ask the user to continue or
                 # stop. Without a stuck_callback, abort fail-closed.
@@ -328,9 +344,12 @@ class LLMPlanner:
                             # with the corrective hint so the model gets a fresh shot.
                             self._step_rejections = 0
                             self._watch(screenshot, f"Step {step}: user said continue — retrying with hint")
+                            plan = []
                             continue
                     self._record_trajectory(goal, "rejected", target)
                     return ActionBatch(actions=[Action(kind="abort", text=rejection)])
+                # Invalidate the rest of the plan; next iteration re-plans with the hint.
+                plan = []
                 continue
             self._step_rejections = 0
             self._hint = None
@@ -376,9 +395,11 @@ class LLMPlanner:
             logger.info("[llm_planner] step %d: %s -> %s (%dms)", step, action.kind, result.get("status"), elapsed_ms)
 
             if result.get("status") == "error":
-                self._watch(screenshot, f"Step {step}: execution error — aborting")
-                self._record_trajectory(goal, "error", target)
-                return ActionBatch(actions=[Action(kind="abort", text=result.get("error", "execution error"))])
+                # Execution failed — the rest of the plan is stale. Re-plan from
+                # the current screen state instead of blindly following it.
+                self._watch(screenshot, f"Step {step}: execution error ({result.get('error')}) — re-planning")
+                plan = []
+                continue
 
         # Step cap reached without done.
         self._record_trajectory(goal, "step_cap", target)
