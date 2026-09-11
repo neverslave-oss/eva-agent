@@ -50,10 +50,16 @@ _SYSTEM = (
     "identify exact coordinates, return done or wait instead.\n"
     "- NEVER repeat an action you already performed. If the screen has not changed and "
     "your previous action already achieved the goal, return done.\n"
-    "- Prefer returning done as soon as the goal is met; do not keep acting.\n\n"
+    "- Prefer returning done as soon as the goal is met; do not keep acting.\n"
+    "- driver: choose the medium for THIS action — \"desktop\" (PyAutoGUI, clicks pixels "
+    "on the real screen) or \"browser\" (Playwright, drives a real browser DOM by "
+    "selector). Use \"browser\" for anything on a web page (navigate, fill forms, click "
+    "links/buttons in a page, read page text); use \"desktop\" for launching apps, "
+    "window management, or anything outside a browser. If the goal mentions a browser "
+    "(firefox/chrome/edge) or a website, prefer \"browser\".\n\n"
     "Return format (exact):\n"
     '{"kind": "<one of the above>", "selector": null, "text": null, "url": null, '
-    '"timeout_ms": 5000, "metadata": {}}'
+    '"driver": "desktop", "timeout_ms": 5000, "metadata": {}}'
 )
 
 
@@ -81,11 +87,18 @@ _SYSTEM_PLAN = (
     "identify exact coordinates, use wait or done instead.\n"
     "- Do not repeat the same action twice in the plan.\n"
     "- Keep the plan short (3-8 actions). Only end with done when the goal is fully "
-    "achieved; only end with abort when it is impossible.\n\n"
+    "achieved; only end with abort when it is impossible.\n"
+    "- driver: choose the medium for EACH action — \"desktop\" (PyAutoGUI, clicks pixels "
+    "on the real screen) or \"browser\" (Playwright, drives a real browser DOM by "
+    "selector). Use \"browser\" for anything on a web page (navigate, fill forms, click "
+    "links/buttons in a page, read page text); use \"desktop\" for launching apps, "
+    "window management, or anything outside a browser. If the goal mentions a browser "
+    "(firefox/chrome/edge) or a website, prefer \"browser\" for web actions.\n\n"
     "Return format (exact): a JSON array, e.g.\n"
     '[{"kind": "click", "selector": "1191,73", "text": null, "url": null, '
-    '"timeout_ms": 5000, "metadata": {}}, {"kind": "type", "selector": null, '
-    '"text": "hello", "url": null, "timeout_ms": 5000, "metadata": {}}]'
+    '"driver": "browser", "timeout_ms": 5000, "metadata": {}}, {"kind": "type", '
+    '"selector": null, "text": "hello", "url": null, "driver": "browser", '
+    '"timeout_ms": 5000, "metadata": {}}]'
 )
 
 
@@ -209,6 +222,7 @@ def _parse_action(raw: str) -> Action | None:
             text=data.get("text"),
             url=data.get("url"),
             timeout_ms=data.get("timeout_ms", 5000),
+            driver=data.get("driver"),
             metadata=data.get("metadata", {}) or {},
         )
     except Exception as e:
@@ -290,6 +304,7 @@ def _parse_plan(raw: str) -> list[Action] | None:
                 text=item.get("text"),
                 url=item.get("url"),
                 timeout_ms=item.get("timeout_ms", 5000),
+                driver=item.get("driver"),
                 metadata=item.get("metadata", {}) or {},
             ))
         except Exception as e:

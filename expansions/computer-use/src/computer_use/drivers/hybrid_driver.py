@@ -82,10 +82,23 @@ class HybridDriver(BaseDriver):
 
     def execute(self, action, target: dict) -> dict:
         kind = getattr(action, "kind", None)
+        # The LLM decides the medium for each action via the `driver` field
+        # ("desktop" | "browser"). When it declares a driver, switch to it
+        # explicitly — this is authoritative and replaces the old fragile
+        # "switch on desktop failure" heuristic (blind clicks return false-
+        # success, so that heuristic never fired).
+        declared = getattr(action, "driver", None)
+        if declared == "browser":
+            self._switch_to_browser("llm declared browser")
+            return self.browser.execute(action, target)
+        if declared == "desktop":
+            self._switch_to_desktop("llm declared desktop")
+            return self.desktop.execute(action, target)
 
+        # Fallback when the LLM didn't declare a driver: keep the old
+        # graceful behavior so nothing regresses.
         if self.mode == "desktop":
             # A `navigate` action is browser-only — pyautogui can't do it.
-            # Hand straight off to the browser driver.
             if kind == "navigate":
                 self._switch_to_browser("navigate action")
                 return self.browser.execute(action, target)
@@ -93,15 +106,14 @@ class HybridDriver(BaseDriver):
             result = self.desktop.execute(action, target)
 
             # Desktop failed AND the goal looks browser-ish -> try the browser
-            # driver for this action (e.g. a click/type that belongs in the
-            # browser, not on the desktop). This is the graceful handoff.
+            # driver for this action.
             if result.get("status") == "error" and self._goal_is_browser():
                 self._switch_to_browser(f"desktop {kind} failed: {result.get('error')}")
                 return self.browser.execute(action, target)
 
             return result
 
-        # ── browser mode ────────────────────────────────────────────────
+        # ── browser mode (fallback path) ──────────────────────────────
         # A `launch` is a desktop action — the browser phase is over, go back
         # to the desktop to handle the rest of the task.
         if kind == "launch":

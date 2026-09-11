@@ -29,6 +29,7 @@ class Action(BaseModel):
     text: str | None = None
     url: str | None = None
     timeout_ms: int = Field(default=5000, ge=1)
+    driver: Literal["desktop", "browser"] | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
