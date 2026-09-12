@@ -139,7 +139,13 @@ def test_done_only_accepted_when_verified():
     batch = p.plan("do the thing", observation=None, target={"kind": "desktop"})
     terminal = batch.actions[0]
     assert terminal.kind == "abort", f"unverified goal must abort, got {terminal.kind}"
-    assert terminal.text and "goal verified" not in (terminal.text or "").lower()
+    # The abort text must explicitly say the goal was NOT verified (negative
+    # framing), never masquerade as a false success. "without goal verified"
+    # and "not verified" both satisfy this; a bare positive "goal verified"
+    # claim would be a bug.
+    assert terminal.text and (
+        "without" in terminal.text.lower() or "not verified" in terminal.text.lower()
+    )
 
 
 # ── Q persistence ─────────────────────────────────────────────────────────

@@ -253,10 +253,19 @@ class RLPlanner:
         return ("noop", R_NOOP)
 
     def _is_dead(self, state: tuple) -> bool:
-        """A state is dead when its best action value is at/below zero and the
-        screen/outcome are unchanged — the agent has nothing promising to do.
+        """A state is dead only when it has been visited and its best action
+        value is at/below zero.
+
+        Fresh (unvisited) states initialize to all-zero Q (the row doesn't
+        exist yet, so `_max_q` returns 0.0). Declaring them dead immediately
+        would abort on the very first unseen state before the agent can ever
+        explore — the live run died at step 3 for exactly this reason. So only
+        a state whose row exists AND whose best Q <= 0 is dead.
         """
-        return self._max_q(state) <= 0.0
+        row = self._q.get(state)
+        if row is None:
+            return False  # unseen state: explore, don't abort
+        return max(row) <= 0.0
 
     # ── Main loop (mirrors LLMPlanner.plan interface) ─────────────────────
     def plan(self, goal: str, observation: Observation | None = None, target: dict | None = None) -> ActionBatch:
