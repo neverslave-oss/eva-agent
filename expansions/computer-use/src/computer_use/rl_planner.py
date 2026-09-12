@@ -506,7 +506,62 @@ class RLPlanner:
         if observation is not None:
             sig = self._obs_signature(observation, screenshot)
             progress_met = bool(sig) and sig != prev_obs_sig
+            # Default goal check (modality-agnostic): confirm the goal when the
+            # observed URL/text actually matches what the goal asks for. This is
+            # what lets the agent emit a verified `done` (terminal +100) instead
+            # of churning to step-cap and aborting.
+            goal_met = self._default_goal_met(goal, observation)
         return goal_met, progress_met
+
+    @staticmethod
+    def _default_goal_met(goal: str, observation) -> bool:
+        """Modality-agnostic default goal verifier.
+
+        Returns True when the observed URL/text satisfies the goal. Never
+        assumes a URL exists (desktop has none): it checks whatever modality
+        is present.
+
+        1. If the goal names a URL (http/https), confirm when the observed URL
+           matches its host (+ path when the goal path is non-trivial).
+        2. Otherwise, confirm when the observed text contains a distinctive
+           goal token (a word of >=5 chars from the goal).
+        """
+        g = (goal or "").strip()
+        if not g:
+            return False
+        obs_url = (observation.url or "") if observation is not None else ""
+        obs_text = (observation.text or "") if observation is not None else ""
+        if not obs_url and not obs_text:
+            return False
+
+        # 1. URL goal: match host (+ non-trivial path).
+        import re as _re
+        m = _re.search(r"https?://([^/\s]+)(/[^\s]*)?", g, _re.IGNORECASE)
+        if m:
+            goal_host = (m.group(1) or "").lower().rstrip("/")
+            goal_path = (m.group(2) or "").rstrip("/")
+            if not goal_host:
+                return False
+            try:
+                from urllib.parse import urlparse
+                obs = urlparse(obs_url)
+                obs_host = (obs.hostname or "").lower()
+                obs_path = (obs.path or "").rstrip("/")
+            except Exception:
+                obs_host, obs_path = "", ""
+            if obs_host and obs_host == goal_host:
+                # Non-trivial goal path must also match; else host match suffices.
+                if len(goal_path) > 1:
+                    return obs_path == goal_path
+                return True
+            return False
+
+        # 2. Text goal: a distinctive goal token present in the observed text.
+        tokens = [w for w in _re.split(r"[^A-Za-z0-9]+", g) if len(w) >= 5]
+        if not tokens:
+            return False
+        low_text = obs_text.lower()
+        return any(t.lower() in low_text for t in tokens)
 
     @staticmethod
     def _obs_signature(observation, screenshot) -> str | None:
