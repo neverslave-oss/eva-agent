@@ -326,7 +326,7 @@ TOOLS = [
                     },
                     "dry_run": {
                         "type": "boolean",
-                        "description": "Plan + validate only, without executing (default true). Set false to actually perform the actions."
+                        "description": "Plan + validate only, without executing (default false — real tasks actually run). Set true to preview actions without moving the mouse/keyboard."
                     },
                     "llm": {
                         "type": "boolean",
@@ -507,7 +507,7 @@ def _run_computer(arguments: dict, chat_id: str = "") -> str:
             target = json.loads(target)
         except Exception:
             target = None
-    dry_run = bool(arguments.get("dry_run", True))
+    dry_run = bool(arguments.get("dry_run", False))
     llm = bool(arguments.get("llm", True))
     step_cap = int(arguments.get("step_cap", 10) or 10)
     try:
