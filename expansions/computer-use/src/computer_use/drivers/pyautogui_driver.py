@@ -304,8 +304,18 @@ class PyAutoGUIDriver(BaseDriver):
                         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                     )
                 else:
-                    # No binary on PATH — try xdg-open, but capture stderr and
-                    # verify it actually succeeded instead of blindly returning ok.
+                    # No binary on PATH. Only hand off to xdg-open when the target
+                    # is plausibly openable (an existing file path or a http(s)
+                    # URL). A bare app name with no binary and no xdg handler must
+                    # fail fast as a structured error — do NOT spawn xdg-open and
+                    # race a 1.5s poll, which can hang (DISPLAY-dependent) and
+                    # falsely report ok for a target that doesn't exist.
+                    from pathlib import Path as _Path
+                    is_url = app.startswith(("http://", "https://"))
+                    is_file = _Path(app).expanduser().exists()
+                    if not (is_url or is_file):
+                    	return {"status": "error", "driver": "pyautogui", "action": kind,
+                    	        "error": f"launch failed for {app!r}: no binary on PATH and no openable target"}
                     proc = subprocess.Popen(
                         ["xdg-open", app],
                         env={**os.environ, "DISPLAY": self.display or ":0"},
