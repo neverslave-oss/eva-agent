@@ -205,6 +205,21 @@ class RLPlanner:
         row = self._q.get(state)
         return max(row) if row else 0.0
 
+    def _live_driver_mode(self, fallback: str) -> str:
+        """Return the HybridDriver's live runtime mode (desktop | browser).
+
+        The RL state must reflect which medium the agent is actually on after
+        the desktop<->browser handoff, not a hardcoded target.kind. When the
+        driver exposes a `.mode` attribute (HybridDriver), read it; otherwise
+        fall back to the current driver string.
+        """
+        d = self.driver
+        if d is not None:
+            mode = getattr(d, "mode", None)
+            if mode in ("desktop", "browser"):
+                return mode
+        return fallback
+
     def _seed_goal_policy(self, goal: str, driver: str) -> None:
         """Pre-bias the Q-table so a cold-start agent starts with the right
         action instead of random exploration.
@@ -321,6 +336,9 @@ class RLPlanner:
         last_sig: str | None = None
         last_outcome: str | None = None
         step_bucket = 0
+        # Start from the requested target kind, but the live driver mode is
+        # read fresh each step from the HybridDriver so the RL state reflects
+        # the real desktop<->browser handoff, not a hardcoded target.
         driver = (target.get("kind") or "desktop")
         self._dead_streak = 0
 
@@ -355,6 +373,11 @@ class RLPlanner:
             # watch_callback is wired — mirrors the LLM planner path so RL
             # runs show live progress instead of silence.
             self._watch(screenshot, f"step {step}/{self.step_cap}: {goal}")
+
+            # 1.5 Live driver mode: reflect the HybridDriver's real runtime
+            # mode (desktop -> browser handoff), not a hardcoded target.kind.
+            # The RL state must know which medium the agent is actually on.
+            driver = self._live_driver_mode(driver)
 
             # 2. Progress / goal verification signal.
             # General progress: the world changed since the last step (screen
