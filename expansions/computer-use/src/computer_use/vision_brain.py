@@ -1,8 +1,8 @@
 """vision_brain.py — LLM vision brain for computer-use.
 
 Turns a screenshot + goal + action history into ONE structured next Action,
-using the configured `computer_use` inference call_type (default: MiniMax-M3
-via HF Router / novita). This is the "look at the screen, decide the next
+using the configured `computer_use` inference call_type (DeepSeek Vision via
+HF Router / deepinfra). This is the "look at the screen, decide the next
 step" primitive that replaces the deterministic planner's blind rules.
 
 The brain is a thin adapter over the existing InferenceProvider routing — it
@@ -380,6 +380,21 @@ class VisionBrain:
         except Exception:
             cfg = {}
         return InferenceProvider(cfg)
+
+    def resolved_model(self) -> str | None:
+        """Return the actual model id this brain routes to for its call_type.
+
+        Reads the configured model_overrides for the call_type (e.g.
+        ``providers.model_overrides.computer_use``) so trajectory records and
+        logs report the real model (DeepSeek Vision) instead of a stale
+        hardcoded default.
+        """
+        try:
+            provider = self._get_provider()
+            p = provider.get_provider(self.call_type)
+            return provider.get_model(p, self.call_type)
+        except Exception:
+            return None
 
     def next_action(self, goal: str, screenshot: str | None,
                     history: list[dict] | None = None,

@@ -1,8 +1,8 @@
 """llm_planner.py — LLM-driven computer-use planner.
 
 Replaces the deterministic rule-based planner's decision-making with a
-perceive -> decide -> act -> verify loop driven by a vision LLM (default
-MiniMax-M3 via HF Router / novita). Each step looks at the *current* screenshot
+perceive -> decide -> act -> verify loop driven by a vision LLM (DeepSeek
+Vision via HF Router / deepinfra). Each step looks at the *current* screenshot
 and decides ONE next action, then executes it, then looks again — the way a
 human operates.
 
@@ -98,11 +98,19 @@ class LLMPlanner:
             return
         try:
             path.mkdir(parents=True, exist_ok=True)
+            # Record the actual configured vision model (DeepSeek Vision) rather
+            # than a stale hardcoded label, so traces are truthful.
+            model = None
+            if self.brain is not None and hasattr(self.brain, "resolved_model"):
+                try:
+                    model = self.brain.resolved_model()
+                except Exception:
+                    model = None
             rec = {
                 "goal": goal,
                 "outcome": outcome,
                 "target": target,
-                "model": "MiniMaxAI/MiniMax-M3",
+                "model": model,
                 "steps": self._history,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }

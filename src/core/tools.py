@@ -330,7 +330,7 @@ TOOLS = [
                     },
                     "llm": {
                         "type": "boolean",
-                        "description": "Use the LLM vision planner (perceive->decide->act loop, MiniMax-M3). Default true. Set false to use the deterministic planner."
+                        "description": "Use the LLM vision planner (perceive->decide->act loop, DeepSeek Vision). Default true. Set false to use the deterministic planner."
                     },
                     "step_cap": {
                         "type": "integer",
