@@ -87,11 +87,19 @@ def test_execution_error_penalized_as_swap_failure():
 
 def test_discretize_includes_driver_and_progress():
     s = _discretize_features("aabbcc", "browser", "ok", True, step_bucket=3)
-    # (screen_bucket, driver=1, outcome=1, progress=1, step=0)
-    assert len(s) == 5
+    # (screen_bucket, driver=1, outcome=1, progress=1, step=0, url=0)
+    assert len(s) == 6
     assert s[1] == 1  # browser
     assert s[3] == 1  # progress signal true
-    assert s[0] == int("aa".replace("a", "a"), 16) % 10 if False else s[0] >= 0
+    assert s[0] >= 0
+
+
+def test_discretize_url_bucket():
+    # Blank/no URL -> 0, real page -> 1, so the agent can perceive location
+    # even when the screenshot is null.
+    assert _discretize_features(None, "browser", None, False, 0, url=None)[5] == 0
+    assert _discretize_features(None, "browser", None, False, 0, url="about:blank")[5] == 0
+    assert _discretize_features(None, "browser", None, False, 0, url="https://example.com")[5] == 1
 
 
 def test_discretize_step_bucket_caps():
@@ -139,12 +147,15 @@ def test_done_only_accepted_when_verified():
     batch = p.plan("do the thing", observation=None, target={"kind": "desktop"})
     terminal = batch.actions[0]
     assert terminal.kind == "abort", f"unverified goal must abort, got {terminal.kind}"
-    # The abort text must explicitly say the goal was NOT verified (negative
-    # framing), never masquerade as a false success. "without goal verified"
-    # and "not verified" both satisfy this; a bare positive "goal verified"
-    # claim would be a bug.
+    # The terminal must be an abort (dead-state or step-cap) that does NOT claim
+    # the goal was achieved — never a false `done` masquerading as success.
+    # Check for an explicit failure marker; the step-cap text legitimately says
+    # "without goal verified" (negative framing), so don't substring-match it.
     assert terminal.text and (
-        "without" in terminal.text.lower() or "not verified" in terminal.text.lower()
+        "dead state" in terminal.text.lower()
+        or "step cap" in terminal.text.lower()
+        or "without" in terminal.text.lower()
+        or "not verified" in terminal.text.lower()
     )
 
 

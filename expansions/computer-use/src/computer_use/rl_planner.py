@@ -54,14 +54,16 @@ def _discretize_features(
     last_outcome: str | None,
     progress_signal: bool,
     step_bucket: int,
+    url: str | None = None,
 ) -> tuple:
     """Map continuous/rich signals into a compact discrete state tuple.
 
     Richer features than a bare screen hash: we fold in the active driver, the
     outcome of the previous step, a goal-progress signal (does the current
-    screen/keyboard state already satisfy part of the goal?), and a coarse step
-    count. Each feature is bucketed so the Q-table stays discrete and small
-    enough for tabular learning.
+    screen/keyboard state already satisfy part of the goal?), a coarse step
+    count, and a URL bucket so the agent can perceive WHERE it is (about:blank
+    vs a real page) even when the screenshot is null. Each feature is bucketed
+    so the Q-table stays discrete and small enough for tabular learning.
     """
     # Screen hash bucket: coarse hash of the perceptual hash (10 buckets).
     if screen_hash:
@@ -82,12 +84,18 @@ def _discretize_features(
 
     step_bucket_capped = 0 if step_bucket < 5 else (1 if step_bucket < 10 else 2)
 
+    # URL bucket: 0 = blank/no URL, 1 = non-blank page. Gives the agent a
+    # perception of location even when the screenshot is null.
+    u = (url or "").strip().lower()
+    url_bucket = 0 if (not u or u in ("about:blank", "about:blank#")) else 1
+
     return (
         screen_bucket,
         driver_bucket,
         outcome_bucket,
         1 if progress_signal else 0,
         step_bucket_capped,
+        url_bucket,
     )
 
 
@@ -302,6 +310,7 @@ class RLPlanner:
                 last_outcome,
                 progress_met,
                 step_bucket,
+                url=(observation.url if observation is not None else None),
             )
 
             # 4. Dead-state guard — fail-closed, do not churn/stream forever.
