@@ -508,8 +508,8 @@ def _run_computer(arguments: dict, chat_id: str = "") -> str:
         except Exception:
             target = None
     dry_run = bool(arguments.get("dry_run", False))
-    llm = bool(arguments.get("llm", True))
-    rl = bool(arguments.get("rl", False))
+    llm = bool(arguments.get("llm", False))
+    rl = bool(arguments.get("rl", True))
     step_cap = int(arguments.get("step_cap", 10) or 10)
     try:
         from core.expansions.computer_use_bridge import run_computer_task
