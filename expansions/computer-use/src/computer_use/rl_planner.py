@@ -199,6 +199,33 @@ class RLPlanner:
         row = self._q.get(state)
         return max(row) if row else 0.0
 
+    def _seed_goal_policy(self, goal: str, driver: str) -> None:
+        """Pre-bias the Q-table so a cold-start agent starts with the right
+        action instead of random exploration.
+
+        Cold-start tabular Q-learning has no prior that \"goal contains an
+        http(s) URL -> navigate first\". Without a seed it explores randomly
+        over the whole action space and never lands on navigate within a short
+        live run. Here we raise the Q value of the `navigate` action for
+        blank-url states (url_bucket=0) when the goal mentions a URL, so
+        epsilon-greedy's argmax picks navigate first.
+        """
+        if "http" not in (goal or "").lower():
+            return
+        nav_idx = self.ACTION_KINDS.index("navigate")
+        # Blank-url states: (screen_bucket, driver_bucket, outcome_bucket,
+        # progress, step_bucket, url_bucket=0). Seed a positive navigate bias
+        # across the plausible screen/outcome buckets for this driver.
+        driver_bucket = 0 if driver == "desktop" else 1 if driver == "browser" else 2
+        for screen in range(10):
+            for outcome in range(6):
+                for progress in (0, 1):
+                    for step in range(3):
+                        state = (screen, driver_bucket, outcome, progress, step, 0)
+                        row = self._row(state)
+                        if row[nav_idx] <= 0.0:
+                            row[nav_idx] = 1.0
+
     def _select_action_idx(self, state: tuple) -> int:
         import random
         # Epsilon-greedy: explore a random action with prob epsilon.
@@ -290,6 +317,13 @@ class RLPlanner:
         step_bucket = 0
         driver = (target.get("kind") or "desktop")
         self._dead_streak = 0
+
+        # Goal-aware seed policy: cold-start tabular Q-learning has no prior
+        # that "goal contains http(s) -> navigate first". Without a seed it
+        # explores randomly and never lands on navigate within a short live
+        # run. Pre-bias the navigate action for blank-url states so the agent
+        # starts with the right bias instead of random exploration.
+        self._seed_goal_policy(goal, driver)
 
         for step in range(1, self.step_cap + 1):
             # 1. Perceive — capture the current screen.
