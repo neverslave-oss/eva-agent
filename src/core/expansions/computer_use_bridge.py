@@ -186,6 +186,7 @@ def run_computer_task(
     target: dict | None = None,
     dry_run: bool = True,
     llm: bool = False,
+    rl: bool = False,
     step_cap: int = 10,
     confirm_callback=None,
     watch_callback=None,
@@ -196,6 +197,7 @@ def run_computer_task(
 
     from computer_use.orchestrator import Orchestrator  # type: ignore
     from computer_use.planner import Planner  # type: ignore
+    from computer_use.rl_planner import RLPlanner  # type: ignore
     from computer_use.safety import PolicyEngine  # type: ignore
     from computer_use.state_store import StateStore  # type: ignore
     from computer_use.telemetry import TraceCollector  # type: ignore
@@ -278,6 +280,17 @@ def run_computer_task(
             confirm_callback=confirm_callback,
             watch_callback=watch_callback,
             stuck_callback=stuck_callback,
+        )
+    elif rl:
+        # RL-driven perceive->decide->act planner (tabular Q-learning). Uses
+        # verified rewards and fail-closed dead-state abort so it never storms
+        # Telegram with an unverified step-cap 'ok'. Same plan() contract as
+        # the other planners, so the orchestrator is unchanged.
+        planner = RLPlanner(
+            driver=driver,
+            policy=policy,
+            step_cap=step_cap,
+            dry_run=dry_run,
         )
     else:
         planner = Planner()
