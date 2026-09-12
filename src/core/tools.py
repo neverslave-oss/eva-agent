@@ -509,6 +509,7 @@ def _run_computer(arguments: dict, chat_id: str = "") -> str:
             target = None
     dry_run = bool(arguments.get("dry_run", False))
     llm = bool(arguments.get("llm", True))
+    rl = bool(arguments.get("rl", False))
     step_cap = int(arguments.get("step_cap", 10) or 10)
     try:
         from core.expansions.computer_use_bridge import run_computer_task
@@ -518,6 +519,7 @@ def _run_computer(arguments: dict, chat_id: str = "") -> str:
             target=target,
             dry_run=dry_run,
             llm=llm,
+            rl=rl,
             step_cap=step_cap,
         )
         return json.dumps(result, ensure_ascii=False)
