@@ -364,6 +364,15 @@ class RLPlanner:
                 goal, observation, screenshot, prev_obs_sig=self._obs_sig
             )
 
+            # 2.5 Terminal: goal verified → emit `done` immediately and stop.
+            # Without this the ε-greedy policy keeps picking `observe` and
+            # churns +100 rewards to step-cap; a verified goal is terminal, so
+            # we must end the run with `done` (and the terminal +100) right
+            # here rather than letting exploration pick another action.
+            if goal_met:
+                logger.info("[rl_planner] step %d: goal verified — emitting done", step)
+                return self._finish(history, goal, target, Action(kind="done", text="goal verified"))
+
             # 3. Discrete state from richer features.
             state = _discretize_features(
                 self._screen_hash(screenshot),
