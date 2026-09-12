@@ -446,10 +446,22 @@ class RLPlanner:
             return None
 
     @staticmethod
+    def _extract_url(goal: str) -> str:
+        """Pull the first http(s) URL out of a goal string, else empty."""
+        import re
+        m = re.search(r"https?://[^\s\"']+", goal or "")
+        return m.group(0).rstrip(".),") if m else ""
+
+    @staticmethod
     def _action_from_kind(kind: str, driver: str, goal: str) -> Action:
-        """Bind a discrete action kind into a concrete Action. Parametrization
-        (exact selector/text/url) is delegated to the execution layer; the RL
-        agent owns WHAT to do and WHICH medium."""
+        """Bind a discrete action kind into a concrete Action, goal-aware.
+
+        The RL agent owns WHAT to do and WHICH medium; here we bind the goal
+        content so the action can actually execute: `navigate` gets the URL
+        from the goal, `type` gets the text to enter, `hotkey` gets a sensible
+        key. Without this, navigate fired with an empty URL (driver rejects it)
+        and type had no text — the RL loop churned into observe->error->dead.
+        """
         if kind == "done":
             return Action(kind="done", driver=driver)
         if kind == "abort":
@@ -457,9 +469,21 @@ class RLPlanner:
         if kind == "driver_swap":
             return Action(kind="observe", driver=driver)
         if kind == "navigate":
-            return Action(kind="navigate", url="", driver=driver)
+            return Action(kind="navigate", url=RLPlanner._extract_url(goal), driver=driver)
         if kind == "click":
             return Action(kind="click", selector="0,0", driver=driver)
-        if kind in ("observe", "scroll", "wait", "hotkey", "type", "submit"):
+        if kind == "type":
+            # Type the tail of the goal after a fill/type verb, stripped of
+            # quotes/punctuation, as a best-effort text binding.
+            text = (goal or "").strip()
+            for verb in ("type ", "fill ", "enter ", "type:", "fill:"):
+                if verb in text:
+                    text = text.split(verb, 1)[1]
+                    break
+            text = text.strip().strip('"\'')
+            return Action(kind="type", text=text, driver=driver)
+        if kind == "hotkey":
+            return Action(kind="hotkey", text="ctrl+l", driver=driver)
+        if kind in ("observe", "scroll", "wait", "submit"):
             return Action(kind=kind, driver=driver)
         return Action(kind="observe", driver=driver)
