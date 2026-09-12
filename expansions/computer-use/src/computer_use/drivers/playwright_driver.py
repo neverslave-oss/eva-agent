@@ -147,6 +147,55 @@ class PlaywrightDriver(BaseDriver):
         except Exception:
             return None
 
+    def _frame_image(self):
+        """Decode the current screenshot into a PIL image, or None on failure."""
+        try:
+            from PIL import Image
+            import io
+            png = self._page.screenshot()
+            return Image.open(io.BytesIO(png))
+        except Exception:
+            return None
+
+    def is_frame_black(self, threshold: float = 6.0) -> bool:
+        """True when the captured browser frame is effectively black/locked.
+
+        Mirrors the pyautogui driver so the black/locked guard also fires on
+        browser frames (a failed launch / blank compositor surface). Returns
+        False on any capture error so we never block on a transient failure.
+        """
+        try:
+            img = self._frame_image()
+            if img is None:
+                return False
+            gray = img.convert("L")
+            px = list(gray.getdata())
+            mean = sum(px) / float(len(px)) if px else 0.0
+            return mean < threshold
+        except Exception:
+            return False
+
+    def is_frame_white(self, threshold: float = 250.0, near_white_ratio: float = 0.95) -> bool:
+        """True when the captured browser frame is effectively blank-white.
+
+        Mirrors the pyautogui driver so the white-blank guard also fires on
+        browser frames (a browser that failed to launch and left a white
+        compositor surface). Returns False on any capture error.
+        """
+        try:
+            img = self._frame_image()
+            if img is None:
+                return False
+            gray = img.convert("L")
+            px = list(gray.getdata())
+            if not px:
+                return False
+            mean = sum(px) / float(len(px))
+            near_white = sum(1 for v in px if v > threshold) / float(len(px))
+            return mean > threshold and near_white > near_white_ratio
+        except Exception:
+            return False
+
     @staticmethod
     def _state_hash(url: str | None, text: str) -> str:
         import hashlib
