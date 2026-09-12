@@ -358,6 +358,12 @@ class VisionBrain:
         self.last_error = None
         messages = _build_messages(goal, screenshot, history or [], hint=hint)
         provider = self._get_provider()
+        # --- MODEL IO LOG (grep-able) ---
+        try:
+            logger.info("\n---input---\n%s\n---end--",
+                        json.dumps(messages, ensure_ascii=False)[:8000])
+        except Exception:
+            pass
         try:
             raw = provider.infer(
                 messages, max_new_tokens=max_new_tokens, call_type=self.call_type
@@ -366,6 +372,10 @@ class VisionBrain:
             self.last_error = f"inference failed: {e}"
             logger.error("[vision_brain] %s", self.last_error)
             return None
+        try:
+            logger.info("\n---output---\n%s\n---end--", str(raw)[:8000])
+        except Exception:
+            pass
         self.last_raw = raw
         if not raw:
             self.last_error = "inference returned empty response"
@@ -396,6 +406,12 @@ class VisionBrain:
         messages = _build_messages(goal, screenshot, history or [], hint=hint,
                                    system=_SYSTEM_PLAN)
         provider = self._get_provider()
+        # --- MODEL IO LOG (grep-able) ---
+        try:
+            logger.info("\n---input---\n%s\n---end--",
+                        json.dumps(messages, ensure_ascii=False)[:8000])
+        except Exception:
+            pass
         try:
             raw = provider.infer(
                 messages, max_new_tokens=max_new_tokens, call_type=self.call_type
@@ -404,6 +420,10 @@ class VisionBrain:
             self.last_error = f"inference failed: {e}"
             logger.error("[vision_brain] %s", self.last_error)
             return None
+        try:
+            logger.info("\n---output---\n%s\n---end--", str(raw)[:8000])
+        except Exception:
+            pass
         self.last_raw = raw
         if not raw:
             self.last_error = "inference returned empty response"
