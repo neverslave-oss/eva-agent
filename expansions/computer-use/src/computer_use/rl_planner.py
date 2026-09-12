@@ -153,6 +153,10 @@ class RLPlanner:
         self._execute = execute_override
         self._verify = verify_override
         self._dead_streak = 0
+        # Signature of the last observation, used for the general progress
+        # signal ("the world changed since the last step"). Modality-agnostic:
+        # works for browser (url/text) and desktop (screen) alike.
+        self._obs_sig: str | None = None
 
     # ── Q-table persistence ───────────────────────────────────────────────
     def load_q(self, path: str | None = None) -> bool:
@@ -346,7 +350,12 @@ class RLPlanner:
                     logger.warning("[rl_planner] observe failed: %s", e)
 
             # 2. Progress / goal verification signal.
-            goal_met, progress_met = self._run_verify(goal, observation, screenshot)
+            # General progress: the world changed since the last step (screen
+            # hash or observed text/URL moved). This is modality-agnostic — it
+            # works for browser AND desktop, unlike a URL-specific gate.
+            goal_met, progress_met = self._run_verify(
+                goal, observation, screenshot, prev_obs_sig=self._obs_sig
+            )
 
             # 3. Discrete state from richer features.
             state = _discretize_features(
@@ -436,6 +445,10 @@ class RLPlanner:
             last_sig = self._action_sig(action)
             last_outcome = outcome
             step_bucket += 1
+            # Remember this step's observation signature for the general
+            # progress signal on the next step ("the world changed").
+            if observation is not None:
+                self._obs_sig = self._obs_signature(observation, screenshot)
 
         # Step cap reached without goal.
         return self._finish(history, goal, target, Action(kind="abort", text="step cap reached without goal verified (return abort, not ok)"))
@@ -462,28 +475,47 @@ class RLPlanner:
                 return {"status": "error", "error": str(e)}
         return {"status": "ok"}
 
-    def _run_verify(self, goal: str, observation, screenshot) -> tuple[bool, bool]:
-        """Return (goal_met, progress_met). Goal/progress come from an injectable
-        verifier when available; otherwise use cheap heuristic signals on the
-        observation/URL (goal text present in page = progress)."""
+    def _run_verify(self, goal: str, observation, screenshot, prev_obs_sig: str | None = None) -> tuple[bool, bool]:
+        """Return (goal_met, progress_met).
+
+        goal_met: injectable verifier when available, else False (a general
+        goal verifier must inspect whatever modality exists — text, URL, or
+        screen — never assume a URL).
+
+        progress_met: GENERAL, modality-agnostic signal. When an injectable
+        verifier exists it decides; otherwise progress = "the world changed
+        since the last step" (observation signature differs from the previous
+        step). This works for browser AND desktop — no URL assumption.
+        """
         if self._verify is not None:
             try:
                 return self._verify(goal, observation, screenshot)
             except Exception:
                 pass
-        # Cheap default: if the observation contains a URL/text, treat matching
-        # the goal as progress only if we actually observed something.
+        # General default: progress = the world changed since the last step.
+        # Compare the current observation signature to the previous one.
         goal_met = False
         progress_met = False
         if observation is not None:
-            haystack = " ".join([
-                str(observation.url or ""),
-                str(observation.text or ""),
-            ])
-            g = (goal or "").strip().lower()
-            if g and len(g) > 3:
-                progress_met = any(w in haystack.lower() for w in g.split()[:2])
+            sig = self._obs_signature(observation, screenshot)
+            progress_met = bool(sig) and sig != prev_obs_sig
         return goal_met, progress_met
+
+    @staticmethod
+    def _obs_signature(observation, screenshot) -> str | None:
+        """A stable signature of what the agent currently perceives, across
+        modalities: URL, visible text, and screen hash. Used as the general
+        progress signal ("the world changed"). None when nothing is observed.
+        """
+        parts = []
+        if observation is not None:
+            if observation.url:
+                parts.append("u:" + str(observation.url))
+            if observation.text:
+                parts.append("t:" + str(observation.text)[:2000])
+        if screenshot:
+            parts.append("s:" + str(RLPlanner._screen_hash(screenshot)))
+        return "|".join(parts) if parts else None
 
     @staticmethod
     def _screen_hash(screenshot) -> str | None:
