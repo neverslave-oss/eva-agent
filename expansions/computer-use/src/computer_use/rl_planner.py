@@ -307,6 +307,10 @@ class RLPlanner:
             # 5. Pick next action (epsilon-greedy over Q).
             action_idx = self._select_action_idx(state)
             action = self._action_from_kind(self.ACTION_KINDS[action_idx], driver, goal)
+            logger.info("[rl_planner] step %d/%d: state=%s action=%s(%s) goal_met=%s progress=%s",
+                        step, self.step_cap, list(state), action.kind,
+                        (action.selector or action.text or action.url or "")[:40],
+                        goal_met, progress_met)
 
             # 6. Guardrails: policy + terminal + blind.
             if action.kind == "done":
@@ -363,6 +367,9 @@ class RLPlanner:
                 "reward": reward,
                 "outcome": outcome,
             })
+            logger.info("[rl_planner] step %d: executed=%s outcome=%s reward=%+.2f Q[%s][%s]=%.3f",
+                        step, action.kind, outcome, reward, list(state), action_idx,
+                        self._row(state)[action_idx])
             last_sig = self._action_sig(action)
             last_outcome = outcome
             step_bucket += 1
