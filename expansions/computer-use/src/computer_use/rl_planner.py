@@ -137,6 +137,7 @@ class RLPlanner:
         q_path: str | None = None,
         execute_override=None,  # injectable executor for deterministic tests
         verify_override=None,   # injectable goal/step verifier for deterministic tests
+        watch_callback=None,    # fn(screenshot, caption) -> None (Telegram stream)
     ):
         self.driver = driver
         self.policy = policy or PolicyEngine({})
@@ -152,6 +153,7 @@ class RLPlanner:
         self._n_actions = len(self.ACTION_KINDS)
         self._execute = execute_override
         self._verify = verify_override
+        self.watch_callback = watch_callback
         self._dead_streak = 0
         # Signature of the last observation, used for the general progress
         # signal ("the world changed since the last step"). Modality-agnostic:
@@ -349,6 +351,11 @@ class RLPlanner:
                 except Exception as e:
                     logger.warning("[rl_planner] observe failed: %s", e)
 
+            # Stream this step's screenshot to the user (Telegram) when a
+            # watch_callback is wired — mirrors the LLM planner path so RL
+            # runs show live progress instead of silence.
+            self._watch(screenshot, f"step {step}/{self.step_cap}: {goal}")
+
             # 2. Progress / goal verification signal.
             # General progress: the world changed since the last step (screen
             # hash or observed text/URL moved). This is modality-agnostic — it
@@ -516,6 +523,16 @@ class RLPlanner:
         if screenshot:
             parts.append("s:" + str(RLPlanner._screen_hash(screenshot)))
         return "|".join(parts) if parts else None
+
+    def _watch(self, screenshot: str | None, caption: str) -> None:
+        """Stream a screenshot to the user (Telegram) when a watch_callback is
+        wired — mirrors the LLM planner path so RL runs show live progress."""
+        if self.watch_callback is None:
+            return
+        try:
+            self.watch_callback(screenshot, caption)
+        except Exception as e:
+            logger.warning("[rl_planner] watch callback error: %s", e)
 
     @staticmethod
     def _screen_hash(screenshot) -> str | None:

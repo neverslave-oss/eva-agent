@@ -285,12 +285,17 @@ def run_computer_task(
         # RL-driven perceive->decide->act planner (tabular Q-learning). Uses
         # verified rewards and fail-closed dead-state abort so it never storms
         # Telegram with an unverified step-cap 'ok'. Same plan() contract as
-        # the other planners, so the orchestrator is unchanged.
+        # the other planners, so the orchestrator is unchanged. Wire the same
+        # watch_callback as the LLM path so RL runs stream live screenshots to
+        # Telegram instead of running silent.
+        if watch_callback is None:
+            watch_callback = _default_watch_callback(chat_id)
         planner = RLPlanner(
             driver=driver,
             policy=policy,
             step_cap=step_cap,
             dry_run=dry_run,
+            watch_callback=watch_callback,
         )
     else:
         planner = Planner()
