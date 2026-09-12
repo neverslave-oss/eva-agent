@@ -326,13 +326,22 @@ class RLPlanner:
         self._seed_goal_policy(goal, driver)
 
         for step in range(1, self.step_cap + 1):
-            # 1. Perceive — capture the current screen.
+            # 1. Perceive — capture the current screen + location.
             screenshot = None
+            # The bridge passes observation=None, so we must read the URL/text
+            # from the driver itself — otherwise url_bucket stays 0 and the
+            # agent can't perceive that it navigated (the live run showed
+            # url stuck at about:blank even after navigate).
             if self.driver is not None:
                 try:
                     screenshot = self.driver.screenshot()
                 except Exception as e:
                     logger.warning("[rl_planner] screenshot failed: %s", e)
+                if observation is None:
+                    try:
+                        observation = self.driver.observe(target)
+                    except Exception as e:
+                        logger.warning("[rl_planner] observe failed: %s", e)
 
             # 2. Progress / goal verification signal.
             goal_met, progress_met = self._run_verify(goal, observation, screenshot)
