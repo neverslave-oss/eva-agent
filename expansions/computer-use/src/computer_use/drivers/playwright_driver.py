@@ -31,10 +31,20 @@ def _load_playwright():
     return _playwright
 
 
-def _default_chromium() -> str | None:
-    """Return a usable chromium executable path, or None."""
-    for cand in ("/usr/bin/chromium", "/usr/bin/chromium-browser",
-                 "/usr/bin/google-chrome", "/usr/bin/google-chrome-stable"):
+def _default_firefox() -> str | None:
+    """Return a Firefox executable path, or None to use Playwright's bundled build.
+
+    Prefers Playwright's own Firefox build (firefox-1538) because the system
+    Firefox (firefox-esr) is often incompatible with Playwright's CDP protocol
+    and fails to launch. Only falls back to a system Firefox when the bundled
+    build is absent.
+    """
+    import glob
+    bundled = glob.glob(os.path.expanduser("~/.cache/ms-playwright/firefox-*/firefox/firefox"))
+    if bundled:
+        return None  # let Playwright use its compatible bundled Firefox
+    for cand in ("/usr/bin/firefox", "/usr/bin/firefox-esr",
+                 "/usr/local/bin/firefox"):
         if os.path.exists(cand):
             return cand
     return None
@@ -61,7 +71,7 @@ def _parse_coords(sel: str) -> tuple[int, int] | None:
 
 
 class PlaywrightDriver(BaseDriver):
-    """Real browser driver. Each instance owns one browser context.
+    """Real browser driver backed by Firefox. Each instance owns one browser context.
 
     The browser is launched lazily on first observe/execute and closed on
     close(). This keeps the expansion side-effect-free until actually used.
@@ -69,7 +79,7 @@ class PlaywrightDriver(BaseDriver):
 
     def __init__(self, executable_path: str | None = None, headless: bool = True,
                  trace_dir: str | Path | None = None):
-        self.executable_path = executable_path or _default_chromium()
+        self.executable_path = executable_path or _default_firefox()
         self.headless = headless
         self.trace_dir = Path(trace_dir) if trace_dir else None
         self._pw = None
@@ -86,7 +96,7 @@ class PlaywrightDriver(BaseDriver):
         launch_kwargs = {"headless": self.headless}
         if self.executable_path:
             launch_kwargs["executable_path"] = self.executable_path
-        self._browser = self._pw.chromium.launch(**launch_kwargs)
+        self._browser = self._pw.firefox.launch(**launch_kwargs)
         self._context = self._browser.new_context()
         if self.trace_dir:
             self.trace_dir.mkdir(parents=True, exist_ok=True)
