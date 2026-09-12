@@ -331,17 +331,19 @@ class RLPlanner:
             # The bridge passes observation=None, so we must read the URL/text
             # from the driver itself — otherwise url_bucket stays 0 and the
             # agent can't perceive that it navigated (the live run showed
-            # url stuck at about:blank even after navigate).
+            # url stuck at about:blank even after navigate). Refresh the
+            # observation EVERY step, not just the first: a stale observation
+            # captured at about:blank is reused forever, so url_bucket never
+            # updates after navigate even though the page changed.
             if self.driver is not None:
                 try:
                     screenshot = self.driver.screenshot()
                 except Exception as e:
                     logger.warning("[rl_planner] screenshot failed: %s", e)
-                if observation is None:
-                    try:
-                        observation = self.driver.observe(target)
-                    except Exception as e:
-                        logger.warning("[rl_planner] observe failed: %s", e)
+                try:
+                    observation = self.driver.observe(target)
+                except Exception as e:
+                    logger.warning("[rl_planner] observe failed: %s", e)
 
             # 2. Progress / goal verification signal.
             goal_met, progress_met = self._run_verify(goal, observation, screenshot)
