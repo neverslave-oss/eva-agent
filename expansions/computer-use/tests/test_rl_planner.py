@@ -165,3 +165,52 @@ def test_save_load_q_roundtrip(tmp_path):
     p2 = RLPlanner()
     assert p2.load_q(path)
     assert p2._row(s)[0] == 42.0
+
+
+# ── Desktop-app launch (A: launch action) ────────────────────────────────
+
+def test_launch_in_action_space():
+    """`launch` must be a selectable RL action so the agent can open an app."""
+    p = RLPlanner()
+    assert "launch" in p.ACTION_KINDS
+    assert p._n_actions == len(p.ACTION_KINDS)
+
+
+def test_launch_binding_extracts_app():
+    """_action_from_kind('launch', ...) binds the goal's app name."""
+    a = RLPlanner._action_from_kind("launch", "desktop", "Open the Thunar file manager application on the desktop")
+    assert a.kind == "launch"
+    assert a.driver == "desktop"
+    assert a.text == "thunar"
+
+
+def test_extract_app_verb_and_skip_url():
+    assert RLPlanner._extract_app("Open the Firefox web browser") == "firefox"
+    assert RLPlanner._extract_app("navigate to https://example.com") == ""
+    assert RLPlanner._extract_app("launch the Thunar file manager") == "thunar"
+
+
+def test_launch_seeded_for_desktop_goal():
+    """A desktop-app goal (no URL) pre-biases `launch`, not navigate."""
+    p = RLPlanner()
+    p._seed_goal_policy("Open the Thunar file manager", "desktop")
+    s = (0, 0, 0, 0, 0, 0)
+    launch_idx = p.ACTION_KINDS.index("launch")
+    nav_idx = p.ACTION_KINDS.index("navigate")
+    assert p._row(s)[launch_idx] > 0.0
+    assert p._row(s)[nav_idx] == 0.0
+
+
+def test_navigate_seeded_for_url_goal_not_launch():
+    p = RLPlanner()
+    p._seed_goal_policy("navigate to https://example.com", "browser")
+    s = (0, 1, 0, 0, 0, 0)
+    nav_idx = p.ACTION_KINDS.index("navigate")
+    launch_idx = p.ACTION_KINDS.index("launch")
+    assert p._row(s)[nav_idx] > 0.0
+    assert p._row(s)[launch_idx] == 0.0
+
+
+def test_launch_action_sig_unique():
+    assert RLPlanner._action_sig(Action(kind="launch", text="thunar")) == "launch:thunar"
+    assert RLPlanner._action_sig(Action(kind="launch", text="firefox")) == "launch:firefox"

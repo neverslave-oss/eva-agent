@@ -117,6 +117,7 @@ class RLPlanner:
         "type",
         "hotkey",
         "navigate",
+        "launch",
         "scroll",
         "wait",
         "driver_swap",
@@ -232,6 +233,20 @@ class RLPlanner:
         epsilon-greedy's argmax picks navigate first.
         """
         if "http" not in (goal or "").lower():
+            # Desktop-app goal (no URL): seed `launch` bias so a cold-start
+            # agent opens the named app instead of churning observe/scroll.
+            app = RLPlanner._extract_app(goal)
+            if app:
+                launch_idx = self.ACTION_KINDS.index("launch")
+                driver_bucket = 0 if driver == "desktop" else 1 if driver == "browser" else 2
+                for screen in range(10):
+                    for outcome in range(6):
+                        for progress in (0, 1):
+                            for step in range(3):
+                                state = (screen, driver_bucket, outcome, progress, step, 0)
+                                row = self._row(state)
+                                if row[launch_idx] <= 0.0:
+                                    row[launch_idx] = 1.5
             return
         nav_idx = self.ACTION_KINDS.index("navigate")
         # Blank-url states: (screen_bucket, driver_bucket, outcome_bucket,
@@ -590,10 +605,50 @@ class RLPlanner:
 
         # 2. Text goal: a distinctive goal token present in the observed text.
         tokens = [w for w in _re.split(r"[^A-Za-z0-9]+", g) if len(w) >= 5]
-        if not tokens:
-            return False
         low_text = obs_text.lower()
-        return any(t.lower() in low_text for t in tokens)
+        if tokens and any(t.lower() in low_text for t in tokens):
+            return True
+
+        # 3. Desktop-app goal: the goal names an app (no URL, no text match) —
+        #    confirm when a matching window is present on the desktop. This is
+        #    the real done-signal that lets desktop tasks terminate with a
+        #    verified `done` instead of "no URL = no progress -> dead/abort".
+        return RLPlanner._desktop_window_present(goal)
+
+    @staticmethod
+    def _desktop_window_present(goal: str, display: str | None = None) -> bool:
+        """True when an X window whose title matches a goal-named app exists.
+
+        Uses xdotool (available on this Kali host; wmctrl isn't) to list window
+        titles, then checks whether any title contains an app name drawn from
+        the goal (via _extract_app or distinctive tokens). Best-effort: any
+        failure returns False so verification never false-positives.
+        """
+        try:
+            import subprocess
+            import re as _re
+            app = (RLPlanner._extract_app(goal) or "").lower()
+            if not app:
+                return False
+            env = dict(os.environ)
+            env["DISPLAY"] = display or os.environ.get("DISPLAY") or ":0"
+            out = subprocess.run(
+                ["xdotool", "search", "--onlyvisible", "--name", ".*"],
+                env=env, capture_output=True, text=True, timeout=5,
+            )
+            if out.returncode != 0:
+                return False
+            wins = [w for w in out.stdout.split() if w.isdigit()]
+            for wid in wins[:80]:
+                t = subprocess.run(
+                    ["xdotool", "getwindowname", wid],
+                    env=env, capture_output=True, text=True, timeout=3,
+                )
+                if t.returncode == 0 and app.lower() in t.stdout.lower():
+                    return True
+        except Exception:
+            return False
+        return False
 
     @staticmethod
     def _obs_signature(observation, screenshot) -> str | None:
@@ -652,6 +707,33 @@ class RLPlanner:
         return m.group(0).rstrip(".),") if m else ""
 
     @staticmethod
+    def _extract_app(goal: str) -> str:
+        """Pull a desktop app name out of a goal string, else empty.
+
+        Heuristic, best-effort: prefer an explicit launch/open verb target
+        ("open Thunar" -> "thunar"), else a capitalized standalone token
+        that isn't a URL. Only used to bind/seed the `launch` action; the
+        desktop driver resolves the actual binary via PATH/xdg-open.
+        """
+        import re
+        g = (goal or "").strip()
+        if not g:
+            return ""
+        skip = {"the", "a", "an", "browser", "desktop", "web", "file", "manager", "application"}
+        for m in re.finditer(
+            r"\b(?:open|launch|start)\s+(?:the\s+)?([A-Za-z][A-Za-z0-9_.-]{1,40})",
+            g, re.IGNORECASE,
+        ):
+            app = m.group(1).lower()
+            if app not in ("browser", "desktop", "web"):
+                return app
+        for tok in re.findall(r"[A-Z][A-Za-z0-9_.-]{1,40}", g):
+            low = tok.lower()
+            if not re.search(r"https?://", low) and low not in skip:
+                return low
+        return ""
+
+    @staticmethod
     def _action_from_kind(kind: str, driver: str, goal: str) -> Action:
         """Bind a discrete action kind into a concrete Action, goal-aware.
 
@@ -683,6 +765,11 @@ class RLPlanner:
             return Action(kind="type", text=text, driver=driver)
         if kind == "hotkey":
             return Action(kind="hotkey", text="ctrl+l", driver=driver)
+        if kind == "launch":
+            # Desktop app launch: bind the app name from the goal (e.g.
+            # "Open the Thunar file manager" -> "thunar"). The desktop driver
+            # resolves it via PATH/xdg-open.
+            return Action(kind="launch", text=RLPlanner._extract_app(goal), driver=driver)
         if kind in ("observe", "scroll", "wait", "submit"):
             return Action(kind=kind, driver=driver)
         return Action(kind="observe", driver=driver)
