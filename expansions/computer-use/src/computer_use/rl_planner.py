@@ -613,42 +613,36 @@ class RLPlanner:
         #    confirm when a matching window is present on the desktop. This is
         #    the real done-signal that lets desktop tasks terminate with a
         #    verified `done` instead of "no URL = no progress -> dead/abort".
-        return RLPlanner._desktop_window_present(goal)
+        return RLPlanner._desktop_app_open(goal)
 
     @staticmethod
-    def _desktop_window_present(goal: str, display: str | None = None) -> bool:
-        """True when an X window whose title matches a goal-named app exists.
+    def _desktop_app_open(goal: str) -> bool:
+        """True when the goal-named desktop app is actually running.
 
-        Uses xdotool (available on this Kali host; wmctrl isn't) to list window
-        titles, then checks whether any title contains an app name drawn from
-        the goal (via _extract_app or distinctive tokens). Best-effort: any
-        failure returns False so verification never false-positives.
+        The window-title heuristic failed for Thunar: its title is the folder
+        name ("repositories — File Manager"), not the binary name "thunar", so
+        matching on window titles never saw the app the `launch` action opened.
+        A running process is the reliable signal — if `launch` succeeded (A),
+        the app binary appears in pgrep. Best-effort: any failure returns False
+        so verification never false-positives.
         """
+        import subprocess
+        app = (RLPlanner._extract_app(goal) or "").lower()
+        if not app:
+            return False
         try:
-            import subprocess
-            import re as _re
-            app = (RLPlanner._extract_app(goal) or "").lower()
-            if not app:
-                return False
-            env = dict(os.environ)
-            env["DISPLAY"] = display or os.environ.get("DISPLAY") or ":0"
             out = subprocess.run(
-                ["xdotool", "search", "--onlyvisible", "--name", ".*"],
-                env=env, capture_output=True, text=True, timeout=5,
+                ["pgrep", "-x", app], capture_output=True, text=True, timeout=5,
             )
-            if out.returncode != 0:
-                return False
-            wins = [w for w in out.stdout.split() if w.isdigit()]
-            for wid in wins[:80]:
-                t = subprocess.run(
-                    ["xdotool", "getwindowname", wid],
-                    env=env, capture_output=True, text=True, timeout=3,
-                )
-                if t.returncode == 0 and app.lower() in t.stdout.lower():
-                    return True
+            if out.returncode == 0 and out.stdout.strip():
+                return True
+            # Case/alias fallback: match by substring against command lines.
+            out = subprocess.run(
+                ["pgrep", "-f", app], capture_output=True, text=True, timeout=5,
+            )
+            return out.returncode == 0 and bool(out.stdout.strip())
         except Exception:
             return False
-        return False
 
     @staticmethod
     def _obs_signature(observation, screenshot) -> str | None:

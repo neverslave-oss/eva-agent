@@ -214,3 +214,16 @@ def test_navigate_seeded_for_url_goal_not_launch():
 def test_launch_action_sig_unique():
     assert RLPlanner._action_sig(Action(kind="launch", text="thunar")) == "launch:thunar"
     assert RLPlanner._action_sig(Action(kind="launch", text="firefox")) == "launch:firefox"
+
+
+# ── Desktop-app window/process verifier (B) ──────────────────────────────
+
+def test_extract_app_is_used_for_process_verify():
+    """_desktop_app_open must resolve the app name from the goal then pgrep it.
+    Process-based (not window title): Thunar's title is the folder name, so a
+    title match would never fire after `launch` opens it."""
+    # Can't assert a real process here deterministically, but we CAN assert the
+    # resolution step: the app name extracted feeds pgrep. Verify _extract_app.
+    assert RLPlanner._extract_app("Open the Thunar file manager") == "thunar"
+    # A nonsense absent app must report closed (never false-positive done).
+    assert RLPlanner._desktop_app_open("Open the ZzzDoesNotExistApp") is False
