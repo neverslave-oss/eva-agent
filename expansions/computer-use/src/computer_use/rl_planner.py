@@ -578,8 +578,6 @@ class RLPlanner:
             return False
         obs_url = (observation.url or "") if observation is not None else ""
         obs_text = (observation.text or "") if observation is not None else ""
-        if not obs_url and not obs_text:
-            return False
 
         # 1. URL goal: match host (+ non-trivial path).
         import re as _re
@@ -587,32 +585,37 @@ class RLPlanner:
         if m:
             goal_host = (m.group(1) or "").lower().rstrip("/")
             goal_path = (m.group(2) or "").rstrip("/")
-            if not goal_host:
-                return False
-            try:
-                from urllib.parse import urlparse
-                obs = urlparse(obs_url)
-                obs_host = (obs.hostname or "").lower()
-                obs_path = (obs.path or "").rstrip("/")
-            except Exception:
-                obs_host, obs_path = "", ""
-            if obs_host and obs_host == goal_host:
-                # Non-trivial goal path must also match; else host match suffices.
-                if len(goal_path) > 1:
-                    return obs_path == goal_path
-                return True
+            if goal_host and obs_url:
+                try:
+                    from urllib.parse import urlparse
+                    obs = urlparse(obs_url)
+                    obs_host = (obs.hostname or "").lower()
+                    obs_path = (obs.path or "").rstrip("/")
+                except Exception:
+                    obs_host, obs_path = "", ""
+                if obs_host and obs_host == goal_host:
+                    # Non-trivial goal path must also match; else host match suffices.
+                    if len(goal_path) > 1:
+                        return obs_path == goal_path
+                    return True
             return False
 
         # 2. Text goal: a distinctive goal token present in the observed text.
+        #    (Desktop observations often carry empty URL+text, so this only
+        #    short-circuits on an actual text match — it does NOT gate the
+        #    desktop check below behind non-empty observation.)
         tokens = [w for w in _re.split(r"[^A-Za-z0-9]+", g) if len(w) >= 5]
         low_text = obs_text.lower()
         if tokens and any(t.lower() in low_text for t in tokens):
             return True
 
         # 3. Desktop-app goal: the goal names an app (no URL, no text match) —
-        #    confirm when a matching window is present on the desktop. This is
-        #    the real done-signal that lets desktop tasks terminate with a
-        #    verified `done` instead of "no URL = no progress -> dead/abort".
+        #    confirm when a matching window/process is present on the desktop.
+        #    This runs EVEN when the observation is empty (empty URL+text is
+        #    normal for a desktop window): the app-open check is independent of
+        #    observation content. This is the real done-signal that lets desktop
+        #    tasks terminate with a verified `done` instead of "no observation =
+        #    no progress -> iterate forever / dead/abort".
         return RLPlanner._desktop_app_open(goal)
 
     @staticmethod

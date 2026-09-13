@@ -227,3 +227,26 @@ def test_extract_app_is_used_for_process_verify():
     assert RLPlanner._extract_app("Open the Thunar file manager") == "thunar"
     # A nonsense absent app must report closed (never false-positive done).
     assert RLPlanner._desktop_app_open("Open the ZzzDoesNotExistApp") is False
+
+
+# ── Regression: desktop goal with EMPTY observation must still verify done ─
+
+def test_desktop_goal_verified_even_with_empty_observation(monkeypatch):
+    """Bug: _default_goal_met early-returned False when the observation had
+    empty URL AND empty text, BEFORE reaching the desktop app-open check. For a
+    real desktop run the observation (window) carries no URL/text, so the app
+    the launch action opened was never confirmed -> Eva iterated despite being
+    done. The desktop check must run regardless of observation content."""
+    # Deterministic: stub the pgrep-based app-open check to True (app running).
+    monkeypatch.setattr(RLPlanner, "_desktop_app_open", staticmethod(lambda goal: True))
+    # Observation with empty url and empty text — the real desktop case.
+    obs = type("Obs", (), {"url": "", "text": ""})()
+    assert RLPlanner._default_goal_met(
+        "Open the Thunar file manager application", obs
+    ) is True
+
+
+def test_desktop_goal_with_none_observation_reaches_app_check(monkeypatch):
+    """Observation=None must also reach the desktop check (not early-return)."""
+    monkeypatch.setattr(RLPlanner, "_desktop_app_open", staticmethod(lambda goal: True))
+    assert RLPlanner._default_goal_met("Open the Thunar file manager", None) is True
