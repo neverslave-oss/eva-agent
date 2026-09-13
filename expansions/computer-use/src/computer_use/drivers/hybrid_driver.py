@@ -88,6 +88,18 @@ class HybridDriver(BaseDriver):
 
     def execute(self, action, target: dict) -> dict:
         kind = getattr(action, "kind", None)
+        # `navigate` is inherently browser-only — pyautogui cannot do it, and
+        # the desktop driver returns "unsupported action: navigate". It must
+        # route to the browser NO MATTER what `driver` the planner stamped on
+        # it. The RL planner binds navigate with driver=current mode (desktop),
+        # which the authoritative declared-driver routing would send to the
+        # desktop where it dies every step (agent churns -> step-cap abort).
+        # Intercept before the declared-driver check so navigate always reaches
+        # the browser.
+        if kind == "navigate":
+            self._switch_to_browser("navigate action")
+            return self.browser.execute(action, target)
+
         # The LLM decides the medium for each action via the `driver` field
         # ("desktop" | "browser"). When it declares a driver, switch to it
         # explicitly — this is authoritative and replaces the old fragile
@@ -105,9 +117,7 @@ class HybridDriver(BaseDriver):
         # graceful behavior so nothing regresses.
         if self.mode == "desktop":
             # A `navigate` action is browser-only — pyautogui can't do it.
-            if kind == "navigate":
-                self._switch_to_browser("navigate action")
-                return self.browser.execute(action, target)
+            # (Handled above; kept here defensively for the non-declared path.)
 
             result = self.desktop.execute(action, target)
 
