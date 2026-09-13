@@ -6,9 +6,11 @@ fallback values so kernel boot and normal tool loops are unaffected.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
+from urllib.request import Request, urlopen
 
 _KERNEL_ROOT = Path(__file__).resolve().parents[3]
 _SIDECAR_ROOT = _KERNEL_ROOT / "expansions" / "computer-use"
@@ -38,12 +40,12 @@ def unsubscribe_watch(sub) -> None:
     if sub in _watch_subscribers:
         _watch_subscribers.remove(sub)
 
-def publish_watch(caption, screenshot) -> None:
-    """Publish a live frame (caption + optional screenshot) to all subscribers.
+def _publish_local(caption, screenshot) -> None:
+    """Fan out a live frame to in-process subscribers only.
 
-    Best-effort: a slow/full subscriber queue drops the frame rather than
-    blocking the computer-use loop. Screenshot may be a base64 data-URI or a
-    local path.
+    This is the local half of publish_watch. The uvicorn /computer/publish
+    endpoint calls this directly so it never re-forwards across the process
+    boundary (no infinite loop).
     """
     inactive = []
     for s in _watch_subscribers:
@@ -56,6 +58,43 @@ def publish_watch(caption, screenshot) -> None:
             pass
     for s in inactive:
         _watch_subscribers.remove(s)
+
+
+def _forward_to_api(caption, screenshot) -> None:
+    """Forward a frame to the running uvicorn API so its SSE subscribers see it.
+
+    The computer tool loop runs inside model_server.py, whose in-memory hub has
+    zero subscribers; uvicorn (which serves /computer/stream) has the SSE
+    subscribers but nothing ever publishes there. POSTing the frame to the
+    API's /computer/publish endpoint bridges the two processes.
+
+    Gated by COMPUTER_STREAM_FORWARD_URL (set only on the model_server launch in
+    start.sh) so unit tests and the uvicorn process itself never try to forward
+    (no self-loop). Best-effort: failures never block the computer-use loop.
+    """
+    target = os.environ.get("COMPUTER_STREAM_FORWARD_URL", "")
+    if not target:
+        return
+    try:
+        body = json.dumps({"caption": caption, "screenshot": screenshot}).encode("utf-8")
+        req = Request(target, data=body, headers={"Content-Type": "application/json"})
+        urlopen(req, timeout=2)
+    except Exception:
+        pass
+
+
+def publish_watch(caption, screenshot) -> None:
+    """Publish a live frame (caption + optional screenshot) to all subscribers.
+
+    Fans out to in-process subscribers (the local hub), then — when running in
+    the model_server process — forwards the frame over HTTP to the uvicorn API
+    so every SSE surface (Desktop/Mobile/Dashboard) receives it. Best-effort: a
+    slow/full subscriber queue or an unreachable forward target drops the frame
+    rather than blocking the computer-use loop. Screenshot may be a base64
+    data-URI or a local path.
+    """
+    _publish_local(caption, screenshot)
+    _forward_to_api(caption, screenshot)
 
 _sidecar = None
 

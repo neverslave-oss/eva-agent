@@ -101,7 +101,7 @@ elif [[ $_SOCK_ALIVE -eq 0 ]]; then
         echo "[kernel-evolving] Cloud mode — starting model server LAZY (thought slot on demand, no eager VRAM)..."
         _MODEL_ARGS="--lazy"
     fi
-    nohup $PY "$REPO/src/core/inference/model_server.py" \
+    nohup env COMPUTER_STREAM_FORWARD_URL="http://127.0.0.1:${PORT}/computer/publish" $PY "$REPO/src/core/inference/model_server.py" \
         --config "$CONFIG" \
         $_MODEL_ARGS \
         >> "$MODEL_LOG" 2>&1 &

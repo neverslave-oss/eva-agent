@@ -1850,6 +1850,20 @@ def computer_stream():
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
+@app.post("/computer/publish")
+def computer_publish(body: dict):
+    """Cross-process bridge: model_server POSTs each live frame here so the
+    uvicorn process (which owns the SSE subscribers) fans it out to every
+    /computer/stream consumer. The endpoint calls publish_watch directly, which
+    fans out to in-process subscribers only — it never re-forwards back over
+    HTTP, so there is no loop between the two processes.
+    """
+    from core.expansions.computer_use_bridge import publish_watch
+
+    publish_watch(body.get("caption", ""), body.get("screenshot", None))
+    return {"ok": True}
+
+
 @app.post("/sim/mode")
 def set_sim_mode(body: dict):
     """Enable/disable SIM_MODE — bypasses exec_shell approval gate for trajectory collection."""

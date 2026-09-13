@@ -77,3 +77,53 @@ def test_debug_snapshot_shape_happy_path():
     assert snap["available"] is True
     assert "chat_id" in snap
     assert "registry" in snap
+
+
+def test_publish_watch_no_forward_when_env_unset():
+    """Without COMPUTER_STREAM_FORWARD_URL (the normal uvicorn / unit-test case),
+    publish_watch must fan out to in-process subscribers only and never attempt
+    a cross-process HTTP forward — this is what prevents the uvicorn /computer/stream
+    hub from POSTing to itself in an infinite loop."""
+    import os as _os
+    _os.environ.pop("COMPUTER_STREAM_FORWARD_URL", None)
+    sub = bridge.subscribe_watch()
+    try:
+        bridge.publish_watch("local frame", "data:image/png;base64,BBBB")
+        frame = sub.queue.get(timeout=2)
+        assert frame["caption"] == "local frame"
+        assert frame["screenshot"].startswith("data:image")
+    finally:
+        bridge.unsubscribe_watch(sub)
+
+
+def test_publish_watch_forward_is_best_effort_and_survives_dead_target():
+    """When COMPUTER_STREAM_FORWARD_URL points at an unreachable target (the
+    model_server -> uvicorn case while uvicorn is briefly down), publish_watch
+    must not raise and must still deliver to in-process subscribers."""
+    import os as _os
+    _os.environ["COMPUTER_STREAM_FORWARD_URL"] = "http://127.0.0.1:1/computer/publish"
+    sub = bridge.subscribe_watch()
+    try:
+        # Dead target on port 1 -> connection refused; must not raise.
+        bridge.publish_watch("frame", None)
+        frame = sub.queue.get(timeout=2)
+        assert frame["caption"] == "frame"
+    finally:
+        bridge.unsubscribe_watch(sub)
+        _os.environ.pop("COMPUTER_STREAM_FORWARD_URL", None)
+
+
+def test_publish_local_never_forwards_even_with_env_set():
+    """_publish_local is the local-only half that the uvicorn /computer/publish
+    endpoint calls; it must never forward, regardless of COMPUTER_STREAM_FORWARD_URL,
+    so the cross-process bridge cannot loop."""
+    import os as _os
+    _os.environ["COMPUTER_STREAM_FORWARD_URL"] = "http://127.0.0.1:1/computer/publish"
+    sub = bridge.subscribe_watch()
+    try:
+        bridge._publish_local("direct", None)
+        frame = sub.queue.get(timeout=2)
+        assert frame["caption"] == "direct"
+    finally:
+        bridge.unsubscribe_watch(sub)
+        _os.environ.pop("COMPUTER_STREAM_FORWARD_URL", None)
