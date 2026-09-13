@@ -15,6 +15,48 @@ _SIDECAR_ROOT = _KERNEL_ROOT / "expansions" / "computer-use"
 _SIDECAR_SRC = _SIDECAR_ROOT / "src"
 _STATE_FILE = _SIDECAR_ROOT / "tmp" / "chat_state.json"
 
+# Broadcast hub for the computer-use live stream (captions + screenshots).
+# Every subscribed surface (Telegram, Desktop, Mobile, Dashboard) receives each
+# frame via publish_watch(); subscribers get a per-subscriber queue. This is what
+# lets the computer-use stream reach ALL frontends, not just Telegram.
+_watch_subscribers: list["_WatchSub"] = []
+
+class _WatchSub:
+    __slots__ = ("queue", "active")
+    def __init__(self) -> None:
+        import queue as _queue
+        self.queue: _queue.Queue = _queue.Queue(maxsize=200)
+        self.active = True
+
+def subscribe_watch() -> "_WatchSub":
+    """Register a subscriber for the computer-use live stream (SSE consumers)."""
+    sub = _WatchSub()
+    _watch_subscribers.append(sub)
+    return sub
+
+def unsubscribe_watch(sub) -> None:
+    if sub in _watch_subscribers:
+        _watch_subscribers.remove(sub)
+
+def publish_watch(caption, screenshot) -> None:
+    """Publish a live frame (caption + optional screenshot) to all subscribers.
+
+    Best-effort: a slow/full subscriber queue drops the frame rather than
+    blocking the computer-use loop. Screenshot may be a base64 data-URI or a
+    local path.
+    """
+    inactive = []
+    for s in _watch_subscribers:
+        if not s.active:
+            inactive.append(s)
+            continue
+        try:
+            s.queue.put_nowait({"caption": caption, "screenshot": screenshot})
+        except Exception:
+            pass
+    for s in inactive:
+        _watch_subscribers.remove(s)
+
 _sidecar = None
 
 
@@ -82,6 +124,12 @@ def _default_watch_callback(chat_id: str):
     _last_shot_msg_id = {"id": None}
 
     def _watch(screenshot, caption):
+        # Broadcast to every subscribed surface (Desktop/Mobile/Dashboard) first,
+        # so the live stream reaches all frontends regardless of Telegram.
+        try:
+            publish_watch(caption, screenshot)
+        except Exception:
+            pass
         # Always stream a text update so the user sees live progress even when
         # no screenshot is available (e.g. screenshot null / driver has no
         # capture). This turns the silent typing-indicator wait into a

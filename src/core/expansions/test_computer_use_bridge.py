@@ -30,6 +30,23 @@ def test_run_computer_task_happy_path():
     assert out["run_id"]
 
 
+def test_watch_hub_delivers_and_unsubscribes():
+    """The computer-use broadcast hub must deliver a frame (caption + screenshot)
+    to every subscriber and cleanly drop unsubscribed/closed subscribers — the
+    mechanism that lets Desktop/Mobile/Dashboard see the stream, not just Telegram."""
+    sub = bridge.subscribe_watch()
+    try:
+        bridge.publish_watch("step 1: launch(thunar)", "data:image/png;base64,AAAA")
+        frame = sub.queue.get(timeout=2)
+        assert frame["caption"] == "step 1: launch(thunar)"
+        assert frame["screenshot"].startswith("data:image")
+    finally:
+        bridge.unsubscribe_watch(sub)
+    # After unsubscribe, publishing must not raise or touch the dead subscriber.
+    bridge.publish_watch("step 2", None)
+
+
+
 def test_run_computer_task_explicit_live_mode_edge_case():
     _reset_bridge_cache()
     out = bridge.run_computer_task(

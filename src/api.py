@@ -1815,6 +1815,41 @@ def evolution_stream():
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
+@app.get("/computer/stream")
+def computer_stream():
+    """Server-sent events stream of the live computer-use screen (Desktop/Mobile/Dashboard).
+
+    Each frame is the same caption + screenshot the Telegram watch streams; a
+    broadcast hub in computer_use_bridge.publish_watch fans it out to every
+    subscribed surface so the computer-use run is visible everywhere, not just
+    Telegram. Screenshot is a base64 data-URI (or empty).
+    """
+    import time as _time
+    from core.expansions.computer_use_bridge import subscribe_watch, unsubscribe_watch
+
+    sub = subscribe_watch()
+
+    def event_generator():
+        last_beat = _time.time()
+        try:
+            while sub.active:
+                try:
+                    frame = sub.queue.get(timeout=15)
+                    payload = {"caption": frame.get("caption", ""), "screenshot": frame.get("screenshot", None) or ""}
+                    yield f"data: {json.dumps(payload)}\n\n"
+                    last_beat = _time.time()
+                except Exception:
+                    # Keepalive comment so proxies don't kill an idle connection.
+                    if _time.time() - last_beat > 15:
+                        yield ": ping\n\n"
+                        last_beat = _time.time()
+        finally:
+            sub.active = False
+            unsubscribe_watch(sub)
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
 @app.post("/sim/mode")
 def set_sim_mode(body: dict):
     """Enable/disable SIM_MODE — bypasses exec_shell approval gate for trajectory collection."""

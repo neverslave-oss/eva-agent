@@ -1584,6 +1584,7 @@
     <button class="tab-btn" data-tab="memory" onclick="switchTab('memory', event)">🧠 Memory</button>
     <button class="tab-btn" data-tab="system" onclick="switchTab('system', event)">System</button>
     <button class="tab-btn" data-tab="voice" onclick="switchTab('voice', event)">🎤 Voice</button>
+    <button class="tab-btn" data-tab="computer" onclick="switchTab('computer', event)">🖥️ Computer</button>
   </div>
   <div class="tab-bar-toggle-wrap">
     <button class="tab-bar-toggle" id="tab-bar-toggle" aria-expanded="false" onclick="toggleTabBar()">
@@ -1969,6 +1970,26 @@
           style="width:100px;height:100px;border-radius:50%;background:linear-gradient(180deg,#1a6ed8,#0b4fa8);border:none;color:white;font-size:34px;cursor:pointer;box-shadow:0 4px 20px rgba(0,0,0,0.6);transition:background .15s;">🎤</button>
         <button class="ctrl-btn" id="v-retry-tts" disabled>Generate voice for last reply</button>
         <span id="v-status" style="font-size:0.78em;color:#8b949e;">Checking voice readiness…</span>
+      </div>
+    </div>
+
+    <!-- ── Computer-use live stream tab ─────────────────────────── -->
+    <div id="computer-panel" style="display:none; padding:20px 24px; max-width:820px; margin:0 auto;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <div>
+          <div style="font-size:0.7em;color:#8b949e;text-transform:uppercase;letter-spacing:.1em">Computer-use live</div>
+          <div style="font-size:0.75em;color:#8b949e;margin-top:3px;">Live stream of the current computer-use delegation run — same frames that go to Telegram, shown here and on Desktop/Mobile.</div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <span id="computer-stream-status" style="font-size:0.7em;color:#8b949e;">idle</span>
+          <button class="ctrl-btn" id="computer-clear">Clear</button>
+        </div>
+      </div>
+      <div id="computer-frame" style="width:100%;aspect-ratio:16/9;background:#0d1117;border:1px solid #21262d;border-radius:8px;margin-bottom:10px;display:flex;align-items:center;justify-content:center;color:#8b949e;font-size:0.75em;overflow:hidden;">
+        No live computer-use run. Start a delegation task to see frames here.
+      </div>
+      <div id="computer-caption" style="padding:8px 10px;background:#11161e;border:1px solid #30363d;border-radius:6px;font-family:monospace;font-size:0.75em;color:#79c0ff;min-height:34px;white-space:pre-wrap;">
+        —
       </div>
     </div>
 
@@ -3547,7 +3568,7 @@
     }
 
     // ── Tab switching
-    const DASH_TABS = ['evolution', 'activity', 'insights', 'skills', 'replicas', 'trajectories', 'agent', 'memory', 'system', 'voice'];
+    const DASH_TABS = ['evolution', 'activity', 'insights', 'skills', 'replicas', 'trajectories', 'agent', 'memory', 'system', 'voice', 'computer'];
     const ACTIVE_TAB_STORAGE_KEY = 'kernel.evolutionDashboard.activeTab';
 
     function switchTab(name, event) {
@@ -3577,6 +3598,7 @@
       if (name === 'system') loadSystemData();
       if (name === 'memory') { loadMemoryStats(); loadWorkspaceTree('/'); }
       if (name === 'voice') setTimeout(() => initVoiceTab(), 0);
+      if (name === 'computer') setTimeout(() => initComputerTab(), 0);
       document.body.classList.toggle('agent-mobile-focus', name === 'agent' && window.innerWidth <= 860);
       if (window.innerWidth <= 860) setTabBarOpen(false);
     }
@@ -5425,6 +5447,41 @@
       };
       _vRecorder.stop();
     }
+
+    /* ── Computer-use live stream (SSE) ─────────────────────────────── */
+    let _computerES = null;
+
+    function initComputerTab() {
+      const frame = document.getElementById('computer-frame');
+      const caption = document.getElementById('computer-caption');
+      const status = document.getElementById('computer-stream-status');
+      if (!frame) return;
+      if (_computerES) { _computerES.close(); _computerES = null; }
+      _computerES = new EventSource('/computer/stream');
+      status.textContent = 'connecting…';
+      _computerES.onopen = () => { status.textContent = '● live'; status.style.color = '#3fb950'; };
+      _computerES.onerror = () => { status.textContent = 'reconnecting…'; status.style.color = '#d29922'; };
+      _computerES.onmessage = (e) => {
+        let data;
+        try { data = JSON.parse(e.data); } catch (_) { return; }
+        if (data.caption) caption.textContent = data.caption;
+        if (frame && data.screenshot) {
+          frame.innerHTML = '';
+          const img = document.createElement('img');
+          img.src = data.screenshot.indexOf('data:') === 0 ? data.screenshot : 'data:image/png;base64,' + data.screenshot;
+          img.style.width = '100%'; img.style.height = '100%'; img.style.objectFit = 'contain';
+          img.style.background = '#000';
+          frame.appendChild(img);
+        }
+      };
+    }
+
+    document.getElementById('computer-clear')?.addEventListener('click', () => {
+      const frame = document.getElementById('computer-frame');
+      const caption = document.getElementById('computer-caption');
+      if (frame) frame.innerHTML = '';
+      if (caption) caption.textContent = '—';
+    });
   </script>
 </body>
 
