@@ -312,7 +312,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "computer",
-            "description": "Drive the desktop/browser via the computer-use expansion. Given a natural-language goal, the orchestrator plans atomic actions (observe/click/type/hotkey/navigate/scroll/wait/assert_text/assert_url/upload/submit), validates each against policy, and executes them through the configured driver. Dry-run by default: pass dry_run=false only to actually move the mouse/keyboard. Returns a JSON envelope with status, message, completed and run_id. Use for GUI automation, clicking UI elements, filling forms, navigating apps, or browser tasks that need real screen control.",
+            "description": "Drive the desktop/browser via the computer-use expansion. Given a natural-language goal, the orchestrator plans atomic actions (observe/click/type/hotkey/navigate/scroll/wait/assert_text/assert_url/upload/submit), validates each against policy, and executes them through the configured driver. Real tasks actually run by default (dry_run=false): this moves the mouse/keyboard and drives the screen. Pass dry_run=true only for a planning-only simulation that does not touch the screen. Returns a JSON envelope with status, message, completed and run_id. Use for GUI automation, clicking UI elements, filling forms, navigating apps, or browser tasks that need real screen control.",
             "parameters": {
                 "type": "object",
                 "properties": {

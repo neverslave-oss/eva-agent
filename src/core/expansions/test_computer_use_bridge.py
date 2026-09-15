@@ -26,7 +26,7 @@ def test_run_computer_task_happy_path():
     out = bridge.run_computer_task(chat_id="chat-1", goal="open https://docs.openclaw.ai", target={"kind": "browser"})
     assert out["ok"] is True
     assert out["status"] in {"ok", "done"}
-    assert out["dry_run"] is True
+    assert out["dry_run"] is False
     assert out["run_id"]
 
 
@@ -67,7 +67,7 @@ def test_run_computer_task_llm_mode_uses_llm_planner():
     # LLM path must still produce a valid envelope and a run_id; it may abort
     # gracefully if the vision brain/provider is unavailable in the test env.
     assert "ok" in out
-    assert out["dry_run"] is True
+    assert out["dry_run"] is False
     assert out["run_id"]
 
 

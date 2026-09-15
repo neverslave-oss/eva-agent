@@ -271,7 +271,7 @@ def run_computer_task(
     chat_id: str = "",
     goal: str = "",
     target: dict | None = None,
-    dry_run: bool = True,
+    dry_run: bool = False,
     llm: bool = False,
     rl: bool = False,
     step_cap: int = 10,
