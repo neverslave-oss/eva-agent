@@ -859,17 +859,33 @@ class RLPlanner:
         g = (goal or "").strip()
         if not g:
             return ""
-        skip = {"the", "a", "an", "browser", "desktop", "web", "file", "manager", "application"}
+        # Strip URLs FIRST: a browser-nav goal like "open https://…" must never
+        # bind the scheme/domain as a desktop app (otherwise a navigate task is
+        # misclassified as a desktop-launch task and gated on pgrep "https").
+        g_sans_url = re.sub(r"https?://\S+", " ", g, flags=re.IGNORECASE)
+        # ONE shared stopword set for BOTH branches. The prior bug: the verb
+        # branch rejected only {"browser","desktop","web"} while the fallback
+        # used a larger set, so filler pronouns (it/that/this) and generic nouns
+        # (file, manager, text, editor…) slipped through the verb branch as app
+        # names. A single set keeps both branches consistent.
+        stopwords = {
+            "the", "a", "an", "it", "this", "that", "these", "those",
+            "and", "or", "then", "please", "can", "could", "you", "me", "my",
+            "your", "open", "launch", "start", "run", "create", "save", "type",
+            "check", "go", "show", "app", "application", "browser", "desktop", "web",
+            "for", "to", "with", "on", "at", "in", "of", "so", "but", "not",
+            "into", "from", "by", "will", "would", "should", "there", "here", "now",
+        }
         for m in re.finditer(
             r"\b(?:open|launch|start)\s+(?:the\s+)?([A-Za-z][A-Za-z0-9_.-]{1,40})",
-            g, re.IGNORECASE,
+            g_sans_url, re.IGNORECASE,
         ):
             app = m.group(1).lower()
-            if app not in ("browser", "desktop", "web"):
+            if app not in stopwords:
                 return app
-        for tok in re.findall(r"[A-Z][A-Za-z0-9_.-]{1,40}", g):
+        for tok in re.findall(r"[A-Z][A-Za-z0-9_.-]{1,40}", g_sans_url):
             low = tok.lower()
-            if not re.search(r"https?://", low) and low not in skip:
+            if low not in stopwords:
                 return low
         return ""
 

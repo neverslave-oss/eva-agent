@@ -314,6 +314,47 @@ def test_extract_app_is_used_for_process_verify():
     assert RLPlanner._desktop_app_open("Open the ZzzDoesNotExistApp") is False
 
 
+def test_extract_app_rejects_filler_words_as_app_names():
+    """Regression: a vague 'open it / launch that / start this' goal must NOT
+    bind a filler pronoun as a launch target. This gated verification on
+    launching a process literally named "it"/"that", producing the
+    launch(it)->error / launch(and)->error loop seen in the field log."""
+    for goal in [
+        "open it and run the app",
+        "launch it then check",
+        "start it please",
+        "open that file",
+        "can you open thunar please",  # filler around a real app still resolves
+    ]:
+        if "thunar" in goal:
+            assert RLPlanner._extract_app(goal) == "thunar"
+        else:
+            assert RLPlanner._extract_app(goal) == "", goal
+
+
+def test_extract_app_never_leaks_url_scheme_as_app():
+    """Regression: a browser-nav goal 'open https://…' must return NO app name.
+    Prior code let the URL scheme ('https') bind as a desktop app, which
+    misclassified a navigate task as a desktop-launch task and gated completion
+    on a pgrep for 'https'."""
+    assert RLPlanner._extract_app("open https://www.linkedin.com/signup") == ""
+    assert RLPlanner._extract_app("navigate to https://example.com") == ""
+    assert RLPlanner._extract_app("launch https://make.neverslave.com/projects") == ""
+
+
+def test_extract_app_real_desktop_apps_still_resolve():
+    """Guard the positive cases: tightening stopwords must not break real
+    app targets (single-word app names and the canonical Thunar goal)."""
+    assert RLPlanner._extract_app("open Thunar") == "thunar"
+    assert RLPlanner._extract_app("start opencode") == "opencode"
+    assert RLPlanner._extract_app("launch firefox and go to gmail") == "firefox"
+    assert RLPlanner._extract_app("please open firefox for me") == "firefox"
+    assert RLPlanner._extract_app("open chrome") == "chrome"
+    assert RLPlanner._extract_app("start the terminal and type ls") == "terminal"
+    assert RLPlanner._extract_app("start notepad") == "notepad"
+    assert RLPlanner._extract_app("Open the Thunar file manager") == "thunar"
+
+
 # ── Regression: desktop goal with EMPTY observation must still verify done ─
 
 def test_desktop_goal_verified_even_with_empty_observation(monkeypatch):
