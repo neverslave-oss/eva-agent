@@ -301,11 +301,29 @@ class RLPlanner:
                         if row[nav_idx] <= 0.0:
                             row[nav_idx] = 1.0
 
+    # Terminal/control actions that must never be picked by epsilon EXPLORATION.
+    # The guardrails own these: a verified goal emits `done`; a dead/step-capped
+    # run emits `abort`. Making them selectable by a random draw meant a fresh
+    # unseen state (which is never dead) could randomly pick `abort` at step 1
+    # and kill the run before doing any work -> flaky done-vs-abort across runs
+    # of the exact same goal. They stay in ACTION_KINDS (so the Q row width and
+    # policy allowlist stay stable) but are excluded from the exploration pool.
+    _TERMINAL_ACTIONS = {"abort", "done"}
+
+    @staticmethod
+    def _explorable_action_space() -> tuple[int, ...]:
+        """Action indices epsilon-greedy may explore (terminal controls excluded)."""
+        return tuple(
+            i for i, k in enumerate(RLPlanner.ACTION_KINDS)
+            if k not in RLPlanner._TERMINAL_ACTIONS
+        )
+
     def _select_action_idx(self, state: tuple) -> int:
         import random
-        # Epsilon-greedy: explore a random action with prob epsilon.
+        # Epsilon-greedy: explore a random action with prob epsilon. Only ever
+        # from the EXPLORABLE pool — never `abort`/`done` (terminal controls).
         if random.random() < self.epsilon:
-            return random.randrange(self._n_actions)
+            return random.choice(self._explorable_action_space())
         row = self._row(state)
         # Deterministic argmax; break ties by the earliest action to keep policy
         # stable (prefer observe/click over abort when equally valued).

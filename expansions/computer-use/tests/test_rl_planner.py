@@ -584,3 +584,35 @@ def test_launch_binding_uses_goal_app():
 def test_hotkey_binding_default():
     assert RLPlanner._extract_hotkey("press Ctrl+L") == "ctrl+l"
     assert RLPlanner._extract_hotkey("do arbitrary stuff") == "ctrl+l"
+
+
+def test_epsilon_never_explores_terminal_controls():
+    """Regression: epsilon exploration must never randomly pick `abort` or
+    `done`. Root cause of run-to-run flakiness: a fresh, UNSEEN state is never
+    dead (`_is_dead` returns False for an absent row), so when the step-1 draw
+    sampled the full action space via `random.randrange(n_actions)` it could
+    randomly pick `abort` and kill the run before doing any work — the same
+    goal alternating `done` and `abort` across live runs. Terminal controls are
+    owned by the guardrails (verified->done, dead/step-cap->abort), never by
+    exploration."""
+    pool = RLPlanner._explorable_action_space()
+    pool_kinds = {RLPlanner.ACTION_KINDS[i] for i in pool}
+    assert "abort" not in pool_kinds
+    assert "done" not in pool_kinds
+    # Real, selectable work actions ARE explorable.
+    assert {"observe", "click", "fill", "navigate", "type", "submit"} <= pool_kinds
+    # And terminal kinds stay in ACTION_KINDS (stable row width + policy gate).
+    assert "abort" in RLPlanner.ACTION_KINDS
+    assert "done" in RLPlanner.ACTION_KINDS
+
+
+def test_epsilon_selection_never_returns_terminal_control():
+    """With the fix, even forcing heavy exploration, step-1 selection must never
+    choose abort/done; it always returns a real, selectable action index."""
+    import random
+    p = RLPlanner(epsilon=1.0)  # always explore
+    random.seed(1)
+    for _ in range(200):
+        idx = p._select_action_idx((0, 1, 0, 0, 0, 0))
+        kind = p.ACTION_KINDS[idx]
+        assert kind not in ("abort", "done"), f"exploration picked terminal {kind}"
