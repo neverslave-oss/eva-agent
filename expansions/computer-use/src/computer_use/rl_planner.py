@@ -356,6 +356,12 @@ class RLPlanner:
         # the real desktop<->browser handoff, not a hardcoded target.
         driver = (target.get("kind") or "desktop")
         self._dead_streak = 0
+        # Track whether a `launch` action actually executed this episode. The
+        # desktop app-open verifier MUST NOT be able to short-circuit to `done`
+        # before any launch ran (Bug 1: step-1 `done` with zero actions because
+        # pgrep -f false-matched the agent's own command line). Terminal desktop
+        # verification is only legitimate after a launch has actually executed.
+        launched_this = False
 
         # Goal-aware seed policy: cold-start tabular Q-learning has no prior
         # that "goal contains http(s) -> navigate first". Without a seed it
@@ -407,9 +413,25 @@ class RLPlanner:
             # churns +100 rewards to step-cap; a verified goal is terminal, so
             # we must end the run with `done` (and the terminal +100) right
             # here rather than letting exploration pick another action.
+            # 2.5 Terminal: goal verified → emit `done` immediately and stop.
+            #
+            # Guard (Bug 1): never short-circuit to `done` before any meaningful
+            # action executed. For a desktop-app goal, the process-check signal
+            # is ONLY legitimate AFTER a `launch` actually ran — before launch a
+            # `pgrep -f` match would false-positive on the agent's own command
+            # line (observed: plan = a single `done`, no launch action).
             if goal_met:
-                logger.info("[rl_planner] step %d: goal verified — emitting done", step)
-                return self._finish(history, goal, target, Action(kind="done", text="goal verified"))
+                needs_launch = RLPlanner._goal_needs_launch(goal)
+                if needs_launch and not launched_this:
+                    goal_met = False
+                    logger.info(
+                        "[rl_planner] step %d: desktop goal not yet launched — ignoring premature done", step
+                    )
+                else:
+                    logger.info("[rl_planner] step %d: goal verified — emitting done", step)
+                    return self._finish(
+                        history, goal, target, Action(kind="done", text="goal verified")
+                    )
 
             # 3. Discrete state from richer features.
             state = _discretize_features(
@@ -471,6 +493,10 @@ class RLPlanner:
             result = {"status": "dry_run"}
             if not self.dry_run:
                 result = self._run_execute(action, target)
+            # A `launch` actually executed (or was dispatched for dry-run): this
+            # is the earliest a desktop app-open verifier may confirm done.
+            if action.kind == "launch":
+                launched_this = True
 
             # 8. Classify + reward + Q-update.
             outcome, reward = self._classify_step(action, result, goal_met, progress_met, last_sig)
@@ -619,6 +645,24 @@ class RLPlanner:
         return RLPlanner._desktop_app_open(goal)
 
     @staticmethod
+    def _goal_needs_launch(goal: str) -> bool:
+        """True when the goal describes a desktop-app launch (open/launch/start + a
+        non-URL app name). Used to gate the desktop app-open verifier so it can
+        only confirm `done` after a real `launch` action has executed (Bug 1).
+        """
+        import re as _re
+        g = (goal or "").strip()
+        if not g:
+            return False
+        # A URL goal is navigated, not launched.
+        if _re.search(r"https?://", g, _re.IGNORECASE):
+            return False
+        # Has an explicit open/launch/start verb targeting a named app?
+        if _re.search(r"\b(?:open|launch|start)\b", g, _re.IGNORECASE):
+            return bool(RLPlanner._extract_app(g))
+        return False
+
+    @staticmethod
     def _desktop_app_open(goal: str) -> bool:
         """True when the goal-named desktop app is actually running.
 
@@ -639,11 +683,19 @@ class RLPlanner:
             )
             if out.returncode == 0 and out.stdout.strip():
                 return True
-            # Case/alias fallback: match by substring against command lines.
+            # Case/alias fallback: match by substring against command lines,
+            # EXCLUDING this agent's own PID so a `pgrep -f` never
+            # false-positives on the bash command that merely contains the app
+            # name in its argv (Bug 1 root cause).
             out = subprocess.run(
                 ["pgrep", "-f", app], capture_output=True, text=True, timeout=5,
             )
-            return out.returncode == 0 and bool(out.stdout.strip())
+            my_pid = str(os.getpid())
+            for line in (out.stdout or "").splitlines():
+                if line.strip() == my_pid:
+                    continue
+                return True
+            return False
         except Exception:
             return False
 

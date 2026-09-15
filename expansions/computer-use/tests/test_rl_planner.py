@@ -250,3 +250,88 @@ def test_desktop_goal_with_none_observation_reaches_app_check(monkeypatch):
     """Observation=None must also reach the desktop check (not early-return)."""
     monkeypatch.setattr(RLPlanner, "_desktop_app_open", staticmethod(lambda goal: True))
     assert RLPlanner._default_goal_met("Open the Thunar file manager", None) is True
+
+
+# ── Regression: Bug 1 — desktop `done` must never fire before a launch ────
+
+def test_goal_needs_launch_detects_desktop_verb():
+    """A desktop app-open goal (open/launch/start + app name, no URL) is flagged
+    as needing a launch action before its process check may confirm `done`."""
+    assert RLPlanner._goal_needs_launch("Open the Thunar file manager") is True
+    assert RLPlanner._goal_needs_launch("launch the Firefox browser") is True
+    assert RLPlanner._goal_needs_launch("start notepad") is True
+
+
+def test_goal_needs_launch_false_for_url_and_bare_goals():
+    """Navigated (URL) and vague goals must NOT be gated by a launch."""
+    assert RLPlanner._goal_needs_launch("navigate to https://example.com") is False
+    assert RLPlanner._goal_needs_launch("do the thing") is False
+    assert RLPlanner._goal_needs_launch("") is False
+
+
+def test_plan_does_not_emit_done_before_launch(monkeypatch):
+    """Bug 1 regression: with a desktop-app goal and a verifier that would
+    otherwise report goal_met on step 1 (e.g. the agent's own command line
+    false-matching pgrep -f), the planner must NOT short-circuit to `done`
+    before a `launch` action has executed. It must keep acting (launch), not
+    terminate with a single no-op done."""
+    p = RLPlanner(step_cap=6)
+
+    # Simulate a desktop goal whose process-check is 'already running' even
+    # before any launch (the Bug-1 false positive).
+    monkeypatch.setattr(RLPlanner, "_desktop_app_open", staticmethod(lambda goal: True))
+
+    executed = []
+
+    def fake_execute(action, target):
+        executed.append(action.kind)
+        return {"status": "ok"}
+
+    p._execute = fake_execute
+    p.dry_run = False
+
+    # Real desktop observation: non-empty, matches the pyautogui output.
+    obs = type("Obs", (), {"url": "", "text": "screen 1920x1080, cursor at (100,200)"})()
+
+    batch = p.plan(
+        "Open the Thunar file manager",
+        observation=obs,
+        target={"kind": "desktop"},
+    )
+
+    # The run must actually have attempted a launch before any `done`.
+    assert "launch" in executed, (
+        "Bug 1: planner must execute launch before done; executed=%r" % executed
+    )
+    # Terminal action must come after a launch was attempted.
+    assert batch.actions and batch.actions[0].kind in ("abort", "done")
+
+
+def test_after_launch_executed_goal_can_verify_done(monkeypatch):
+    """Once a `launch` has executed, the process-based verifier may legitimately
+    confirm `done`. Guards against over-correcting the Bug-1 fix into never
+    terminating desktop goals."""
+    p = RLPlanner(step_cap=8)
+    monkeypatch.setattr(RLPlanner, "_desktop_app_open", staticmethod(lambda goal: True))
+
+    executed = []
+
+    def fake_execute(action, target):
+        executed.append(action.kind)
+        return {"status": "ok"}
+
+    p._execute = fake_execute
+    p.dry_run = False
+
+    obs = type("Obs", (), {"url": "", "text": "screen 1920x1080, cursor at (100,200)"})()
+
+    batch = p.plan(
+        "Open the Thunar file manager",
+        observation=obs,
+        target={"kind": "desktop"},
+    )
+
+    assert "launch" in executed
+    # After launch, the verifier sees the app open and emits a verified done.
+    assert batch.actions and batch.actions[0].kind == "done"
+
