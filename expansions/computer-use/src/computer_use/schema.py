@@ -9,6 +9,7 @@ ActionKind = Literal[
     "click",
     "double_click",
     "type",
+    "fill",
     "hotkey",
     "navigate",
     "scroll",

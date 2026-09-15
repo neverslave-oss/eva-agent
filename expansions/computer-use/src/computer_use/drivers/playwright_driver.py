@@ -247,6 +247,15 @@ class PlaywrightDriver(BaseDriver):
                 self._page.fill(sel, action.text or "")
                 return {"status": "ok", "driver": "playwright", "action": kind, "selector": sel}
 
+            if kind == "fill":
+                sel = action.selector
+                if not sel:
+                    return {"status": "error", "driver": "playwright", "action": kind,
+                            "error": "fill requires a selector"}
+                self._page.fill(sel, action.text or "")
+                return {"status": "ok", "driver": "playwright", "action": kind, "selector": sel,
+                        "filled": action.text or ""}
+
             if kind == "hotkey":
                 key = action.text or action.selector or ""
                 if not key:

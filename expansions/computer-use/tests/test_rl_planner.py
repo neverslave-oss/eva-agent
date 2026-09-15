@@ -70,7 +70,7 @@ def test_blind_click_penalized():
 def test_repeated_identical_action_penalized():
     p = RLPlanner()
     a = Action(kind="type", text="same", driver="browser")
-    outcome, r = _step(p, a, {"status": "ok"}, goal_met=False, progress_met=False, last_sig="type:same")
+    outcome, r = _step(p, a, {"status": "ok"}, goal_met=False, progress_met=False, last_sig="type:None:same")
     assert outcome == "blind"
     assert r == R_BLIND
 
@@ -335,3 +335,56 @@ def test_after_launch_executed_goal_can_verify_done(monkeypatch):
     # After launch, the verifier sees the app open and emits a verified done.
     assert batch.actions and batch.actions[0].kind == "done"
 
+
+
+# ── Expanded action vocabulary (2026-09-15) ────────────────────────────────
+
+def test_action_kinds_include_drive_actions():
+    """The RL planner must offer the full set of actions needed to actually
+    drive a browser/DOM form: double_click, fill, submit, assert_text,
+    assert_url — not just observe/click/type churn."""
+    p = RLPlanner()
+    for kind in ("observe", "click", "double_click", "type", "fill", "submit",
+                 "hotkey", "navigate", "launch", "scroll", "wait",
+                 "assert_text", "assert_url", "done"):
+        assert kind in p.ACTION_KINDS, f"missing RL action kind: {kind}"
+
+
+def test_fill_binds_selector_and_value():
+    """A 'fill <sel> with <value>' goal must bind into a DOM-aware fill Action
+    (selector + text), the primitive that makes Playwright form-fill trivial."""
+    a = RLPlanner._action_from_kind(
+        "fill", "browser", "fill #email with eva@neverslave.com"
+    )
+    assert a.kind == "fill"
+    assert a.selector == "#email"
+    assert a.text == "eva@neverslave.com"
+
+
+def test_fill_missing_selector_penalized_as_blind():
+    p = RLPlanner()
+    a = RLPlanner._action_from_kind("fill", "browser", "fill the form")
+    assert a.selector == ""
+    outcome, r = _step(p, a, {"status": "ok"}, goal_met=False, progress_met=False, last_sig=None)
+    assert outcome == "blind"
+    assert r == R_BLIND
+
+
+def test_submit_binds_action():
+    a = RLPlanner._action_from_kind("submit", "browser", "submit the form")
+    assert a.kind == "submit"
+
+
+def test_assert_text_binds_expectation():
+    a = RLPlanner._action_from_kind("verify", "browser", "verify Welcome back")
+    # _action_from_kind falls through unknown kinds to observe; assert the real
+    # assert_text binding works:
+    a2 = RLPlanner._action_from_kind("assert_text", "browser", "verify Welcome back")
+    assert a2.kind == "assert_text"
+    assert a2.text == "Welcome back"
+
+
+def test_double_click_binds_selector():
+    a = RLPlanner._action_from_kind("double_click", "browser", "double click the #row")
+    assert a.kind == "double_click"
+    assert a.selector == "#row"

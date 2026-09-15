@@ -25,6 +25,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 from pathlib import Path
 
 from computer_use.schema import Action, ActionBatch, Observation
@@ -111,15 +112,28 @@ class RLPlanner:
     # bound by the execution layer; Q-learning operates on these action kinds so
     # the table stays discrete and the policy chooses *what to do next* and
     # *which medium* — exactly the control Fabio asked the agent to own.
+    # Discrete action space (kind-level templates). `selector`/`text` params are
+    # bound by the execution layer; Q-learning operates on these action kinds so
+    # the table stays discrete and the policy chooses *what to do next* and
+    # *which medium*. Expanded (2026-09-15) to cover the actions the browser and
+    # desktop drivers can actually execute, so the agent isn't limited to
+    # observe/click/type churn: double_click, submit, assert_text and assert_url
+    # (the DOM-aware verification actions), plus fill (form field targeting) —
+    # the gap that made form-filling fail.
     ACTION_KINDS = [
         "observe",
         "click",
+        "double_click",
         "type",
+        "fill",
+        "submit",
         "hotkey",
         "navigate",
         "launch",
         "scroll",
         "wait",
+        "assert_text",
+        "assert_url",
         "driver_swap",
         "abort",
         "done",
@@ -278,12 +292,16 @@ class RLPlanner:
     def _action_sig(action) -> str:
         if action.kind in ("click", "double_click"):
             return f"{action.kind}:{action.selector}"
-        if action.kind == "type":
-            return f"type:{action.text}"
+        if action.kind in ("type", "fill"):
+            return f"{action.kind}:{action.selector}:{action.text}"
+        if action.kind == "submit":
+            return "submit"
         if action.kind == "navigate":
             return f"navigate:{action.url}"
-        if action.kind == "launch":
-            return f"launch:{action.text}"
+        if action.kind in ("launch", "assert_text"):
+            return f"{action.kind}:{action.text}"
+        if action.kind == "assert_url":
+            return f"assert_url:{action.url}"
         return f"{action.kind}:{action.text or action.selector or action.url or ''}"
 
     # ── Reward / verification ─────────────────────────────────────────────
@@ -314,6 +332,9 @@ class RLPlanner:
         if action.kind in ("click", "double_click") and not (
             action.selector and "," in action.selector
         ):
+            return ("blind", R_BLIND)
+        # Blind fill (no selector) is a hard negative.
+        if action.kind == "fill" and not action.selector:
             return ("blind", R_BLIND)
         # Execution error (e.g. a driver swap failure or a failed step).
         if result.get("status") == "error":
@@ -783,6 +804,63 @@ class RLPlanner:
         return ""
 
     @staticmethod
+    def _extract_selector(goal: str) -> str:
+        """Pull a CSS/attribute selector out of a goal string if present, else ''.
+
+        Best-effort: matches quoted selectors ("#email", '[name=pass]'), a
+        bracketed attribute selector, or a bare CSS token. Used to bind
+        click/double_click to a real target instead of blind 0,0.
+        """
+        import re
+        g = goal or ""
+        # quoted selectors: "#email" or '[name=x]' or `#x`
+        m = re.search(r"""['"`]([#.\[]\w[\w\- =]*)['"`]""", g)
+        if m:
+            return m.group(1).strip()
+        # bracketed attribute selector [name=...]
+        m = re.search(r"\[[A-Za-z][^\]\s]*\]", g)
+        if m:
+            return m.group(0)
+        # class / id token
+        m = re.search(r"[#.][A-Za-z][A-Za-z0-9_-]*", g)
+        if m:
+            return m.group(0)
+        return ""
+    @staticmethod
+    def _extract_fill(goal: str) -> tuple[str, str]:
+        """Parse a form-fill directive out of the goal -> (selector, value).
+
+        Understands "fill <sel> with <value>"/"fill <sel> into <value>" and
+        quoted/bracketed selectors. Returns ('','') when not parseable so the
+        driver can reject cleanly instead of typing into the wrong field.
+        """
+        import re
+        g = goal or ""
+        # fill <sel> with <val> | fill <sel> into <val>  (selector can be quoted)
+        m = re.search(
+            r"fill\s+(?:the\s+)?([#.\[][\w\[\]\- =\":']+?)\s+(?:with|into)\s+"
+            r"([\"'][^\"']+[\"']|\S+)",
+            g, re.IGNORECASE,
+        )
+        if m:
+            sel = m.group(1).strip().strip('"\'')
+            val = m.group(2).strip().strip('"\'')
+            return sel, val
+        return "", ""
+
+    @staticmethod
+    def _extract_assert_text(goal: str) -> str:
+        """Pull the expectation text out of 'verify <text>'/'assert <text>'."""
+        import re
+        m = re.search(
+            r"(?:verify|assert|expect|check)\s+(?:that\s+|the\s+|text\s+|"
+            r"page\s+|screen\s+)?([\"'][^\"']+[\"']|[A-Za-z][^.]{2,80})",
+            goal or "", re.IGNORECASE,
+        )
+        if m:
+            return m.group(1).strip().strip('"\'').strip(".")
+        return ""
+    @staticmethod
     def _action_from_kind(kind: str, driver: str, goal: str) -> Action:
         """Bind a discrete action kind into a concrete Action, goal-aware.
 
@@ -801,7 +879,9 @@ class RLPlanner:
         if kind == "navigate":
             return Action(kind="navigate", url=RLPlanner._extract_url(goal), driver=driver)
         if kind == "click":
-            return Action(kind="click", selector="0,0", driver=driver)
+            return Action(kind="click", selector=RLPlanner._extract_selector(goal) or "0,0", driver=driver)
+        if kind == "double_click":
+            return Action(kind="double_click", selector=RLPlanner._extract_selector(goal) or "0,0", driver=driver)
         if kind == "type":
             # Type the tail of the goal after a fill/type verb, stripped of
             # quotes/punctuation, as a best-effort text binding.
@@ -812,6 +892,16 @@ class RLPlanner:
                     break
             text = text.strip().strip('"\'')
             return Action(kind="type", text=text, driver=driver)
+        if kind == "fill":
+            # DOM-aware form fill: bind a field selector + value from the goal.
+            selector, value = RLPlanner._extract_fill(goal)
+            return Action(kind="fill", selector=selector, text=value, driver=driver)
+        if kind == "submit":
+            return Action(kind="submit", driver=driver)
+        if kind == "assert_text":
+            return Action(kind="assert_text", text=RLPlanner._extract_assert_text(goal), driver=driver)
+        if kind == "assert_url":
+            return Action(kind="assert_url", url=RLPlanner._extract_url(goal), driver=driver)
         if kind == "hotkey":
             return Action(kind="hotkey", text="ctrl+l", driver=driver)
         if kind == "launch":
@@ -819,6 +909,6 @@ class RLPlanner:
             # "Open the Thunar file manager" -> "thunar"). The desktop driver
             # resolves it via PATH/xdg-open.
             return Action(kind="launch", text=RLPlanner._extract_app(goal), driver=driver)
-        if kind in ("observe", "scroll", "wait", "submit"):
+        if kind in ("observe", "scroll", "wait"):
             return Action(kind=kind, driver=driver)
         return Action(kind="observe", driver=driver)
