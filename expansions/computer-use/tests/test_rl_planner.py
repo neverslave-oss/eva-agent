@@ -83,6 +83,91 @@ def test_execution_error_penalized_as_swap_failure():
     assert r == R_SWAP_FAIL
 
 
+# ── Task-typed reward shaping (general across computer use) ────────────────
+
+def test_task_type_classification():
+    assert RLPlanner._task_type("fill the signup form email eva password x submit") == "form"
+    assert RLPlanner._task_type("open https://www.linkedin.com/signup") == "navigate"
+    assert RLPlanner._task_type("open the thunar file manager") == "launch"
+    assert RLPlanner._task_type("click the save button") == "generic"
+    # A form goal that names its URL must still classify as a FORM task (the
+    # URL is just where the form lives; the task is filling it).
+    assert RLPlanner._task_type(
+        "fill the linkedin signup form at https://www.linkedin.com/signup email eva password x submit"
+    ) == "form"
+
+
+def test_form_fill_earns_boosted_progress():
+    p = RLPlanner()
+    goal = "fill the linkedin signup form email eva password x submit"
+    a = Action(kind="fill", selector="#email", text="eva@x.com", driver="browser")
+    outcome, r = p._classify_step(a, {"status": "ok"}, False, True, None, goal=goal)
+    assert outcome == "form_verified"
+    assert r > R_PROGRESS  # boosted above the generic +10
+
+
+def test_form_submit_earns_boosted_progress():
+    p = RLPlanner()
+    goal = "fill the linkedin signup form email eva password x submit"
+    a = Action(kind="submit", driver="browser")
+    outcome, r = p._classify_step(a, {"status": "ok"}, False, True, None, goal=goal)
+    assert outcome == "form_verified"
+    assert r > R_PROGRESS
+
+
+def test_passive_observe_is_churn_not_progress():
+    """Core general fix: a passive observe/scroll/wait that merely changes the
+    screen must NOT earn +R_PROGRESS — that was the incentive that made the
+    agent churn instead of actuating. It applies across every task type."""
+    p = RLPlanner()
+    for goal in (
+        "fill the form email eva password x",
+        "open https://www.linkedin.com/signup",
+        "open the thunar file manager",
+        "click the save button",
+    ):
+        a = Action(kind="observe", driver="browser")
+        outcome, r = p._classify_step(a, {"status": "ok"}, False, True, None, goal=goal)
+        assert outcome == "verified"
+        assert r < 0, f"observe must be penalized as churn, got {r} for goal={goal!r}"
+
+
+def test_navigate_earns_nav_progress():
+    p = RLPlanner()
+    goal = "open https://www.linkedin.com/signup"
+    a = Action(kind="navigate", url="https://www.linkedin.com/signup", driver="browser")
+    outcome, r = p._classify_step(a, {"status": "ok"}, False, True, None, goal=goal)
+    assert outcome == "verified"
+    assert r > R_PROGRESS  # navigate boost for a URL goal
+
+
+def test_launch_earns_launch_progress():
+    p = RLPlanner()
+    goal = "open the thunar file manager"
+    a = Action(kind="launch", text="thunar", driver="desktop")
+    outcome, r = p._classify_step(a, {"status": "ok"}, False, True, None, goal=goal)
+    assert outcome == "verified"
+    assert r > R_PROGRESS  # launch boost for a desktop-app goal
+
+
+def test_generic_actuation_keeps_progress_reward():
+    p = RLPlanner()
+    goal = "click the save button"
+    a = Action(kind="click", selector="100,200", driver="desktop")
+    outcome, r = p._classify_step(a, {"status": "ok"}, False, True, None, goal=goal)
+    assert outcome == "verified"
+    assert r == R_PROGRESS  # generic actuation keeps the baseline positive
+
+
+def test_blind_fill_still_penalized():
+    p = RLPlanner()
+    goal = "fill the form email eva password x"
+    a = Action(kind="fill", selector="", text="eva", driver="browser")
+    outcome, r = p._classify_step(a, {"status": "ok"}, False, True, None, goal=goal)
+    assert outcome == "blind"
+    assert r == R_BLIND
+
+
 # ── State discretization (richer features first pass) ─────────────────────
 
 def test_discretize_includes_driver_and_progress():
@@ -388,3 +473,73 @@ def test_double_click_binds_selector():
     a = RLPlanner._action_from_kind("double_click", "browser", "double click the #row")
     assert a.kind == "double_click"
     assert a.selector == "#row"
+
+
+# ── General computer-use binding layer (structured goal model) ────────────
+
+def test_parse_goal_model_extracts_targets():
+    m = RLPlanner._parse_goal_model(
+        "open https://www.linkedin.com/signup, fill email eva@neverslave.com "
+        "password JwCXoM, click .submit"
+    )
+    assert m["url"] == "https://www.linkedin.com/signup"
+    assert m["fields"] == [("#password", "JwCXoM"), ("#email", "eva@neverslave.com")]
+    assert m["click"] == ".submit"
+
+
+def test_field_extraction_natural_labels():
+    fields = RLPlanner._extract_fields(
+        "fill email eva@neverslave.com password JwCXoM and submit"
+    )
+    assert fields == [("#password", "JwCXoM"), ("#email", "eva@neverslave.com")]
+
+
+def test_field_selector_mapping():
+    assert RLPlanner._field_selector("email") == "#email"
+    assert RLPlanner._field_selector("password") == "#password"
+    assert RLPlanner._field_selector("first name") == "#firstname"
+    assert RLPlanner._field_selector("last name") == "#lastname"
+    assert RLPlanner._field_selector("username") == "#username"
+    assert RLPlanner._field_selector("phone") == "#phone"
+    assert RLPlanner._field_selector("nonexistent") == ""
+
+
+def test_selector_binding_does_not_leak_url_or_email():
+    # `.linkedin` from `linkedin.com` and `.com` from `eva@neverslave.com` must
+    # NEVER be bound as click targets.
+    assert RLPlanner._extract_selector(
+        "open https://www.linkedin.com/signup, click .submit"
+    ) == ".submit"
+    assert RLPlanner._extract_selector(
+        "fill email eva@neverslave.com password x, click .submit"
+    ) == ".submit"
+
+
+def test_fill_directive_binds_selector_and_value():
+    a = RLPlanner._action_from_kind("fill", "browser", "fill #email with eva@neverslave.com")
+    assert a.kind == "fill"
+    assert a.selector == "#email"
+    assert a.text == "eva@neverslave.com"
+
+
+def test_fill_queue_sequential_and_blind_when_exhausted():
+    goal = "fill email eva@neverslave.com password JwCXoM submit"
+    p = RLPlanner()
+    f1 = p._bind_action("fill", "browser", goal)
+    f2 = p._bind_action("fill", "browser", goal)
+    f3 = p._bind_action("fill", "browser", goal)
+    assert f1.selector == "#password" and f1.text == "JwCXoM"
+    assert f2.selector == "#email" and f2.text == "eva@neverslave.com"
+    # Queue exhausted -> blind (empty) so the reward layer steers to submit.
+    assert f3.selector == "" and f3.text == ""
+
+
+def test_launch_binding_uses_goal_app():
+    a = RLPlanner._action_from_kind("launch", "desktop", "open the thunar file manager")
+    assert a.kind == "launch"
+    assert a.text == "thunar"
+
+
+def test_hotkey_binding_default():
+    assert RLPlanner._extract_hotkey("press Ctrl+L") == "ctrl+l"
+    assert RLPlanner._extract_hotkey("do arbitrary stuff") == "ctrl+l"

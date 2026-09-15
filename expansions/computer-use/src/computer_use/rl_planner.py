@@ -45,6 +45,23 @@ R_STEPCAP = -10.0   # step cap reached without goal verified (the storm's mode)
 # abort-and-ask rather than churning on an unchanged screen.
 R_DEAD_STATE = -15.0
 
+# Task-typed reward shaping. The generic +R_PROGRESS for "the world changed"
+# gave passive perception (observe/scroll/wait) the same positive reward as a
+# real actuating action, so the agent never had to act toward its goal — it
+# churned cheap observe/scroll until the dead-state abort. These task-typed
+# rewards make the policy goal-aware across ALL of computer use (browser nav,
+# form-fill, desktop app driving, generic UI):
+R_CHURN = -3.0          # passive observe/scroll/wait that changed the screen
+R_FORM_PROGRESS = 25.0  # form task: a real fill/type/submit actuation
+R_NAV_PROGRESS = 12.0   # navigate task: reaching a URL
+R_LAUNCH_PROGRESS = 15.0  # desktop-app task: launching the target app
+
+# Task-type labels (goal classifier).
+TASK_NAVIGATE = "navigate"  # goal names a URL to reach
+TASK_FORM = "form"          # goal fills/submits a form
+TASK_LAUNCH = "launch"      # goal opens/drives a named desktop app
+TASK_GENERIC = "generic"    # ordinary interface manipulation
+
 # Fraction of the seeds/config restores that force an abort once Q collapses.
 DEAD_STATE_Q_THRESHOLD = 3  # consecutive max-Q<=0 states before abort-and-ask
 
@@ -170,6 +187,14 @@ class RLPlanner:
         self._verify = verify_override
         self.watch_callback = watch_callback
         self._dead_streak = 0
+        # Goal model: structured targets (url/app/fields/click/hotkey/text) parsed
+        # once from the goal, used by the binder to make every action kind land on
+        # a concrete, non-blind target — the layer that actually drives a computer
+        # (browser nav, app launch, form fill, clicks, hotkeys, typing).
+        self._goal_model: dict | None = None
+        # Remaining form fields to fill (fill queue) so a multi-field form is
+        # filled sequentially, one fill action per step.
+        self._remaining_fields: list[tuple[str, str]] = []
         # Signature of the last observation, used for the general progress
         # signal ("the world changed since the last step"). Modality-agnostic:
         # works for browser (url/text) and desktop (screen) alike.
@@ -305,6 +330,34 @@ class RLPlanner:
         return f"{action.kind}:{action.text or action.selector or action.url or ''}"
 
     # ── Reward / verification ─────────────────────────────────────────────
+    @staticmethod
+    def _task_type(goal: str) -> str:
+        """Classify a computer-use goal into a task type for reward shaping.
+
+        Returns one of TASK_NAVIGATE / TASK_FORM / TASK_LAUNCH / TASK_GENERIC.
+        Used to pick which actuating action earns the boosted progress reward,
+        so the policy is goal-aware across all of computer use (browser nav,
+        form-fill, desktop app driving, generic UI) rather than rewarding any
+        screen change equally.
+        """
+        import re as _re
+        g = (goal or "").lower()
+        # Form-fill/signup verbs + a field identity -> form task. Checked FIRST
+        # because a form goal often names its URL too (e.g. a signup page): the
+        # URL is just where the form lives — the task is filling it. Boosting
+        # fill/type/submit over navigate is what drives the optimal form policy.
+        if _re.search(r"(?:fill|enter|submit|register|sign\s*up|type)", g) and _re.search(
+            r"(?:email|password|passwd|first\s*name|last\s*name|username|phone)", g
+        ):
+            return TASK_FORM
+        # A URL in the goal -> reach it first (navigate task).
+        if "http" in g:
+            return TASK_NAVIGATE
+        # open/launch/start + a named app -> desktop-app task.
+        if _re.search(r"\b(?:open|launch|start)\b", g) and RLPlanner._extract_app(goal):
+            return TASK_LAUNCH
+        return TASK_GENERIC
+
     def _classify_step(
         self,
         action: Action,
@@ -312,36 +365,53 @@ class RLPlanner:
         goal_met: bool,
         progress_met: bool,
         last_sig: str | None,
+        goal: str = "",
     ) -> tuple[str, float]:
         """Map a completed step to an outcome category + immediate reward.
 
         Order matters: verified terminal > verified progress > no-op > blind >
-        error. A step only earns positive reward when the verifier confirms it
-        (goal_met/progress_met); otherwise it is churn and is penalized.
+        error. The reward is TASK-TYPED across all of computer use: passive
+        perception (observe/scroll/wait) never earns the full progress reward
+        just for changing the screen — it is penalized as churn. Only a real
+        actuating action toward the goal (navigate/launch/fill/type/submit/
+        click) can earn positive progress reward, boosted for the task type.
         """
         # Terminal: goal verifier confirms done.
         if goal_met:
             return ("verified", R_GOAL)
-        # Verified progress.
-        if progress_met:
-            return ("verified", R_PROGRESS)
-        # Dead state: repeated identical action on an unchanged screen.
+
+        task = RLPlanner._task_type(goal)
+        # Passive perception: the screen changed but we did not actuate.
+        passive = action.kind in ("observe", "scroll", "wait")
+        if passive:
+            if progress_met:
+                return ("verified", R_CHURN)
+            return ("noop", R_NOOP)
+
+        # Repeats / blind actuation are hard negatives.
         if last_sig == self._action_sig(action):
             return ("blind", R_BLIND)
-        # Blind click (no real coords) is a hard negative.
         if action.kind in ("click", "double_click") and not (
             action.selector and "," in action.selector
         ):
             return ("blind", R_BLIND)
-        # Blind fill (no selector) is a hard negative.
         if action.kind == "fill" and not action.selector:
+            return ("blind", R_BLIND)
+        if action.kind == "type" and not action.text:
             return ("blind", R_BLIND)
         # Execution error (e.g. a driver swap failure or a failed step).
         if result.get("status") == "error":
             return ("error", R_SWAP_FAIL)
-        # Step-cap without verification is the storm mode.
-        # (handled by the caller on timeout, not here)
-        # Otherwise an executed-but-unverified step is churn.
+        # Actuating action, no task type needed for error/blind above.
+        if progress_met:
+            if task == TASK_FORM and action.kind in ("fill", "type", "submit"):
+                return ("form_verified", R_FORM_PROGRESS)
+            if task == TASK_NAVIGATE and action.kind == "navigate":
+                return ("verified", R_NAV_PROGRESS)
+            if task == TASK_LAUNCH and action.kind == "launch":
+                return ("verified", R_LAUNCH_PROGRESS)
+            return ("verified", R_PROGRESS)
+        # Actuated but unverified is churn.
         return ("noop", R_NOOP)
 
     def _is_dead(self, state: tuple) -> bool:
@@ -475,7 +545,7 @@ class RLPlanner:
 
             # 5. Pick next action (epsilon-greedy over Q).
             action_idx = self._select_action_idx(state)
-            action = self._action_from_kind(self.ACTION_KINDS[action_idx], driver, goal)
+            action = self._bind_action(self.ACTION_KINDS[action_idx], driver, goal)
             logger.info("[rl_planner] step %d/%d: state=%s action=%s(%s) goal_met=%s progress=%s",
                         step, self.step_cap, list(state), action.kind,
                         (action.selector or action.text or action.url or "")[:40],
@@ -520,7 +590,7 @@ class RLPlanner:
                 launched_this = True
 
             # 8. Classify + reward + Q-update.
-            outcome, reward = self._classify_step(action, result, goal_met, progress_met, last_sig)
+            outcome, reward = self._classify_step(action, result, goal_met, progress_met, last_sig, goal=goal)
             # Step-cap safety: reaching the cap without goal => storm penalty.
             if step >= self.step_cap and not goal_met:
                 reward = min(reward, R_STEPCAP)
@@ -809,7 +879,10 @@ class RLPlanner:
 
         Best-effort: matches quoted selectors ("#email", '[name=pass]'), a
         bracketed attribute selector, or a bare CSS token. Used to bind
-        click/double_click to a real target instead of blind 0,0.
+        click/double_click to a real target instead of blind 0,0. URL/domain
+        fragments are stripped before the bare-token match so a goal like
+        "open https://www.linkedin.com/signup, click .submit" never binds
+        `.linkedin` (from the domain) as a bogus selector.
         """
         import re
         g = goal or ""
@@ -821,8 +894,13 @@ class RLPlanner:
         m = re.search(r"\[[A-Za-z][^\]\s]*\]", g)
         if m:
             return m.group(0)
+        # Remove URL/domain AND email fragments so their dotted tokens (e.g.
+        # `.linkedin` from `linkedin.com`, `.com` from `eva@neverslave.com`) are
+        # never mistaken for CSS class selectors.
+        g_urls = re.sub(r"https?://[^\s'\"]+", " ", g)
+        g_urls = re.sub(r"[\w.+-]+@[\w.-]+", " ", g_urls)
         # class / id token
-        m = re.search(r"[#.][A-Za-z][A-Za-z0-9_-]*", g)
+        m = re.search(r"[#.][A-Za-z][A-Za-z0-9_-]*", g_urls)
         if m:
             return m.group(0)
         return ""
@@ -861,15 +939,148 @@ class RLPlanner:
             return m.group(1).strip().strip('"\'').strip(".")
         return ""
     @staticmethod
+    def _field_selector(label: str) -> str:
+        """Map a form-field label to a best-effort CSS selector.
+
+        Drives real form filling: when a goal names fields by their text label
+        ("email eva@x.com, password secret"), we map the label to the standard
+        web selector for that field so a rewarded `fill` isn't blind. Covers
+        the common web form fields; unknown labels return '' (driver rejects
+        cleanly instead of typing into the wrong field).
+        """
+        import re as _re
+        l = (label or "").strip().lower()
+        pairs = [
+            ("email", "#email"),
+            ("e-mail", "#email"),
+            ("mail", "#email"),
+            ("password", "#password"),
+            ("passwd", "#password"),
+            ("pass", "#password"),
+            ("first name", "#firstname"),
+            ("firstname", "#firstname"),
+            ("last name", "#lastname"),
+            ("lastname", "#lastname"),
+            ("full name", "#fullname"),
+            ("username", "#username"),
+            ("user name", "#username"),
+            ("user", "#username"),
+            ("phone", "#phone"),
+            ("phone number", "#phone"),
+            ("company", "#company"),
+            ("job title", "#jobtitle"),
+            ("city", "#city"),
+            ("country", "#country"),
+            ("address", "#address"),
+            ("message", "#message"),
+            ("subject", "#subject"),
+            ("url", "#url"),
+            ("link", "#url"),
+            ("search", "#search"),
+            ("query", "#search"),
+        ]
+        for key, sel in pairs:
+            if key in l:
+                return sel
+        return ""
+
+    @staticmethod
+    def _extract_fields(goal: str) -> list[tuple[str, str]]:
+        """Pull ordered (selector, value) form fields out of a natural goal.
+
+        Understands label->value pairs even without a `fill ... with` directive,
+        e.g. "email eva@neverslave.com, password JwX" -> [("#email",
+        "eva@neverslave.com"), ("#password", "JwX")]. This is the structured
+        field model that lets a form goal drive real `fill` actions.
+        """
+        import re as _re
+        labels = [
+            "first name", "last name", "full name", "user name", "phone number",
+            "email", "e-mail", "mail", "password", "passwd", "pass",
+            "username", "user", "phone", "company", "job title", "city",
+            "country", "address", "message", "subject", "url", "link", "search", "query",
+        ]
+        # Longest labels first so "first name" wins over "name".
+        labels.sort(key=len, reverse=True)
+        g = (goal or "").strip()
+        fields: list[tuple[str, str]] = []
+        seen = set()
+        for label in labels:
+            # A label already part of a CSS selector (#email, .email, [name=email])
+            # must NOT be treated as a bare field label — otherwise "email" inside
+            # "#email" captures the next word as a bogus value.
+            m = _re.search(
+                r"(?<![#.\[])" + _re.escape(label) + r"\b\s*[:=]?\s+([^\s,;]+)",
+                g, _re.IGNORECASE,
+            )
+            if not m:
+                continue
+            val = m.group(1).strip().strip('"\'"')
+            sel = RLPlanner._field_selector(label)
+            key = (sel, val)
+            if sel and val and key not in seen:
+                seen.add(key)
+                fields.append((sel, val))
+        return fields
+
+    @staticmethod
+    def _first_field(goal: str) -> tuple[str, str]:
+        """First (selector, value) form field from the goal, else ('','')."""
+        f = RLPlanner._extract_fields(goal)
+        return f[0] if f else ("", "")
+
+    @staticmethod
+    def _parse_goal_model(goal: str) -> dict:
+        """Structured model of a computer-use goal: the concrete targets a real
+        agent needs to drive a computer — URL to navigate to, app to launch,
+        form fields to fill, UI element to click, hotkey to press, text to type.
+
+        Parsed once and consumed by the binder so every action kind lands on a
+        concrete, non-blind target instead of regex-per-call guesses.
+        """
+        return {
+            "url": RLPlanner._extract_url(goal),
+            "app": RLPlanner._extract_app(goal),
+            "fields": RLPlanner._extract_fields(goal),
+            "click": RLPlanner._extract_selector(goal),
+            "hotkey": RLPlanner._extract_hotkey(goal),
+            "text": RLPlanner._extract_type_text(goal),
+        }
+
+    @staticmethod
+    def _extract_hotkey(goal: str) -> str:
+        """Pull a hotkey out of a goal (e.g. 'press Ctrl+L' -> 'ctrl+l'), else
+        a sensible default so hotkey actions aren't empty."""
+        import re as _re
+        m = _re.search(
+            r"(?:press|hit|hotkey)\s+([\w+\- ]{1,20})", (goal or ""), _re.IGNORECASE
+        )
+        key = m.group(1).strip().lower().replace(" ", "+") if m else ""
+        return key or "ctrl+l"
+
+    @staticmethod
+    def _extract_type_text(goal: str) -> str:
+        """Text payload for a `type` action: the tail after a type/fill verb,
+        stripped of quotes/punctuation, best-effort."""
+        text = (goal or "").strip()
+        for verb in ("type ", "fill ", "enter ", "type:", "fill:"):
+            if verb in text:
+                text = text.split(verb, 1)[1]
+                break
+        return text.strip().strip('"\'')
+
+    @staticmethod
     def _action_from_kind(kind: str, driver: str, goal: str) -> Action:
         """Bind a discrete action kind into a concrete Action, goal-aware.
 
-        The RL agent owns WHAT to do and WHICH medium; here we bind the goal
-        content so the action can actually execute: `navigate` gets the URL
-        from the goal, `type` gets the text to enter, `hotkey` gets a sensible
-        key. Without this, navigate fired with an empty URL (driver rejects it)
-        and type had no text — the RL loop churned into observe->error->dead.
+        Uses the structured goal model so every action kind lands on a real,
+        non-blind target: `navigate` gets the URL, `launch` the app, `fill` a
+        field selector + value, `type` the text payload, `hotkey` a parsed key,
+        `click`/`double_click` a real element selector. This is the layer that
+        actually drives a computer (browser nav, app launch, form fill, clicks,
+        hotkeys, typing) from a natural-language goal.
         """
+        m = RLPlanner._parse_goal_model(goal)
         if kind == "done":
             return Action(kind="done", driver=driver)
         if kind == "abort":
@@ -877,38 +1088,52 @@ class RLPlanner:
         if kind == "driver_swap":
             return Action(kind="observe", driver=driver)
         if kind == "navigate":
-            return Action(kind="navigate", url=RLPlanner._extract_url(goal), driver=driver)
+            return Action(kind="navigate", url=m["url"], driver=driver)
         if kind == "click":
-            return Action(kind="click", selector=RLPlanner._extract_selector(goal) or "0,0", driver=driver)
+            return Action(kind="click", selector=m["click"] or "0,0", driver=driver)
         if kind == "double_click":
-            return Action(kind="double_click", selector=RLPlanner._extract_selector(goal) or "0,0", driver=driver)
+            return Action(kind="double_click", selector=m["click"] or "0,0", driver=driver)
         if kind == "type":
-            # Type the tail of the goal after a fill/type verb, stripped of
-            # quotes/punctuation, as a best-effort text binding.
-            text = (goal or "").strip()
-            for verb in ("type ", "fill ", "enter ", "type:", "fill:"):
-                if verb in text:
-                    text = text.split(verb, 1)[1]
-                    break
-            text = text.strip().strip('"\'')
-            return Action(kind="type", text=text, driver=driver)
+            return Action(kind="type", text=m["text"], driver=driver)
         if kind == "fill":
-            # DOM-aware form fill: bind a field selector + value from the goal.
+            # Prefer the explicit `fill <sel> with <value>` directive (the
+            # unambiguous form); fall back to the natural label->value parse
+            # ("email x, password y" -> [("#email","x"),("#password","y")]).
             selector, value = RLPlanner._extract_fill(goal)
+            if not selector:
+                selector, value = RLPlanner._first_field(goal)
             return Action(kind="fill", selector=selector, text=value, driver=driver)
         if kind == "submit":
             return Action(kind="submit", driver=driver)
         if kind == "assert_text":
             return Action(kind="assert_text", text=RLPlanner._extract_assert_text(goal), driver=driver)
         if kind == "assert_url":
-            return Action(kind="assert_url", url=RLPlanner._extract_url(goal), driver=driver)
+            return Action(kind="assert_url", url=m["url"], driver=driver)
         if kind == "hotkey":
-            return Action(kind="hotkey", text="ctrl+l", driver=driver)
+            return Action(kind="hotkey", text=m["hotkey"], driver=driver)
         if kind == "launch":
-            # Desktop app launch: bind the app name from the goal (e.g.
-            # "Open the Thunar file manager" -> "thunar"). The desktop driver
-            # resolves it via PATH/xdg-open.
-            return Action(kind="launch", text=RLPlanner._extract_app(goal), driver=driver)
+            return Action(kind="launch", text=m["app"], driver=driver)
         if kind in ("observe", "scroll", "wait"):
             return Action(kind=kind, driver=driver)
         return Action(kind="observe", driver=driver)
+
+    def _bind_action(self, kind: str, driver: str, goal: str) -> Action:
+        """Instance binder for the plan loop: binds the chosen action kind and
+        drives the multi-field fill queue so a form goal with several fields
+        fills them one at a time (one `fill` action per step), each from its
+        label->value pair in the goal model. When the queue is empty a fill
+        falls back to the static binder (which returns a blind/empty action
+        the reward layer penalizes), so it never re-loops on the first field."""
+        # Parse the goal model once per run and stage the fill queue.
+        if self._goal_model is None:
+            self._goal_model = RLPlanner._parse_goal_model(goal)
+            self._remaining_fields = list(self._goal_model.get("fields", []))
+        if kind == "fill":
+            if self._remaining_fields:
+                sel, val = self._remaining_fields.pop(0)
+                return Action(kind="fill", selector=sel, text=val, driver=driver)
+            # Queue exhausted: return a BLIND empty fill so the reward layer
+            # penalizes it and the policy is steered to the next action (submit)
+            # instead of re-filling the first field forever.
+            return Action(kind="fill", selector="", text="", driver=driver)
+        return RLPlanner._action_from_kind(kind, driver, goal)
