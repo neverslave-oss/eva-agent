@@ -252,6 +252,12 @@ def _parse_action(raw: str) -> Action | None:
         logger.warning("[vision_brain] LLM emitted disallowed kind: %r", kind)
         return None
     try:
+        # Coerce `metadata`: the model sometimes returns it as a plain string
+        # (e.g. "Navigate to the blog...") but the Action schema declares a
+        # dict. Tolerate that instead of rejecting an otherwise-valid action.
+        meta = data.get("metadata", {})
+        if not isinstance(meta, dict):
+            meta = {"note": str(meta)} if meta else {}
         return Action(
             kind=kind,
             selector=data.get("selector"),
@@ -259,7 +265,7 @@ def _parse_action(raw: str) -> Action | None:
             url=data.get("url"),
             timeout_ms=data.get("timeout_ms", 5000),
             driver=data.get("driver"),
-            metadata=data.get("metadata", {}) or {},
+            metadata=meta,
         )
     except Exception as e:
         logger.warning("[vision_brain] invalid action from LLM: %s", e)
@@ -334,6 +340,11 @@ def _parse_plan(raw: str) -> list[Action] | None:
             logger.warning("[vision_brain] plan contains disallowed kind: %r", kind)
             return None
         try:
+            # Coerce `metadata` the same way as _parse_action: the model
+            # sometimes returns it as a string, but Action declares a dict.
+            meta = item.get("metadata", {})
+            if not isinstance(meta, dict):
+                meta = {"note": str(meta)} if meta else {}
             actions.append(Action(
                 kind=kind,
                 selector=item.get("selector"),
@@ -341,7 +352,7 @@ def _parse_plan(raw: str) -> list[Action] | None:
                 url=item.get("url"),
                 timeout_ms=item.get("timeout_ms", 5000),
                 driver=item.get("driver"),
-                metadata=item.get("metadata", {}) or {},
+                metadata=meta,
             ))
         except Exception as e:
             logger.warning("[vision_brain] invalid plan action: %s", e)

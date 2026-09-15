@@ -237,6 +237,27 @@ class LLMPlanner:
             for h in self._history
         )
 
+    def _is_desktop_driver(self) -> bool:
+        """True when the active driver is a real desktop (full-screen) driver, not
+        a browser driver. The black/white-locked-screen guards must only fire on
+        a desktop surface: a browser sitting on `about:blank` is a normal,
+        navigable starting state (white), and must not be treated as a dead /
+        locked screen — otherwise the vision loop self-aborts before it can emit
+        `navigate`. Discriminate by the driver's OWN attributes (browser drivers
+        carry a Playwright session, `_pw`/`_page`); desktop drivers never do."""
+        d = self.driver
+        if d is None:
+            return True  # no driver known: keep the old fail-closed behavior
+        # HybridDriver delegates to its current medium (desktop|browser).
+        mode = getattr(d, "mode", None)
+        if mode in ("desktop", "browser"):
+            return mode == "desktop"
+        # Browser drivers own a Playwright session/page (even before lazy
+        # launch, the attribute exists). Desktop drivers never have these.
+        if hasattr(d, "_pw") or hasattr(d, "_context") or hasattr(d, "_page"):
+            return False
+        return True
+
     def plan(self, goal: str, observation: Observation | None = None) -> ActionBatch:
         self._history = []
         target = {"kind": "desktop"}
@@ -263,7 +284,12 @@ class LLMPlanner:
             # dialog) captures as a near-black frame; feeding it to the cloud
             # vision model just burns API calls on a screen Eva can't act on
             # (and can loop forever). Detect it and stop fail-closed.
-            if (self.driver is not None
+            #
+            # Scoped to DESKTOP drivers only: a browser sitting on a fresh
+            # blank tab is a NORMAL, navigable starting state, not a dead
+            # screen — the white/black guards must be allowed to pass so the
+            # vision loop can emit `navigate` and actually start the task.
+            if (self._is_desktop_driver()
                     and hasattr(self.driver, "is_frame_black")
                     and self.driver.is_frame_black()):
                 logger.error("[llm_planner] step %d: screen is black/locked — aborting", step)
@@ -277,7 +303,11 @@ class LLMPlanner:
             # above misses these, so a white blank would stream per-step until
             # the frozen-guard caught it after several unchanged frames. Detect
             # it here and abort immediately, same fail-closed behavior.
-            if (self.driver is not None
+            #
+            # Same desktop-only scope as above: about:blank is white but is a
+            # legitimate browser starting point for a navigate task — only fire
+            # this on a real desktop surface, never a browser context.
+            if (self._is_desktop_driver()
                     and hasattr(self.driver, "is_frame_white")
                     and self.driver.is_frame_white()):
                 logger.error("[llm_planner] step %d: screen is blank-white — aborting", step)
