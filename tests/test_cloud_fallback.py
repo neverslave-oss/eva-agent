@@ -315,3 +315,31 @@ class TestAudioSttSkipsMainModelLoad:
         assert "error" not in result, f"Unexpected error: {result}"
         assert result.get("result") is not None
         model.generate.assert_called_once()
+
+    def test_stt_returns_clean_error_when_multimodal_slot_is_partially_loaded(self):
+        """Regression: a failed multimodal slot load can leave `_mm_processor`
+        populated while `_mm_model` is still None. STT must return a clean
+        error instead of crashing on `active_model.parameters()`."""
+        cfg = {"providers": {"stt": "local", "vision": "local"},
+               "model_overrides": {}, "models": {}}
+        proc = MagicMock()
+
+        with patch.object(ms, "_config", cfg), \
+             patch.object(ms, "_ensure_model", MagicMock()) as m_ensure, \
+             patch.object(ms, "_slot_registry", None), \
+             patch.object(ms, "_audio_capable", False), \
+             patch.object(ms, "_vllm_enabled", False), \
+             patch.object(ms, "_mm_model", None), \
+             patch.object(ms, "_mm_processor", proc), \
+             patch.object(ms, "_ensure_multimodal_slot", lambda: None), \
+             patch("subprocess.run", return_value=MagicMock(returncode=0)), \
+             patch("soundfile.read", return_value=(_np.zeros(16000, dtype=_np.float32), 16000)), \
+             patch("os.path.exists", return_value=True), \
+             patch("os.path.getsize", return_value=100), \
+             patch("os.unlink", lambda p: None):
+            result = ms._handle_infer_with_audio(
+                {"audio_path": "/tmp/voice.wav", "prompt": "Transcribe.",
+                 "mode": "stt", "max_new_tokens": 64})
+
+        m_ensure.assert_not_called()
+        assert result == {"error": "no audio model available (multimodal slot failed to load)"}

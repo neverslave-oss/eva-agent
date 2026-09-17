@@ -1316,6 +1316,8 @@ def _ensure_multimodal_slot():
         if not hasattr(_mm_model, 'generate'):
             raise AttributeError(f"Multimodal slot class {_mm_model.__class__.__name__} has no .generate() — STT unavailable")
     except Exception as e:
+        _mm_model = None
+        _mm_processor = None
         print(f"[model_server] ERROR loading multimodal slot: {e}", flush=True)
         raise
 
@@ -2599,10 +2601,10 @@ def _handle_infer_with_image(params: dict) -> dict:
             active_processor = _processor
             use_hf_path = False
 
-    # Guard: if we are heading into the HF/slot path but no processor is
-    # available, return a clean error instead of crashing on apply_chat_template.
-    if active_processor is None:
-        return {"error": "no vision processor available (multimodal slot failed to load)"}
+    # Guard: if the multimodal slot load left partial state behind, degrade
+    # cleanly instead of crashing on active_model.parameters() or processor use.
+    if active_model is None or active_processor is None:
+        return {"error": "no vision model available (multimodal slot failed to load)"}
 
     # If we have a dedicated vision model (audio slot / Gemma 4), always use HF path
     if use_hf_path and active_model is not None:
@@ -2765,10 +2767,10 @@ def _handle_infer_with_audio(params: dict) -> dict:
         active_processor = _mm_processor
         print(f"[model_server] infer_with_audio: using multimodal slot (HF)", flush=True)
 
-    # Guard: if we are heading into the HF path but no processor is available,
-    # return a clean error instead of crashing on apply_chat_template.
-    if active_processor is None:
-        return {"error": "no audio processor available (multimodal slot failed to load)"}
+    # Guard: if the multimodal slot load left partial state behind, degrade
+    # cleanly instead of crashing on active_model.parameters() or processor use.
+    if active_model is None or active_processor is None:
+        return {"error": "no audio model available (multimodal slot failed to load)"}
 
     # Normalise to 16kHz mono float32 WAV via ffmpeg
     tmp_wav = tempfile.mktemp(suffix=".wav")
