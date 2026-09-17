@@ -42,7 +42,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "exec_shell",
-            "description": "Execute a shell command and return stdout/stderr. Use for running scripts, checking service health, git operations, file operations.",
+            "description": "Execute a shell command and return stdout/stderr. Use for headless automation: running scripts, checking service health, git/file operations, package managers, listing processes, reading logs. This tool has NO access to the screen, mouse, or keyboard — it cannot click, type into a GUI window, fill a form, drive a browser, press keys, or observe any display. If the task must operate a real GUI/screen (launch an app, click UI, fill a form, drive a browser, take over a window), call the computer tool instead — do not try to fake it with shell commands (e.g. pgrep, xdotool hacks) that cannot verify on-screen state.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -312,7 +312,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "computer",
-            "description": "Drive the desktop/browser via the computer-use expansion. Given a natural-language goal, the orchestrator plans atomic actions (observe/click/type/hotkey/navigate/scroll/wait/assert_text/assert_url/upload/submit), validates each against policy, and executes them through the configured driver. Real tasks actually run by default (dry_run=false): this moves the mouse/keyboard and drives the screen. Pass dry_run=true only for a planning-only simulation that does not touch the screen. Returns a JSON envelope with status, message, completed and run_id. Use for GUI automation, clicking UI elements, filling forms, navigating apps, or browser tasks that need real screen control.",
+            "description": "USE THIS TOOL for ANY task that must operate a real GUI or screen: launching or driving an application, clicking UI elements, filling forms/inputs, navigating a browser to a URL, taking over an app window, or any goal about controlling a display. This is the ONLY tool with access to the mouse, keyboard, and screen — exec_shell cannot click, type into a window, or observe a display. If the goal involves screen/GUI/browser/desktop interaction, call this tool; do not try to approximate it with shell commands. A natural-language goal is planned into atomic actions (observe/click/type/fill/submit/hotkey/navigate/scroll/wait/assert_text/assert_url/upload) and executed via the configured driver. Real tasks actually run by default (dry_run=false): this moves the mouse/keyboard and drives the screen. Pass dry_run=true only for a planning-only simulation that does not touch the screen. Returns a JSON envelope with status, message, completed and run_id.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -330,7 +330,7 @@ TOOLS = [
                     },
                     "llm": {
                         "type": "boolean",
-                        "description": "Use the LLM vision planner (perceive->decide->act loop, DeepSeek Vision). Default true. Set false to use the deterministic planner."
+                        "description": "Planner selection. DEFAULT is the RL planner (state-based, verified-reward, handles blank/unknown pages by navigating). Set llm:true ONLY to use the DeepSeek Vision perceive->decide->act loop for tasks needing visual reasoning on a populated screen. For routine browser/form tasks leave this unset (false) so the RL planner drives."
                     },
                     "step_cap": {
                         "type": "integer",
