@@ -25,7 +25,7 @@ mkdir -p "$LOG_DIR"
 export LD_LIBRARY_PATH="$HOME/.miniconda/lib/python3.13/site-packages/nvidia/cu13/lib:${LD_LIBRARY_PATH:-}"
 
 # Model paths
-GEMMA="$HOME/models/huggingface/hub/models--google--gemma-4-E2B-it/snapshots/4742fe843cc01b9aed62122f6e0ddd13ea48b3d3"
+GEMMA="/mnt/e/models/huggingface/hub/models--google--gemma-4-E2B-it/snapshots/4742fe843cc01b9aed62122f6e0ddd13ea48b3d3"
 QWEN="$HOME/.cache/huggingface/hub/models--Qwen--Qwen3.5-0.8B/snapshots/2fc06364715b967f1860aea9cf38778875588b17"
 NEMOTRON="/mnt/e/models/huggingface/hub/models--nvidia--Nemotron-Labs-Diffusion-3B"
 

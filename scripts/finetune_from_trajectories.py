@@ -42,19 +42,22 @@ from pathlib import Path
 # which LoRA target modules are trainable. Kept as data so a new supported local
 # model is a one-line addition.
 FAMILY_PRESETS = {
+    "qwen": {
+        "load_class": "auto",                 # AutoModel (Qwen3_5ForConditionalGeneration — multimodal arch)
+        "lora_targets": r"language_model\.layers\..*\.(q_proj|k_proj|v_proj|o_proj|gate_proj|up_proj|down_proj)$",
+        "lora_r": 16,
+        "lora_alpha": 32,
+        "quantize": True,
+        "assistant_role": "assistant",        # Qwen chat template uses 'assistant'
+        "task_type": None,                    # multimodal arch — no CAUSAL_LM task_type
+    },
     "gemma": {
         "load_class": "image_text_to_text",   # AutoModelForImageTextToText
         "lora_targets": r"model\.language_model\..*\.(q_proj|v_proj|k_proj|o_proj|gate_proj|up_proj|down_proj)$",
         "lora_r": 16,
         "lora_alpha": 32,
         "quantize": True,
-    },
-    "qwen": {
-        "load_class": "causal_lm",            # AutoModelForCausalLM
-        "lora_targets": r"(q_proj|k_proj|v_proj|o_proj|gate_proj|up_proj|down_proj)$",
-        "lora_r": 16,
-        "lora_alpha": 32,
-        "quantize": True,
+        "assistant_role": "model",            # Gemma4 chat template uses 'model'
     },
     "nemotron": {
         "load_class": "auto",                 # AutoModel (custom remote, trust_remote_code)
@@ -160,7 +163,7 @@ def _normalise_tool_calls(tool_calls) -> list:
     return out
 
 
-def records_to_sft_dataset(records: list, tokenizer) -> "Dataset":
+def records_to_sft_dataset(records: list, tokenizer, assistant_role: str = "model") -> "Dataset":
     """Convert trajectory records to SFT format using chat template.
 
     Two input modes are supported:
@@ -171,6 +174,9 @@ def records_to_sft_dataset(records: list, tokenizer) -> "Dataset":
       2. records with a "messages" list (standard export) — rendered here with
          apply_chat_template(tools=_TRAINING_TOOLS) so the model sees the exact
          inference prompt format. This is the Gemma/Qwen path.
+
+    assistant_role: which role string the target's chat template accepts for the
+        assistant turn — Gemma uses "model", Qwen uses "assistant".
     """
     from datasets import Dataset
 
@@ -192,15 +198,13 @@ def records_to_sft_dataset(records: list, tokenizer) -> "Dataset":
             if role == "assistant":
                 if tool_calls:
                     # Native tool-call turn: pass tool_calls as structured data.
-                    # Do NOT put them in content — apply_chat_template renders them
-                    # as function-call tokens when tools= is provided.
                     formatted.append({
-                        "role": "model",
+                        "role": assistant_role,
                         "content": content,
                         "tool_calls": _normalise_tool_calls(tool_calls),
                     })
                 else:
-                    formatted.append({"role": "model", "content": content})
+                    formatted.append({"role": assistant_role, "content": content})
 
             elif role == "tool":
                 # Tool result turn — Gemma4 expects role="tool" with tool_responses list.
@@ -336,7 +340,7 @@ def main():
         print("ERROR: No records meet the score threshold. Lower --min-score or collect more trajectories.")
         sys.exit(1)
 
-    dataset = records_to_sft_dataset(records, tokenizer)
+    dataset = records_to_sft_dataset(records, tokenizer, assistant_role=preset.get("assistant_role", "model"))
 
     # Load model with LoRA
     print("Loading model...")
@@ -363,9 +367,12 @@ def main():
         quantization_config=bnb_config,
     )
 
-    if family == "nemotron":
-        # Nemotron is a custom remote-code model; load via AutoModel + trust_remote_code.
-        load_kwargs["trust_remote_code"] = True
+    if preset["load_class"] == "auto":
+        # AutoModel path — used by Nemotron (custom remote code) and Qwen3.5
+        # (Qwen3_5ForConditionalGeneration multimodal arch). Nemotron additionally
+        # needs trust_remote_code.
+        if family == "nemotron":
+            load_kwargs["trust_remote_code"] = True
         model = AutoModel.from_pretrained(model_path, **load_kwargs)
     elif preset["load_class"] == "causal_lm":
         model = AutoModelForCausalLM.from_pretrained(model_path, **load_kwargs)
@@ -376,14 +383,18 @@ def main():
             model = AutoModelForCausalLM.from_pretrained(model_path, **load_kwargs)
 
     # LoRA config — family-aware target regex (Gemma/Qwen/Nemotron from presets).
-    lora_config = LoraConfig(
-        r=preset["lora_r"],
-        lora_alpha=preset["lora_alpha"],
-        target_modules=preset["lora_targets"],
-        lora_dropout=0.05,
-        bias="none",
-        task_type="CAUSAL_LM",
-    )
+    lora_kwargs = {
+        "r": preset["lora_r"],
+        "lora_alpha": preset["lora_alpha"],
+        "target_modules": preset["lora_targets"],
+        "lora_dropout": 0.05,
+        "bias": "none",
+    }
+    # task_type: None for multimodal/conditional-generation archs (Qwen3.5) which
+    # PEFT can't auto-map; CAUSAL_LM for standard decoders (Gemma/Nemotron).
+    if preset.get("task_type"):
+        lora_kwargs["task_type"] = preset["task_type"]
+    lora_config = LoraConfig(**lora_kwargs)
     model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()
 
