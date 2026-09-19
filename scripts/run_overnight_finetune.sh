@@ -29,24 +29,34 @@ GEMMA="$HOME/models/huggingface/hub/models--google--gemma-4-E2B-it/snapshots/474
 QWEN="$HOME/.cache/huggingface/hub/models--Qwen--Qwen3.5-0.8B/snapshots/2fc06364715b967f1860aea9cf38778875588b17"
 NEMOTRON="/mnt/e/models/huggingface/hub/models--nvidia--Nemotron-Labs-Diffusion-3B"
 
-# Targets: name|model_path|dataset|output_subdir|extra_args
+# Targets ordered SMALLEST->LARGEST (train smallest first):
+#   eva-1b  = Qwen3.5-0.8B  (tool_calling slot)
+#   eva-e2b = Gemma 4 E2B-it (audio/multimodal)
+#   nemotron-fc = Nemotron 3.8B (FC probe — LARGEST, keep separate phase)
+# name|model_path|dataset|output_subdir|tier|extra_args
 TARGETS=(
-  "eva-e2b|$GEMMA|$DATA_DIR/sft_ready_final.jsonl|eva_e2b|--batch-size 1 --local --epochs 3"
-  "eva-1b|$QWEN|$DATA_DIR/sft_ready_final.jsonl|eva_1b|--batch-size 1 --local --epochs 3"
-  "nemotron-fc|$NEMOTRON|$DATA_DIR/sft_nemotron_fc.jsonl|nemotron_fc|--batch-size 1 --local --epochs 3"
+  "eva-1b|$QWEN|$DATA_DIR/sft_ready_final.jsonl|eva_1b|small|--batch-size 1 --local --epochs 3"
+  "eva-e2b|$GEMMA|$DATA_DIR/sft_ready_final.jsonl|eva_e2b|small|--batch-size 1 --local --epochs 3"
+  "nemotron-fc|$NEMOTRON|$DATA_DIR/sft_nemotron_fc.jsonl|nemotron_fc|large|--batch-size 1 --local --epochs 3"
 )
+
+# Tier gating: default runs SMALL models only (smallest first, per Fabio 01:01).
+#   --tier small  -> Qwen + Gemma (overnight, tonight)
+#   --tier large  -> Nemotron FC (next day, after small adapters verified)
+#   --tier all    -> everything
+TIER="${TIER:-small}"
 
 log() { echo "[$(date '+%H:%M:%S')] $*" | tee -a "$LOG_DIR/overnight.log"; }
 
-ONLY="${2:-}"
 DRY=""
-if [ "${1:-}" = "--dry-run" ]; then DRY=1; fi
-if [ "${2:-}" = "--dry-run" ]; then DRY=1; ONLY="${3:-}"; fi
+# args: [--dry-run] [--only <name>]  ; TIER env controls scope
+if [ "${1:-}" = "--dry-run" ]; then DRY=1; shift; fi
+ONLY="${1:-}"
 
-log "=== eva overnight fine-tune ==="
+log "=== eva overnight fine-tune ($(date)) ==="
 log "Python: $PYTHON"
 log "GPU (before): $(nvidia-smi --query-gpu=memory.free --format=csv,noheader | head -1) free"
-log "DRY_RUN=${DRY:-0} ONLY=${ONLY:-all}"
+log "DRY_RUN=${DRY:-0} TIER=${TIER} ONLY=${ONLY:-none}"
 
 if [ -z "${DRY:-}" ]; then
   log "Stopping GPU services (mirror train.sh)..."
@@ -59,9 +69,14 @@ fi
 
 results=()
 for entry in "${TARGETS[@]}"; do
-  IFS='|' read -r name model dataset subdir extra <<< "$entry"
+  IFS='|' read -r name model dataset subdir tier extra <<< "$entry"
   if [ -n "$ONLY" ] && [ "$name" != "$ONLY" ]; then
     log "  skipping $name (only=$ONLY)"
+    continue
+  fi
+  if [ "$TIER" != "all" ] && [ "$tier" != "$TIER" ]; then
+    log "  skipping $name (tier=$tier outside TIER=$TIER — gated for later phase)"
+    results+=("$name: SKIPPED (tier $tier, TIER=$TIER)")
     continue
   fi
   if [ ! -f "$dataset" ]; then
