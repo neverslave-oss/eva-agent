@@ -18,55 +18,59 @@ from map_trajectories_to_nemotron import (
 )
 
 
-def _sample_record(**overrides):
+def _export_record(**overrides):
+    """A record in the actual trajectory_collector.export_jsonl format: the tool
+    calls live INSIDE messages (assistant tool_calls turns + tool response turns)."""
     rec = {
         "id": "7",
         "ts": "2026-09-15T17:56:39.963105",
         "task": "write a hello world script to /tmp/hello.py",
         "provider": "deepseek-ai",
-        "model": "deepseek-ai/DeepSeek-V4-Flash-0731",
         "call_type": "task_inference",
-        "messages": [],
-        "artifacts": ["/tmp/hello.py"],
+        "messages": [
+            {"role": "user", "content": "write a hello world script to /tmp/hello.py"},
+            {
+                "role": "assistant",
+                "tool_calls": [{
+                    "type": "function",
+                    "function": {
+                        "name": "write_file",
+                        "arguments": '{"path": "/tmp/hello.py", "content": "print(\'hi\')\\n"}',
+                    },
+                }],
+            },
+            {"role": "tool", "name": "write_file", "content": "Written to /tmp/hello.py"},
+            {"role": "assistant", "content": "Created the script. Run it with python3 /tmp/hello.py"},
+        ],
         "critic_score": 0.9,
         "verdict": "PASS",
-        "tool_calls": [
-            {
-                "tool": "write_file",
-                "args": {"path": "/tmp/hello.py", "content": "print('hi')\n"},
-                "result": "Written to /tmp/hello.py",
-            }
-        ],
-        "final_reply": "Created the script. Run it with python3 /tmp/hello.py",
     }
     rec.update(overrides)
     return rec
 
 
-def test_convert_record_builds_user_tool_assistant_sequence():
-    out = convert_record(_sample_record())
+def test_convert_record_builds_clean_sequence():
+    out = convert_record(_export_record())
     roles = [m["role"] for m in out["messages"]]
-    # user -> assistant(tool_calls) -> tool -> assistant(final)
     assert roles == ["user", "assistant", "tool", "assistant"]
-    assert out["messages"][0]["content"] == "write a hello world script to /tmp/hello.py"
-    # assistant tool call shape (HF/Nemotron-consumable)
     tc = out["messages"][1]["tool_calls"][0]
     assert tc["type"] == "function"
     assert tc["function"]["name"] == "write_file"
+    # string arguments normalised to dict for Nemotron template
     assert tc["function"]["arguments"] == {"path": "/tmp/hello.py", "content": "print('hi')\n"}
-    # tool response
     assert out["messages"][2]["role"] == "tool"
-    assert out["messages"][2]["name"] == "write_file"
-    assert out["messages"][2]["content"] == "Written to /tmp/hello.py"
-    # final reply preserved
     assert out["messages"][3]["content"].startswith("Created the script")
 
 
 def test_convert_record_multiple_tool_calls_in_order():
-    rec = _sample_record()
-    rec["tool_calls"] = [
-        {"tool": "exec_shell", "args": {"command": "ls"}, "result": "a.txt"},
-        {"tool": "read_file", "args": {"path": "a.txt"}, "result": "contents"},
+    rec = _export_record()
+    rec["messages"] = [
+        {"role": "user", "content": "list then read"},
+        {"role": "assistant", "tool_calls": [{"type": "function", "function": {"name": "exec_shell", "arguments": {"command": "ls"}}}]},
+        {"role": "tool", "name": "exec_shell", "content": "a.txt"},
+        {"role": "assistant", "tool_calls": [{"type": "function", "function": {"name": "read_file", "arguments": {"path": "a.txt"}}}]},
+        {"role": "tool", "name": "read_file", "content": "contents"},
+        {"role": "assistant", "content": "done"},
     ]
     out = convert_record(rec)
     roles = [m["role"] for m in out["messages"]]
@@ -75,69 +79,67 @@ def test_convert_record_multiple_tool_calls_in_order():
     assert out["messages"][3]["tool_calls"][0]["function"]["name"] == "read_file"
 
 
-def test_convert_record_drops_empty_tool_names_and_messages():
-    rec = _sample_record()
-    rec["tool_calls"] = [
-        {"tool": "", "args": {}, "result": "x"},
-        {"args": {}, "result": "y"},  # no name at all
+def test_convert_record_drops_malformed_tool_calls():
+    rec = _export_record()
+    rec["messages"] = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "tool_calls": [{"type": "function", "function": {"name": ""}}, {"type": "function", "function": {"name": "read_file", "arguments": {}}}]},
+        {"role": "tool", "name": "read_file", "content": "x"},
+        {"role": "assistant", "content": "done"},
     ]
     out = convert_record(rec)
-    # both malformed tool_calls dropped -> only user + final assistant
     roles = [m["role"] for m in out["messages"]]
-    assert roles == ["user", "assistant"]
+    # empty-name call dropped; only read_file remains
+    assert roles == ["user", "assistant", "tool", "assistant"]
+    assert len(out["messages"][1]["tool_calls"]) == 1
 
 
-def test_convert_record_skips_missing_final_reply():
-    rec = _sample_record()
-    rec["final_reply"] = ""
+def test_convert_record_drops_blank_trailing_assistant():
+    rec = _export_record()
+    rec["messages"] = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "tool_calls": [{"type": "function", "function": {"name": "read_file", "arguments": {}}}]},
+        {"role": "tool", "name": "read_file", "content": "x"},
+        {"role": "assistant", "content": ""},  # blank trailing assistant -> dropped
+    ]
     out = convert_record(rec)
     roles = [m["role"] for m in out["messages"]]
     assert roles == ["user", "assistant", "tool"]
 
 
-def test_convert_record_string_arguments_normalised():
-    rec = _sample_record()
-    rec["tool_calls"] = [
-        {"tool": "write_file", "args": '{"path": "/x", "content": "y"}', "result": "ok"}
-    ]
-    out = convert_record(rec)
-    args = out["messages"][1]["tool_calls"][0]["function"]["arguments"]
-    assert isinstance(args, dict)
-    assert args == {"path": "/x", "content": "y"}
+def test_convert_record_empty_messages_returns_none():
+    assert convert_record({"id": "1", "messages": []}) is None
 
 
-def test_collect_tool_schemas_dedupes_and_maps_known():
-    records = [
-        _sample_record(),
-        _sample_record(id="8", tool_calls=[{"tool": "write_file", "args": {}, "result": "x"}]),
-    ]
+def test_collect_tool_schemas_from_messages():
+    records = [_export_record()]
     schemas = collect_tool_schemas(records)
     names = [s["function"]["name"] for s in schemas]
     assert names == ["write_file"]
     assert schemas[0] == TOOL_SCHEMAS["write_file"]
 
 
-def test_collect_tool_schemas_covers_multiple_names():
-    records = [
-        _sample_record(
-            tool_calls=[
-                {"tool": "exec_shell", "args": {"command": "ls"}, "result": "a"},
-                {"tool": "read_file", "args": {"path": "a"}, "result": "b"},
-            ]
-        )
+def test_collect_tool_schemas_multiple_names():
+    rec = _export_record()
+    rec["messages"] = [
+        {"role": "user", "content": "x"},
+        {"role": "assistant", "tool_calls": [{"type": "function", "function": {"name": "exec_shell", "arguments": {}}}]},
+        {"role": "tool", "name": "exec_shell", "content": "a"},
+        {"role": "assistant", "tool_calls": [{"type": "function", "function": {"name": "http_get", "arguments": {}}}]},
+        {"role": "tool", "name": "http_get", "content": "b"},
     ]
-    schemas = collect_tool_schemas(records)
+    schemas = collect_tool_schemas([rec])
     names = [s["function"]["name"] for s in schemas]
-    assert names == ["exec_shell", "read_file"]
+    assert names == ["exec_shell", "http_get"]
 
 
 def test_collect_tool_schemas_synthesises_unknown():
-    records = [
-        _sample_record(
-            tool_calls=[{"tool": "custom_tool_x", "args": {"url": "http://x"}, "result": "ok"}]
-        )
+    rec = _export_record()
+    rec["messages"] = [
+        {"role": "user", "content": "x"},
+        {"role": "assistant", "tool_calls": [{"type": "function", "function": {"name": "custom_tool_x", "arguments": {"url": "http://x"}}}]},
     ]
-    schemas = collect_tool_schemas(records)
+    schemas = collect_tool_schemas([rec])
     fn = schemas[0]["function"]
     assert fn["name"] == "custom_tool_x"
     assert "url" in fn["parameters"]["properties"]

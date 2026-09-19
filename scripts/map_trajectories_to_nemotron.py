@@ -7,10 +7,15 @@ Map kernel-evolving trajectory exports (TRL-style JSONL from
 function-calling adapter, rendered with Nemotron's own chat template so the model
 learns its native `<tool_call><function=...>` format.
 
+Export format (from trajectory_collector.export_jsonl) puts the tool calls INSIDE
+the `messages` array — assistant turns carry `tool_calls`, followed by `tool`
+response turns. There is NO top-level `tool_calls` key on the record. This mapper
+therefore derives everything from `messages`, so it works on real exports.
+
 Nemotron chat-template facts (from the model's `chat_template.jinja`):
   - Tools are declared in a "# Tools\n\n<tools>...</tools>" system block, injected
     when `apply_chat_template(..., tools=[...])` is used.
-  - Assistant tool calls are rendered as:
+  - Assistant tool calls render as:
       <tool_call>
       <function=NAME>
       <parameter=KEY>
@@ -18,13 +23,11 @@ Nemotron chat-template facts (from the model's `chat_template.jinja`):
       </parameter>
       </function>
       </tool_call>
-  - Tool results are rendered as a `user` turn wrapped in `<tool_response>...</tool_response>`.
+  - Tool results render as a `user` turn wrapped in `<tool_response>...</tool_response>`.
   - Generation prompt: `<|im_start|>assistant\n thinking response`
 
-The mapper therefore emits a **standard messages list** (user / assistant with
-tool_calls / tool / assistant) and hands it to Nemotron's tokenizer with `tools=`,
-so the output `text` is byte-for-byte what Nemotron sees at inference — closing the
-same tool-format mismatch ADR-015 documents for the base scripts.
+The mapper emits a **standard messages list** and hands it to Nemotron's tokenizer
+with `tools=`, so the output `text` is what Nemotron sees at inference.
 
 Usage:
   python3 scripts/map_trajectories_to_nemotron.py \
@@ -45,9 +48,6 @@ import sys
 from pathlib import Path
 
 # ── Known tool schemas (subset of what eva actually calls) ──────────────────
-# These are passed to apply_chat_template(tools=...) so Nemotron renders a proper
-# "# Tools" block and a well-formed <tool_call> for each. Unknown tools observed in
-# trajectories are synthesized from their argument keys (see _schema_for_unknown).
 TOOL_SCHEMAS = {
     "exec_shell": {
         "type": "function",
@@ -128,16 +128,17 @@ TOOL_SCHEMAS = {
 }
 
 
-def _schema_for_unknown(name: str, observed_args: dict) -> dict:
+def _schema_for_unknown(name: str, observed_args) -> dict:
     """Build a function schema from observed argument keys (best-effort)."""
     props = {}
     required = []
-    for key, val in (observed_args or {}).items():
-        if key in ("path", "content", "command", "url", "skill_name", "input"):
-            props[key] = {"type": "string"}
-            required.append(key)
-        else:
-            props[key] = {"type": "object" if isinstance(val, (dict, list)) else "string"}
+    if isinstance(observed_args, dict):
+        for key in observed_args:
+            if key in ("path", "content", "command", "url", "skill_name", "input"):
+                props[key] = {"type": "string"}
+                required.append(key)
+            else:
+                props[key] = {"type": "string"}
     return {
         "type": "function",
         "function": {
@@ -148,24 +149,33 @@ def _schema_for_unknown(name: str, observed_args: dict) -> dict:
     }
 
 
+def _extract_tool_calls(messages: list) -> list:
+    """Yield (name, args) pairs from assistant tool_calls turns in a messages list."""
+    out = []
+    for m in messages or []:
+        if m.get("role") == "assistant" and m.get("tool_calls"):
+            for tc in m["tool_calls"]:
+                fn = tc.get("function", {}) if isinstance(tc, dict) else {}
+                name = fn.get("name", "")
+                if name:
+                    out.append((name, fn.get("arguments", {})))
+    return out
+
+
 def collect_tool_schemas(records: list) -> list:
-    """Return a de-duplicated tool list for apply_chat_template(tools=...)."""
+    """De-duplicated tool list for apply_chat_template(tools=...), from messages."""
     by_name: dict[str, dict] = {}
     for rec in records:
-        for tc in rec.get("tool_calls", []):
-            name = tc.get("tool", tc.get("name", ""))
-            if not name:
-                continue
+        for name, args in _extract_tool_calls(rec.get("messages", [])):
             if name in TOOL_SCHEMAS:
                 by_name[name] = TOOL_SCHEMAS[name]
             elif name not in by_name:
-                by_name[name] = _schema_for_unknown(name, tc.get("args", {}))
-    # Stable order
+                by_name[name] = _schema_for_unknown(name, args)
     return [by_name[n] for n in sorted(by_name)]
 
 
-def _as_args_dict(args) -> dict:
-    """Arguments may be a dict or a JSON string — normalise."""
+def _as_args_dict(args):
+    """Arguments may be a dict or a JSON string — normalise to dict."""
     if isinstance(args, dict):
         return args
     if isinstance(args, str):
@@ -179,64 +189,70 @@ def _as_args_dict(args) -> dict:
 
 def convert_record(rec: dict) -> dict | None:
     """
-    Convert one export record (from trajectory_collector.export_jsonl) into a
-    standard messages list. Pure function (no tokenizer) — unit-testable.
+    Convert one export record into a clean messages list. Pure function
+    (no tokenizer) — unit-testable.
+
+    - Keeps user/system/tool/assistant turns, normalising assistant tool_calls
+      arguments from JSON string to dict (what Nemotron's template expects).
+    - Drops malformed tool_calls (no name) and strips empty assistant turns that
+      follow a tool call (they carry no learnable content).
     """
-    task = rec.get("task")
-    messages = []
-    if isinstance(task, str) and task.strip():
-        messages.append({"role": "user", "content": task})
-    elif task is None:
-        messages.append({"role": "user", "content": ""})
+    messages = rec.get("messages", [])
+    if not messages:
+        task = rec.get("task")
+        messages = [{"role": "user", "content": task}] if task else []
 
-    for tc in rec.get("tool_calls", []) or []:
-        if not isinstance(tc, dict):
-            continue
-        name = tc.get("tool", tc.get("name", ""))
-        args = _as_args_dict(tc.get("args", tc.get("arguments", {})))
-        if not name:
-            continue
-        messages.append({
-            "role": "assistant",
-            "tool_calls": [{
-                "type": "function",
-                "function": {"name": name, "arguments": args},
-            }],
-        })
-        messages.append({
-            "role": "tool",
-            "name": name,
-            "content": str(tc.get("result", "")),
-        })
+    clean = []
+    for m in messages:
+        role = m.get("role")
+        if role == "assistant" and m.get("tool_calls"):
+            tcs = []
+            for tc in m["tool_calls"]:
+                fn = tc.get("function", {}) if isinstance(tc, dict) else {}
+                name = fn.get("name", "")
+                if not name:
+                    continue
+                tcs.append({
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "arguments": _as_args_dict(fn.get("arguments", {})),
+                    },
+                })
+            if tcs:
+                clean.append({"role": "assistant", "tool_calls": tcs})
+        elif role in ("user", "system", "tool", "assistant"):
+            clean.append(m)
 
-    final_reply = rec.get("final_reply", "")
-    if isinstance(final_reply, str) and final_reply.strip():
-        messages.append({"role": "assistant", "content": final_reply})
+    # Drop a trailing empty assistant content turn that just says "Done"-style
+    # wrappers after a tool result — keeps FC signal crisp.
+    if clean and clean[-1].get("role") == "assistant":
+        content = (clean[-1].get("content") or "").strip()
+        if not content:
+            clean.pop()
+
+    if not clean:
+        return None
 
     return {
         "id": rec.get("id"),
-        "task": task,
-        "messages": messages,
+        "task": rec.get("task"),
+        "messages": clean,
         "critic_score": rec.get("critic_score"),
         "verdict": rec.get("verdict"),
     }
 
 
 def render_nemotron(rec: dict, tools: list, tokenizer):
-    """Apply Nemotron's chat template to a converted record. Returns a text string."""
-    from transformers import AutoTokenizer
-
-    if tokenizer is None:
-        raise RuntimeError("render_nemotron requires a tokenizer")
+    """Apply Nemotron's chat template to a converted record. Returns text or None."""
     try:
-        text = tokenizer.apply_chat_template(
+        return tokenizer.apply_chat_template(
             rec["messages"],
             tools=tools if tools else None,
             tokenize=False,
             add_generation_prompt=False,
         )
-        return text
-    except Exception as e:  # unsupported tool shape — drop gracefully
+    except Exception as e:
         print(f"  [skip] render error for id={rec.get('id')}: {e}")
         return None
 
