@@ -37,6 +37,45 @@ import sys
 from pathlib import Path
 
 
+# ── Model family presets (generalized for Gemma / Qwen / Nemotron) ─────────
+# Each family defines how the base is loaded, how the tokenizer is resolved, and
+# which LoRA target modules are trainable. Kept as data so a new supported local
+# model is a one-line addition.
+FAMILY_PRESETS = {
+    "gemma": {
+        "load_class": "image_text_to_text",   # AutoModelForImageTextToText
+        "lora_targets": r"model\.language_model\..*\.(q_proj|v_proj|k_proj|o_proj|gate_proj|up_proj|down_proj)$",
+        "lora_r": 16,
+        "lora_alpha": 32,
+        "quantize": True,
+    },
+    "qwen": {
+        "load_class": "causal_lm",            # AutoModelForCausalLM
+        "lora_targets": r"(q_proj|k_proj|v_proj|o_proj|gate_proj|up_proj|down_proj)$",
+        "lora_r": 16,
+        "lora_alpha": 32,
+        "quantize": True,
+    },
+    "nemotron": {
+        "load_class": "auto",                 # AutoModel (custom remote, trust_remote_code)
+        "lora_targets": ["o_proj"],           # NVIDIA's own linear_spec adapter targets o_proj
+        "lora_r": 128,
+        "lora_alpha": 512,
+        "quantize": True,
+    },
+}
+
+
+def detect_family(model_path: str) -> str:
+    """Infer model family from its path/name. Defaults to gemma."""
+    p = (model_path or "").lower()
+    if "qwen" in p:
+        return "qwen"
+    if "nemotron" in p:
+        return "nemotron"
+    return "gemma"
+
+
 def load_dataset_from_jsonl(path: str) -> list:
     """Load JSONL export from trajectory_collector."""
     records = []
@@ -242,32 +281,42 @@ def main():
     print(f"{'='*60}\n")
 
     import torch
-    from transformers import AutoProcessor, AutoTokenizer
+    from transformers import AutoProcessor, AutoTokenizer, AutoModel, AutoModelForCausalLM, AutoModelForImageTextToText
     from trl import SFTTrainer, SFTConfig
     from peft import LoraConfig, get_peft_model
 
-    # Always use the main E2B-it tokenizer for chat template formatting.
-    # The drafter has no chat template; the E2B-it tokenizer must be used.
+    # Resolve family + tokenizer path from the chosen model.
+    family = detect_family(model_path)
+    preset = FAMILY_PRESETS[family]
+    print(f"Model family: {family} (preset: {preset})")
+
+    # Legacy E2B default: keep the env override for backwards compatibility.
     E2B_MODEL = os.environ.get(
         "KERNEL_EVO_E2B_MODEL",
         os.path.expanduser("~/models/huggingface/hub/models--google--gemma-4-E2B-it/snapshots/4742fe843cc01b9aed62122f6e0ddd13ea48b3d3"),
     )
-    tokenizer_path = E2B_MODEL  # always use E2B-it for formatting
+    # Nemotron uses its own tokenizer (it has no multimodal processor); the chat
+    # template lives in the tokenizer. Gemma uses AutoProcessor with chat template.
+    tokenizer_path = model_path if family == "nemotron" else model_path
     try:
-        tokenizer = AutoProcessor.from_pretrained(tokenizer_path)
-        if not hasattr(tokenizer, "apply_chat_template") or tokenizer.chat_template is None:
-            tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+        if family in ("gemma", "qwen"):
+            tokenizer = AutoProcessor.from_pretrained(tokenizer_path)
+            if not hasattr(tokenizer, "apply_chat_template") or tokenizer.chat_template is None:
+                tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+        else:
+            tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
     except Exception:
-        tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
     print(f"Tokenizer: {tokenizer_path} (chat_template: {'yes' if getattr(tokenizer,'chat_template',None) else 'no'})")
 
-    # If --drafter flag was given but drafter is not trainable via SFT (no chat template,
-    # custom architecture), fall back to training E2B-it with LoRA instead.
-    # The drafter improves indirectly as the main model improves.
-    if args.drafter and model_path != E2B_MODEL:
+    # Legacy --drafter flag: only meaningful for Gemma's MTP drafter. If the target
+    # has no standalone chat template (e.g. drafter_path), fall back to E2B-it.
+    if args.drafter and family == "gemma" and model_path != E2B_MODEL:
         print("NOTE: Drafter is a speculative decoder (no standalone SFT). Training E2B-it with LoRA instead.")
         print("      The drafter benefits indirectly from improved E2B-it weights.")
         model_path = E2B_MODEL
+        family = detect_family(model_path)
+        preset = FAMILY_PRESETS[family]
 
     # Load dataset
     records = load_dataset_from_jsonl(args.dataset)
@@ -282,7 +331,7 @@ def main():
 
     # Load model with LoRA
     print("Loading model...")
-    from transformers import AutoModelForCausalLM, AutoModelForImageTextToText, BitsAndBytesConfig
+    from transformers import BitsAndBytesConfig
     dtype = torch.float16
 
     # Try 4-bit quantisation if bitsandbytes available
@@ -305,19 +354,23 @@ def main():
         quantization_config=bnb_config,
     )
 
-    try:
-        model = AutoModelForImageTextToText.from_pretrained(model_path, **load_kwargs)
-    except Exception:
+    if family == "nemotron":
+        # Nemotron is a custom remote-code model; load via AutoModel + trust_remote_code.
+        load_kwargs["trust_remote_code"] = True
+        model = AutoModel.from_pretrained(model_path, **load_kwargs)
+    elif preset["load_class"] == "causal_lm":
         model = AutoModelForCausalLM.from_pretrained(model_path, **load_kwargs)
+    else:
+        try:
+            model = AutoModelForImageTextToText.from_pretrained(model_path, **load_kwargs)
+        except Exception:
+            model = AutoModelForCausalLM.from_pretrained(model_path, **load_kwargs)
 
-    # LoRA config — target ONLY language model layers via regex.
-    # vision_tower and audio_tower use Gemma4ClippableLinear which PEFT can't wrap.
-    # The regex ^model\.language_model\.layers\..*\.(q|v|k|o|gate|up|down)_proj$ ensures
-    # only standard nn.Linear layers in the text decoder are targeted.
+    # LoRA config — family-aware target regex (Gemma/Qwen/Nemotron from presets).
     lora_config = LoraConfig(
-        r=16,
-        lora_alpha=32,
-        target_modules=r"model\.language_model\..*\.(q_proj|v_proj|k_proj|o_proj|gate_proj|up_proj|down_proj)$",
+        r=preset["lora_r"],
+        lora_alpha=preset["lora_alpha"],
+        target_modules=preset["lora_targets"],
         lora_dropout=0.05,
         bias="none",
         task_type="CAUSAL_LM",
