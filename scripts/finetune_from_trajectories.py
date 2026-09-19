@@ -163,13 +163,22 @@ def _normalise_tool_calls(tool_calls) -> list:
 def records_to_sft_dataset(records: list, tokenizer) -> "Dataset":
     """Convert trajectory records to SFT format using chat template.
 
-    Critical: apply_chat_template is called with tools=_TRAINING_TOOLS so the model
-    sees the EXACT same prompt format as at inference (model_server.py infer_with_tools).
-    tool_calls are passed as structured dicts, NOT serialised to JSON text.
+    Two input modes are supported:
+      1. records with a pre-rendered "text" field (output of
+         map_trajectories_to_nemotron.py / any tokenizer.pre-rendered export) —
+         passed through as-is. This is what Nemotron FC training consumes, since
+         its custom template + <tool_call> XML is rendered at map time.
+      2. records with a "messages" list (standard export) — rendered here with
+         apply_chat_template(tools=_TRAINING_TOOLS) so the model sees the exact
+         inference prompt format. This is the Gemma/Qwen path.
     """
     from datasets import Dataset
 
     def format_record(r):
+        # Mode 1: pre-rendered text passthrough (Nemotron mapper output).
+        if "text" in r and isinstance(r.get("text"), str) and r["text"].strip():
+            return {"text": r["text"], "task": r.get("task", ""), "critic_score": r.get("critic_score", 0)}
+
         messages = r.get("messages", [])
         if not messages:
             return None
