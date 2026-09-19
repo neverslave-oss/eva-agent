@@ -43,8 +43,8 @@ from pathlib import Path
 # model is a one-line addition.
 FAMILY_PRESETS = {
     "qwen": {
-        "load_class": "auto",                 # AutoModel (Qwen3_5ForConditionalGeneration — multimodal arch)
-        "lora_targets": r"language_model\.layers\..*\.(q_proj|k_proj|v_proj|o_proj|gate_proj|up_proj|down_proj)$",
+        "load_class": "image_text_to_text",  # AutoModelForImageTextToText -> Qwen3_5ForConditionalGeneration (has lm_head -> loss)
+        "lora_targets": r"model\.language_model\..*\.(q_proj|k_proj|v_proj|o_proj|gate_proj|up_proj|down_proj)$",
         "lora_r": 16,
         "lora_alpha": 32,
         "quantize": True,
