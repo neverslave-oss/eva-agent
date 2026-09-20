@@ -77,3 +77,51 @@ def test_create_payload_uses_generated_chat_id_when_blank():
     chat_id = ("".strip()) or f"agent-{_u.uuid4().hex[:8]}"
     assert chat_id.startswith("agent-")
     assert len(chat_id) == 14  # "agent-" (6) + 8 hex chars
+
+
+# ── ChatHistoryRepository.list_sessions (GET /api/sessions source of truth) ──
+
+from database.memory.chat_history import ChatHistoryRepository
+
+
+def _chat_repo(tmp_path):
+    return ChatHistoryRepository(db_path=str(tmp_path / "chat_history.db"))
+
+
+def _seed_session(repo, session_id, chat_id, n_msgs=3):
+    messages = [{"role": "user", "content": f"msg {i}"} for i in range(n_msgs)]
+    repo.touch_session(session_id, chat_id)
+    repo.append_messages(messages, session_id)
+
+
+class TestListSessionsFromChatHistory:
+    def test_list_sessions_returns_seeded_real_sessions(self, tmp_path):
+        repo = _chat_repo(tmp_path)
+        _seed_session(repo, "sess-a", "agent-a", n_msgs=3)
+        _seed_session(repo, "sess-b", "agent-b", n_msgs=5)
+        rows = repo.list_sessions()
+        assert len(rows) == 2
+        ids = {r["id"] for r in rows}
+        assert ids == {"sess-a", "sess-b"}
+        # message_count reflects appended messages
+        by_id = {r["id"]: r for r in rows}
+        assert by_id["sess-b"]["message_count"] == 5
+        assert by_id["sess-a"]["message_count"] == 3
+
+    def test_list_sessions_sorted_newest_first(self, tmp_path):
+        repo = _chat_repo(tmp_path)
+        _seed_session(repo, "old", "agent-old", n_msgs=1)
+        _seed_session(repo, "new", "agent-new", n_msgs=1)
+        rows = repo.list_sessions()
+        assert rows[0]["id"] == "new"
+        assert rows[1]["id"] == "old"
+
+    def test_list_sessions_empty_when_no_history(self, tmp_path):
+        repo = _chat_repo(tmp_path)
+        assert repo.list_sessions() == []
+
+    def test_list_sessions_respects_limit(self, tmp_path):
+        repo = _chat_repo(tmp_path)
+        for i in range(5):
+            _seed_session(repo, f"sess-{i}", f"agent-{i}", n_msgs=1)
+        assert len(repo.list_sessions(limit=3)) == 3

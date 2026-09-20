@@ -392,10 +392,18 @@ class NewSessionIn(BaseModel):
 
 @app.get("/api/sessions")
 def api_sessions_list(limit: int = 100):
-    """List conversations sorted by updated_at desc (sessions switcher)."""
-    repo = _conversations_repo()
+    """List persisted conversations (real chat-history sessions), newest first.
+
+    Reads from the chat-history store (ChatHistoryRepository.list_sessions),
+    which is backed by the sessions table that is written on every turn — not
+    the ConversationsRepository metadata table, which nothing populates and
+    stays empty.
+    """
     try:
-        rows = repo.list_all(limit=limit)
+        from runtime_paths import CHAT_HISTORY_DB
+        from database.memory import ChatHistoryRepository
+        repo = ChatHistoryRepository(db_path=CHAT_HISTORY_DB)
+        rows = repo.list_sessions(limit=limit)
     except Exception as exc:  # DB may be uninitialised on a fresh install
         return {"sessions": [], "error": str(exc)}
     return {"sessions": rows, "count": len(rows)}
