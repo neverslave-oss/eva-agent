@@ -282,12 +282,18 @@ evolution:
   finetune_gate:
     adapter_active_dir: ~/.kernel-evolving/workspace/artifacts/adapter_active
     adapter_output_dir: ~/.kernel-evolving/workspace/artifacts/finetune
-    enabled: false
+    enabled: true
     min_improvement: 0
     shadow_port: 8780
     shadow_socket: /tmp/kernel_evo_shadow.sock
     state_file: ~/.kernel-evolving/workspace/data/finetune_gate_state.json
-    trajectory_threshold: 50
+    trajectory_threshold: 100
+    # Local fine-tunes only run inside this window (24h, local time) so training
+    # never pins the GPU / stops services during the day. Threshold is still
+    # checked every cycle; if reached outside the window the run is deferred and
+    # retried on the next cycle until the window opens. Both HH:MM.
+    train_window_start: "23:00"
+    train_window_end: "05:00"
   min_candidate_score: 0.35
   recommendation_boost: 0.05
 

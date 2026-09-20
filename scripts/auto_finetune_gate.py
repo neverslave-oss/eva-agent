@@ -74,6 +74,35 @@ def gate_cfg(cfg: dict) -> dict:
     return cfg.get("evolution", {}).get("finetune_gate", {})
 
 
+def in_train_window(gc: dict, now=None) -> bool:
+    """True if now is inside the configured fine-tune window (24h, local wall-clock).
+
+    Window is defined by train_window_start and train_window_end (HH:MM, local).
+    Handles wraparound (e.g. 23:00 -> 05:00). Absent/malformed settings default to
+    always-allowed so the gate never silently stops firing.
+    """
+    if now is None:
+        now = datetime.now()
+    start = str(gc.get("train_window_start") or "00:00")
+    end = str(gc.get("train_window_end") or "00:00")
+    def _minutes(hhmm):
+        try:
+            h, m = hhmm.strip().split(":")
+            return int(h) * 60 + int(m)
+        except Exception:
+            return None
+    sm, em = _minutes(start), _minutes(end)
+    if sm is None or em is None:
+        return True
+    cur = now.hour * 60 + now.minute
+    if sm == em:
+        return True
+    if sm < em:
+        return sm <= cur < em
+    # wraparound: crosses midnight
+    return cur >= sm or cur < em
+
+
 def expand(path: str) -> Path:
     return Path(os.path.expanduser(path))
 
@@ -316,6 +345,20 @@ def run_check():
         return
 
     # 2. Threshold reached
+    if not in_train_window(gc):
+        # Threshold crossed but outside the scheduled training window — defer.
+        # Do NOT update last_finetune_ts, so the next cycle retries until the
+        # window opens and the local fine-tune actually runs at night.
+        logger.info(
+            f"Threshold reached ({new_count} >= {threshold}) but outside train window "
+            f"({gc.get('train_window_start')}-{gc.get('train_window_end')}) — deferring to next cycle"
+        )
+        send_telegram(
+            f"🌙 {new_count} new trajectories ready (≥{threshold}) but outside the fine-tune "
+            f"window. Deferring to tonight {gc.get('train_window_start')}-{gc.get('train_window_end')}."
+        )
+        return
+
     logger.info(f"Threshold reached ({new_count} >= {threshold}) — starting fine-tune")
     send_telegram(f"🧠 Trajectory threshold reached ({new_count} new). Starting fine-tune...")
 
