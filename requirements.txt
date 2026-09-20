@@ -16,6 +16,10 @@ soundfile>=0.12.0
 httpx>=0.27.0
 python-multipart>=0.0.9
 bitsandbytes>=0.43.0
+# CUDA 13 JIT linker for bitsandbytes 4-bit quant (`libnvJitLink.so.13`, ships to
+# site-packages/nvidia/cu13/lib/); needed to load HF Bnb4bitQuantize models on the
+# shadow eval instance. Must be on LD_LIBRARY_PATH at runtime.
+nvidia-nvjitlink
 sentence-transformers>=2.7.0
 zeroconf>=0.134.0
 mcp>=1.0.0

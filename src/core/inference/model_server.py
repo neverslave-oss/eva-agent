@@ -92,6 +92,7 @@ SOCKET_PATH = "/tmp/kernel_evolving_model.sock"
 
 _config = None
 _lazy_config_path = "config.yaml"  # set at startup, used by lazy load in handlers
+_lazy_model_override = None  # set at startup via --model, forces base model path independent of config.yaml
 
 
 # ── Failure re-prompt helpers (Plan 007) ────────────────────────────────────
@@ -1161,9 +1162,14 @@ def _make_slot_loader():
     return _load_slot_fn
 
 
-def _load_model(config_path="config.yaml"):
+def _load_model(config_path="config.yaml", model_path_override: str | None = None):
     """Load main model — tries vLLM first, falls back to HF transformers.
     Routes Nemotron-Labs-Diffusion models to the dedicated _load_nemotron path.
+
+    model_path_override: force a specific base model path, bypassing config.yaml's
+    model.path/model.name. Used by eval tooling to load the correct base model for
+    a given LoRA adapter (adapter.base_model_name_or_path), independent of whatever
+    model is currently configured for live inference.
     """
     global _config, _slot_registry
     with _load_lock:
@@ -1196,7 +1202,7 @@ def _load_model(config_path="config.yaml"):
             except Exception as _sre:
                 print(f"[model_server] WARNING: failed to build SlotRegistry: {_sre}", flush=True)
                 _slot_registry = None
-        model_path = cfg["model"].get("path") or cfg["model"].get("name", "")
+        model_path = model_path_override or cfg["model"].get("path") or cfg["model"].get("name", "")
 
         # Janus uses the custom `janus` package — completely different API
         if _is_janus_model(model_path):
@@ -1213,19 +1219,19 @@ def _load_model(config_path="config.yaml"):
         backend = cfg.get("inference", {}).get("backend", "vllm")
 
         if backend == "vllm":
-            success = _load_vllm_engine(config_path)
+            success = _load_vllm_engine(config_path, model_path_override=model_path if model_path_override else None)
             if not success:
                 # Fallback to HF
-                _load_hf_model(config_path)
+                _load_hf_model(config_path, model_path_override=model_path if model_path_override else None)
         else:
             # Explicit transformers backend
             print("[model_server] inference.backend=transformers — skipping vLLM", flush=True)
-            _load_hf_model(config_path)
+            _load_hf_model(config_path, model_path_override=model_path if model_path_override else None)
 
 
 def _ensure_model():
     if not _vllm_enabled and _model is None:
-        _load_model(_lazy_config_path)
+        _load_model(_lazy_config_path, model_path_override=_lazy_model_override)
         adapter_path = os.environ.get("MODEL_ADAPTER_PATH")
         if adapter_path:
             _load_adapter(adapter_path)
@@ -3582,6 +3588,7 @@ def main():
     parser.add_argument("--socket", default=None, help="Override socket path")
     parser.add_argument("--lazy", action="store_true", help="Defer model load to first inference request")
     parser.add_argument("--adapter", default=None, help="Path to LoRA adapter to load after base model")
+    parser.add_argument("--model", default=None, help="Override base model path/name, bypassing config.yaml's model.path (for eval: load the adapter's own base model)")
     args = parser.parse_args()
 
     socket_path = args.socket or SOCKET_PATH
@@ -3607,6 +3614,9 @@ def main():
     global _lazy_config_path
     _lazy_config_path = os.path.abspath(args.config)
 
+    global _lazy_model_override
+    _lazy_model_override = args.model
+
     if args.adapter:
         import os as _os
         _os.environ["MODEL_ADAPTER_PATH"] = args.adapter
@@ -3615,7 +3625,7 @@ def main():
     if args.lazy:
         print(f"[model_server] Lazy mode: model will load on first inference request.", flush=True)
     else:
-        _load_model(args.config)
+        _load_model(args.config, model_path_override=args.model)
         if args.adapter:
             _load_adapter(args.adapter)
 
