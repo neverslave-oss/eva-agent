@@ -1821,12 +1821,27 @@ def handle_message(chat_id: str, text: str, sender_name: str = "", photo_file_id
             except Exception:
                 pass
 
-        # ── Provider ──────────────────────────────────────────────────────
+        # ── Effective serving route: local vs cloud (provider + model) ────
+        # get_provider() applies thermal fallback live, so this reflects what is
+        # ACTUALLY serving task_inference right now, not just the configured value.
+        _route_kind = "local"
+        _route_provider = "local"
+        _route_model = None
         try:
             from core.inference.provider import get_provider as _gp_s
-            _prov_label = _gp_s().get_provider("task_inference")
+            _prov = _gp_s()
+            _route_provider = _prov.get_provider("task_inference")
+            _route_model = _prov.get_model(_route_provider, "task_inference")
+            _route_kind = "local" if _route_provider == "local" else "cloud"
         except Exception:
-            _prov_label = "unknown"
+            _route_provider = "unknown"
+        _route_emoji = "💻" if _route_kind == "local" else "☁️"
+        if _route_kind == "local":
+            _route_line = f"Serving: {_route_emoji} local"
+        else:
+            _route_line = (f"Serving: {_route_emoji} cloud ({_route_provider})")
+            if _route_model:
+                _route_line += f"\nCloud model: {_route_model}"
 
         # ── Evolution / finetune-gate state ──────────────────────────────
         _gate_state = {}
@@ -1874,9 +1889,9 @@ def handle_message(chat_id: str, text: str, sender_name: str = "", photo_file_id
             (
                 f"🐬 *Kernel Evo Status*\n"
                 f"Version: v{__version__}{update_note}\n"
-                f"Model: {_model_label}{_loaded_txt}\n"
+                f"🧠 Model: {_model_label}{_loaded_txt}\n"
                 f"Adapter: {_adapter_label}\n"
-                f"Provider: {_prov_label}\n"
+                f"{_route_line}\n"
                 f"VRAM free: {_vram_free}MB\n"
                 f"Drafter: {_drafter} · Audio: {_audio}\n"
                 f"Slots: {_slot_line}\n"
