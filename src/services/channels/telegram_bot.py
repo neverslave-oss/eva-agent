@@ -825,6 +825,22 @@ def handle_callback(chat_id: str, data: str, message_id: int):
             if message_id:
                 edit_message(chat_id, message_id, f"*Risky computer-use action* — {status}")
             return
+        # ── Ask-questions user prompt ──────────────────────────────────────
+        # Format: aq_<request_id>_<option_idx>
+        if data.startswith("aq_"):
+            parts = data.split("_")
+            # parts: ['aq', '<rid>', '<idx>']
+            if len(parts) >= 3:
+                request_id = parts[1]
+                try:
+                    option_idx = int(parts[2])
+                except ValueError:
+                    option_idx = 0
+                from core.ask_questions_gate import resolve_question
+                resolve_question(request_id, option_idx)
+                if message_id:
+                    edit_message(chat_id, message_id, "✅ Got it — thanks!")
+            return
         if data.startswith("install_"):
             parts = data.split("_", 2)
             item_type = parts[1] if len(parts) > 1 else None

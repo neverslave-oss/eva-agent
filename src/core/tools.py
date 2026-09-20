@@ -340,6 +340,32 @@ TOOLS = [
                 "required": ["goal"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ask_questions",
+            "description": "Ask the user a question through Telegram inline buttons and wait for their tap. Use this when you need user direction mid-task and the next step genuinely depends on their answer (e.g. which option to pursue, approve a direction, pick a preference). You might include a few options rendered as tappable buttons. Returns the user's chosen option so you can continue. Prefer this over guessing when a decision is truly theirs; do not call it for trivial choices you can default.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": "The question to ask the user"
+                    },
+                    "options": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "The answer options shown as inline buttons, one button per option. Keep each short enough to be tappable (2-4 words)."
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "description": "Optional seconds to wait for the user (default 120)"
+                    }
+                },
+                "required": ["question", "options"]
+            }
+        }
     }
 ]
 
@@ -919,6 +945,24 @@ def execute_tool(name: str, arguments: dict, workspace: str = WORKSPACE, chat_id
 
     elif name == "computer":
         return _run_computer(arguments, chat_id=chat_id)
+
+    elif name == "ask_questions":
+        question = arguments.get("question", "")
+        options = arguments.get("options", [])
+        timeout = arguments.get("timeout", 120)
+        _chat_id = chat_id or _current_chat_id
+        if not _chat_id:
+            return "(error: ask_questions requires a Telegram chat_id context)"
+        try:
+            from core.ask_questions_gate import ask_question
+        except Exception as e:
+            return f"(error: ask_questions gate unavailable: {e})"
+        result = ask_question(_chat_id, question, options, timeout=int(timeout))
+        if "error" in result:
+            return f"(error: {result['error']})"
+        if result.get("timeout"):
+            return "(ask_questions: no user response within timeout — proceed with your best judgment)"
+        return f"User selected option {result['selected_idx']}: {result['selected']}"
 
     return f"Unknown tool: {name}"
 
