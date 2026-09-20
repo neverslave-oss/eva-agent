@@ -3131,6 +3131,7 @@ def _handle_health(params: dict) -> dict:
     h = {
         "status": "ready",
         "model": model_name,
+        "adapter": _current_adapter_name,
         "vram_free_mb": vram_free,
         "vram_warning": vram_warning,
         "main_model_loaded": _vllm_enabled or _model is not None,

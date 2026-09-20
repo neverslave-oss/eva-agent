@@ -1788,40 +1788,100 @@ def handle_message(chat_id: str, text: str, sender_name: str = "", photo_file_id
         return
 
     if text == "/status":
-        import torch
         __version__ = _get_current_version()
 
-        free_mb = 0
-        if torch.cuda.is_available():
-            free, total = torch.cuda.mem_get_info()
-            free_mb = free // (1024 * 1024)
-
-        # Read actual loaded model from model server instead of hardcoding
+        # ── Live model-server health (model, active adapter, VRAM, slots) ──
+        _mc_unreachable = False
         try:
             from core.inference.model_client import health as _mc_health
             _mh = _mc_health()
-            _model_label = _mh.get("model", "unknown")
-            if _mh.get("nemotron"):
-                _nmode = _mh.get("nemotron_mode", "ar")
-                _model_label = f"{_model_label} [Nemotron/{_nmode}]"
+            _mc_unreachable = not _mh or "error" in _mh
         except Exception:
+            _mh = {}
+            _mc_unreachable = True
+
+        _model_label = _mh.get("model", "unknown")
+        if _mh.get("nemotron"):
+            _nmode = _mh.get("nemotron_mode", "ar")
+            _model_label = f"{_model_label} [Nemotron/{_nmode}]"
+        if _mc_unreachable:
             _model_label = "unknown (model server unreachable)"
 
+        _adapter_label = _mh.get("adapter") or "(none)"
+        _main_loaded = _mh.get("main_model_loaded")
+        _drafter = "✅" if _mh.get("drafter_loaded") else "—"
+        _audio = "✅" if _mh.get("audio_capable") else "—"
+        _vram_free = _mh.get("vram_free_mb")
+        if _vram_free is None:
+            try:
+                import torch as _torch
+                if _torch.cuda.is_available():
+                    _free, _total = _torch.cuda.mem_get_info()
+                    _vram_free = _free // (1024 * 1024)
+            except Exception:
+                pass
+
+        # ── Provider ──────────────────────────────────────────────────────
         try:
             from core.inference.provider import get_provider as _gp_s
             _prov_label = _gp_s().get_provider("task_inference")
         except Exception:
             _prov_label = "unknown"
 
+        # ── Evolution / finetune-gate state ──────────────────────────────
+        _gate_state = {}
+        try:
+            _gsf = Path.home() / ".kernel-evolving/workspace/data/finetune_gate_state.json"
+            if _gsf.exists():
+                _gate_state = json.loads(_gsf.read_text())
+        except Exception:
+            _gate_state = {}
+        _last_ft = (_gate_state.get("last_finetune_ts") or "never")[:16]
+
+        _traj_total = _traj_clean = None
+        try:
+            import sqlite3 as _sq
+            _db = Path.home() / ".kernel-evolving/workspace/data/evolution.db"
+            if _db.exists():
+                _con = _sq.connect(str(_db))
+                _traj_total = _con.execute("SELECT COUNT(*) FROM task_trajectories").fetchone()[0]
+                _traj_clean = _con.execute(
+                    "SELECT COUNT(*) FROM task_trajectories WHERE critic_score >= 0.7"
+                ).fetchone()[0]
+                _con.close()
+        except Exception:
+            pass
+
+        _gate_running = "✅"
+        try:
+            if subprocess.run(["systemctl", "--user", "is-active", "auto-finetune-gate.service"],
+                              capture_output=True, text=True).stdout.strip() != "active":
+                _gate_running = "⛔"
+        except Exception:
+            _gate_running = "?"
+
+        # ── Slots / replicas ─────────────────────────────────────────────
+        _slots = _mh.get("slots") or []
+        _slot_line = ", ".join(s.get("name", s) if isinstance(s, dict) else str(s) for s in _slots) or "—"
+
         update_note = f"\n🆕 Update available: {_latest_version}" if _latest_version and _latest_version != __version__ else ""
+        _loaded_txt = (f"\nModel loaded: {'✅' if _main_loaded else '⏳ lazy (first message loads it)'}")
+        _traj_line = (f"\nTrajectories: {_traj_total} total · {_traj_clean} clean (≥0.7)"
+                      if _traj_total is not None else "\nTrajectories: n/a")
+
         send_message(
             chat_id,
             (
                 f"🐬 *Kernel Evo Status*\n"
                 f"Version: v{__version__}{update_note}\n"
-                f"Model: {_model_label}\n"
+                f"Model: {_model_label}{_loaded_txt}\n"
+                f"Adapter: {_adapter_label}\n"
                 f"Provider: {_prov_label}\n"
-                f"VRAM free: {free_mb}MB\n"
+                f"VRAM free: {_vram_free}MB\n"
+                f"Drafter: {_drafter} · Audio: {_audio}\n"
+                f"Slots: {_slot_line}\n"
+                f"Gate: {_gate_running} · last fine-tune: {_last_ft}\n"
+                f"{_traj_line}\n"
                 f"Ready: {'✅' if _agent_ready else '⏳ loading on first message'}"
             ),
         )
