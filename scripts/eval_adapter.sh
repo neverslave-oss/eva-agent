@@ -18,12 +18,25 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 CONFIG="$REPO_DIR/config.yaml"
-PYTHON="python3"
 LOG="/tmp/kernel_evo_shadow.log"
+
+# ── Python resolution (mirrors start.sh) ────────────────────────────────────
+# The gate daemon runs under a systemd env where bare `python3` = /usr/bin/python3
+# (no yaml module) — so never hardcode it. Prefer explicit KERNEL_EVO_PYTHON,
+# then repo venv, then miniconda, then whatever python3 resolves to.
+if [[ -n "${KERNEL_EVO_PYTHON:-}" ]]; then
+  PYTHON="$KERNEL_EVO_PYTHON"
+elif [[ -x "$REPO_DIR/.venv/bin/python3" ]]; then
+  PYTHON="$REPO_DIR/.venv/bin/python3"
+elif [[ -x "$HOME/.miniconda/bin/python3" ]]; then
+  PYTHON="$HOME/.miniconda/bin/python3"
+else
+  PYTHON="$(command -v python3)"
+fi
 
 # ── Read config values ───────────────────────────────────────────────────────
 _cfg() {
-  python3 -c "
+  "$PYTHON" -c "
 import yaml, sys
 with open('$CONFIG') as f:
     cfg = yaml.safe_load(f)
@@ -88,7 +101,7 @@ log "✅ Adapter found: $ADAPTER_PATH"
 # peft wrote at training time — instead of assuming config.yaml's model.
 ADAPTER_CFG_JSON="$ADAPTER_DIR/adapter_config.json"
 if [ -f "$ADAPTER_CFG_JSON" ]; then
-  ADAPTER_BASE_MODEL=$(python3 -c "
+  ADAPTER_BASE_MODEL=$("$PYTHON" -c "
 import json
 try:
     d = json.load(open('$ADAPTER_CFG_JSON'))
@@ -199,7 +212,7 @@ fi
 # ── 5. Run finetuned eval ─────────────────────────────────────────────────────
 log "Running finetuned eval on port $SHADOW_PORT..."
 FINETUNED_EXIT=0
-FINETUNED_RESULTS=$(python3 "$REPO_DIR/scripts/run_sim_eval.py" --port "$SHADOW_PORT" --label "finetuned" 2>&1) || FINETUNED_EXIT=$?
+FINETUNED_RESULTS=$("$PYTHON" "$REPO_DIR/scripts/run_sim_eval.py" --port "$SHADOW_PORT" --label "finetuned" 2>&1) || FINETUNED_EXIT=$?
 echo "$FINETUNED_RESULTS" | tee -a "$LOG"
 
 FINETUNED_PASS=$(echo "$FINETUNED_RESULTS" | grep -oP '\d+(?=/\d+ tasks passed)' | tail -1 || echo "0")
@@ -213,7 +226,7 @@ BASELINE_TOTAL=8
 
 if curl -sf "http://localhost:$BASELINE_LIVE_PORT/health" > /dev/null 2>&1; then
   log "Running baseline eval on port $BASELINE_LIVE_PORT..."
-  BASELINE_RESULTS=$(python3 "$REPO_DIR/scripts/run_sim_eval.py" --port "$BASELINE_LIVE_PORT" --label "baseline" 2>&1) || BASELINE_EXIT=$?
+  BASELINE_RESULTS=$("$PYTHON" "$REPO_DIR/scripts/run_sim_eval.py" --port "$BASELINE_LIVE_PORT" --label "baseline" 2>&1) || BASELINE_EXIT=$?
   echo "$BASELINE_RESULTS" | tee -a "$LOG"
   BASELINE_PASS=$(echo "$BASELINE_RESULTS" | grep -oP '\d+(?=/\d+ tasks passed)' | tail -1 || echo "0")
   BASELINE_TOTAL=$(echo "$BASELINE_RESULTS" | grep -oP '(?<=\d/)\d+(?= tasks passed)' | tail -1 || echo "8")
