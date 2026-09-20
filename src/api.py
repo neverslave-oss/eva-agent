@@ -70,6 +70,7 @@ _IDLE_BYPASS_PATHS = {
     "/memory/file/rename", "/memory/file/new",
     "/sqlite/tables", "/sqlite/table", "/sqlite/row", "/sqlite/table/data", "/sqlite/db/data",
     "/voice/status",
+    "/api/sessions",
 }
 
 @app.middleware("http")
@@ -374,6 +375,42 @@ def chat_session_new(body: MessageIn):
     if "error" in result:
         return JSONResponse(result, status_code=400)
     return {"ok": True, "chat_id": chat_id, **result}
+
+
+def _conversations_repo():
+    """Return a ConversationsRepository bound to the running agent's conversations DB."""
+    from runtime_paths import CONVERSATIONS_DB
+    from database.agent import ConversationsRepository
+    return ConversationsRepository(db_path=CONVERSATIONS_DB)
+
+
+class NewSessionIn(BaseModel):
+    """Payload for creating a new conversation/session record."""
+    chat_id: str = ""  # optional; a fresh uuid is generated when omitted
+    title: str = ""
+
+
+@app.get("/api/sessions")
+def api_sessions_list(limit: int = 100):
+    """List conversations sorted by updated_at desc (sessions switcher)."""
+    repo = _conversations_repo()
+    try:
+        rows = repo.list_all(limit=limit)
+    except Exception as exc:  # DB may be uninitialised on a fresh install
+        return {"sessions": [], "error": str(exc)}
+    return {"sessions": rows, "count": len(rows)}
+
+
+@app.post("/api/sessions")
+def api_sessions_create(body: NewSessionIn):
+    """Create a new conversation record and return its id/chat_id."""
+    conversation_id = str(uuid.uuid4())
+    chat_id = (body.chat_id or "").strip() or f"agent-{uuid.uuid4().hex[:8]}"
+    title = (body.title or "").strip() or "New session"
+    repo = _conversations_repo()
+    repo.upsert(conversation_id=conversation_id, chat_id=chat_id, title=title)
+    created = repo.get(conversation_id)
+    return {"ok": True, **created}
 
 
 @app.post("/message")
