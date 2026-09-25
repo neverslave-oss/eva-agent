@@ -36,6 +36,48 @@ import os
 import sys
 from pathlib import Path
 
+import torch
+
+
+def _reduce_loss(loss):
+    """Reduce a nested/tuple loss to a scalar tensor.
+
+    Nemotron-Labs-Diffusion-3B's custom remote-code forward returns a nested
+    loss (a tuple/list of per-component losses) instead of a plain scalar
+    tensor. TRL/transformers unwrap the model outputs as ``loss = outputs[0]``,
+    so the trainer would pass that structure to ``accelerator.backward()`` and
+    crash on ``loss / gradient_accumulation_steps``. Recursively collect every
+    tensor leaf and sum them into a single scalar (identity for a plain tensor).
+    """
+    if isinstance(loss, torch.Tensor) or not isinstance(loss, (tuple, list)):
+        return loss
+    leaves = []
+    stack = list(loss)
+    while stack:
+        item = stack.pop()
+        if isinstance(item, torch.Tensor):
+            leaves.append(item)
+        elif isinstance(item, (tuple, list)):
+            stack.extend(item)
+    if not leaves:
+        return loss[0] if loss else loss
+    return sum(leaves)
+
+
+def _make_trainer_cls(base):
+    """Return an ``SFTTrainer`` subclass whose ``compute_loss`` collapses any
+    nested/tuple loss from the model forward into a single scalar tensor."""
+    class TupleLossCompatTrainer(base):
+        def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+            loss, outputs = super().compute_loss(
+                model, inputs, return_outputs=True, num_items_in_batch=num_items_in_batch
+            )
+            loss = _reduce_loss(loss)
+            if return_outputs:
+                return loss, outputs
+            return loss
+    return TupleLossCompatTrainer
+
 
 # ── Model family presets (generalized for Gemma / Qwen / Nemotron) ─────────
 # Each family defines how the base is loaded, how the tokenizer is resolved, and
@@ -297,6 +339,7 @@ def main():
     from transformers import AutoProcessor, AutoTokenizer, AutoModel, AutoModelForCausalLM, AutoModelForImageTextToText
     from trl import SFTTrainer, SFTConfig
     from peft import LoraConfig, get_peft_model
+    SFTTrainer = _make_trainer_cls(SFTTrainer)
 
     # Resolve family + tokenizer path from the chosen model.
     family = detect_family(model_path)
