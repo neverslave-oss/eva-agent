@@ -742,7 +742,7 @@ def _load_nemotron(config_path="config.yaml", model_path_override: str | None = 
     """
     global _model, _processor, _config, _is_nemotron
     global _nemotron_mode, _nemotron_block_length, _nemotron_threshold
-    global _model_supports_tools, _audio_capable
+    global _model_supports_tools, _audio_capable, _native_agentic
 
     if _model is not None:
         return
@@ -826,30 +826,50 @@ def _load_nemotron(config_path="config.yaml", model_path_override: str | None = 
         raw = raw.cuda()
     _model = raw
 
-    # Optional LoRA drafter for linear_spec mode (linear_spec_lora subfolder in repo)
-    adapter_path = cfg["model"].get("adapter_path")
-    if _nemotron_mode == "linear_spec" and not adapter_path:
-        # Try bundled linear_spec_lora subfolder
-        import os as _os
-        _lora_path = _os.path.join(model_path, "linear_spec_lora")
-        if _os.path.isdir(_lora_path):
-            adapter_path = _lora_path
+    # ── Adapter selection ──────────────────────────────────────────────────
+    # native_agentic mode (config: model.native_agentic=true): Nemotron drives the
+    # full tool loop itself with our function-calling adapter. Keep the PeftModel
+    # wrapper (DO NOT unwrap) so the FC adapter stays activatable via _use_adapter/
+    # set_adapter, and skip the linear_spec speed-drafter unwrap.
+    native_agentic = bool(cfg.get("model", {}).get("native_agentic", False))
+    adapter_path = cfg.get("model", {}).get("adapter_path")
 
-    if adapter_path and _nemotron_mode == "linear_spec":
-        try:
-            from peft import PeftModel
-            _peft = PeftModel.from_pretrained(_model, adapter_path).eval()
-            _model = _peft.model  # unwrap to call linear_spec_generate directly
-            print(f"[model_server] Nemotron: LoRA drafter loaded from {adapter_path}", flush=True)
-        except Exception as e:
-            print(f"[model_server] Nemotron: LoRA drafter load failed ({e}) — continuing without", flush=True)
+    if native_agentic:
+        if adapter_path:
+            try:
+                from peft import PeftModel
+                adapter_name = _adapter_name(adapter_path)
+                _model = PeftModel.from_pretrained(
+                    _model, adapter_path, adapter_name=adapter_name
+                )
+                _loaded_adapters[adapter_path] = adapter_name
+                print(f"[model_server] Nemotron: FC adapter loaded from {adapter_path}", flush=True)
+            except Exception as e:
+                print(f"[model_server] Nemotron: FC adapter load failed ({e}) — continuing without", flush=True)
+        else:
+            print("[model_server] Nemotron: native_agentic=true but no adapter_path set — running native tool loop unadaptered", flush=True)
+    else:
+        # Original linear_spec path — optional speed-drafter (linear_spec_lora subfolder)
+        if _nemotron_mode == "linear_spec" and not adapter_path:
+            import os as _os
+            _lora_path = _os.path.join(model_path, "linear_spec_lora")
+            if _os.path.isdir(_lora_path):
+                adapter_path = _lora_path
+        if adapter_path and _nemotron_mode == "linear_spec":
+            try:
+                from peft import PeftModel
+                _peft = PeftModel.from_pretrained(_model, adapter_path).eval()
+                _model = _peft.model  # unwrap to call linear_spec_generate directly
+                print(f"[model_server] Nemotron: LoRA drafter loaded from {adapter_path}", flush=True)
+            except Exception as e:
+                print(f"[model_server] Nemotron: LoRA drafter load failed ({e}) — continuing without", flush=True)
 
     _is_nemotron = True
     # Nemotron has full tool-calling via its chat template (XML function_calls format)
     _model_supports_tools = True
     _audio_capable = False
-    # Nemotron stays on its tested Qwen two-stage path — not native-agentic.
-    _native_agentic = False
+    # Nemotron stays on its tested Qwen two-stage path unless native_agentic is set.
+    _native_agentic = native_agentic
     print(f"[model_server] Nemotron ready. mode={_nemotron_mode} block={_nemotron_block_length} threshold={_nemotron_threshold}", flush=True)
 
 
@@ -2090,16 +2110,16 @@ def _handle_infer_with_tools(params: dict, send_line) -> dict:
     # MS5: only detour through the Qwen two-stage pipeline when the primary
     # model doesn't have reliable native tool-calling support of its own.
     # Nemotron's _model_supports_tools=True is a hardcoded capability flag
-    # (its chat template understands tool-call XML), but the single-model
-    # native tool loop below it in this function has never been this
-    # pipeline's tested/working path for Nemotron — two-stage
-    # (Qwen -> Nemotron synthesis) is, and stays the route for it.
+    # (its chat template understands tool-call XML). When native_agentic is set
+    # (model.native_agentic + our FC adapter), Nemotron drives the FULL tool
+    # loop itself via the single-model loop below — no Qwen detour, no
+    # Nemotron-as-synthesis-only. Otherwise Nemotron stays on the tested
+    # two-stage (Qwen -> Nemotron synthesis) route.
     #
     # Native-agentic models (any-to-any like Qwen2.5-Omni, or Gemma 4 with
-    # parse_response) handle the ENTIRE flow on their own — no Qwen tool-calling
-    # detour, no Nemotron synthesis. They skip the two-stage pipeline and use the
-    # single-model loop below.
-    if _is_nemotron or not _native_agentic:
+    # parse_response — and Nemotron with native_agentic=true) handle the ENTIRE
+    # flow on their own and skip the two-stage pipeline.
+    if not _native_agentic:
         _two_stage_result = _run_two_stage_if_available(params, send_line)
         if _two_stage_result is not None:
             return _two_stage_result

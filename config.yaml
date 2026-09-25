@@ -76,6 +76,9 @@ model:
   device: cuda:0
   drafter_path: ''
   dtype: bfloat16
+  # When true, Nemotron (with our FC adapter) drives the full tool-calling loop
+  # itself via the single-model native path instead of the Qwen two-stage detour.
+  native_agentic: false
   max_context_length: 65536
   name: nvidia/Nemotron-Labs-Diffusion-3B
   path: ${KERNEL_EVO_HF_HUB}/hub_cache/hub/models--nvidia--Nemotron-Labs-Diffusion-3B/snapshots/0d51902da1f8869f83413ce642fab402fa5641e0
