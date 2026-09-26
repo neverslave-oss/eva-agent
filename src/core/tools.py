@@ -28,6 +28,33 @@ _PROTECTED_IDENTITY_FILES = (
     "IDENTITY.md",
 )
 
+
+def _canonicalize_path(raw_path: str, workspace: str) -> str:
+    """Normalize a model-supplied file path and enforce the workspace guard.
+
+    Used identically by write_file and read_file so an absolute path like
+    ``/tmp/foo.txt`` resolves to the same place for both operations. Any path
+    outside ``~/.kernel-evolving`` is redirected into the workspace tmp dir
+    (the model must not read/write outside its own workspace).
+    """
+    path = str(raw_path).strip()
+    if "\n" in path:
+        path = [p.strip() for p in path.split("\n") if p.strip() and not p.strip().endswith(">")][-1]
+    path = path.lstrip(">").rstrip("<")
+    path = os.path.expanduser(path)
+    if not path.startswith("/"):
+        path = os.path.join(workspace, path)
+    _allowed_prefix = os.path.expanduser("~/.kernel-evolving")
+    _tmp_dir = os.path.join(_allowed_prefix, "workspace", "tmp")
+    if not path.startswith(_allowed_prefix):
+        _basename = os.path.basename(path)
+        import logging as _log_cp
+        _log_cp.getLogger(__name__).warning(
+            f"[tools] path outside workspace — redirected to {os.path.join(_tmp_dir, _basename)}"
+        )
+        path = os.path.join(_tmp_dir, _basename)
+    return path
+
 # ── Authorization gate: current chat_id for exec_shell auth ──────────────
 # Only a same-process fallback for in-process callers (e.g. model.py's
 # in-process tool loop, which shares memory with agent.py's triage()).
@@ -615,19 +642,10 @@ def execute_tool(name: str, arguments: dict, workspace: str = WORKSPACE, chat_id
         path = arguments.get("path")
         if not path:
             return "(error: read_file requires 'path' argument)"
-        import os
         path = _rewrite_date_tokens(str(path))
-        # Sanitize: strip shell metacharacters and newlines the model may emit
-        # (e.g. "/home/user/workspace/>\n~/workspace/file.md")
-        path = path.strip()
-        # If path contains newlines, take the last line (often the actual path)
-        if "\n" in path:
-            path = [p.strip() for p in path.split("\n") if p.strip() and not p.strip().endswith(">")][-1]
-        # Strip shell redirect characters that should never be in a file path
-        path = path.lstrip(">").rstrip("<")
-        path = os.path.expanduser(path)
-        if not path.startswith("/"):
-            path = f"{workspace}/{path}"
+        # Sanitize + enforce the same workspace guard as write_file, so an
+        # absolute path like /tmp/x resolves to the same place write put it.
+        path = _canonicalize_path(path, workspace)
         try:
             with open(path) as f:
                 return f.read()[:3000]
@@ -672,25 +690,8 @@ def execute_tool(name: str, arguments: dict, workspace: str = WORKSPACE, chat_id
             return "(error: write_file requires 'content' argument)"
         # Sanitize: strip shell metacharacters and newlines the model may emit
         path = str(path).strip()
-        if "\n" in path:
-            path = [p.strip() for p in path.split("\n") if p.strip() and not p.strip().endswith(">")][-1]
-        path = path.lstrip(">").rstrip("<")
-        # Expand ~ first, then fall back to workspace-relative only if truly relative
-        path = os.path.expanduser(path)
-        if not path.startswith("/"):
-            path = os.path.join(workspace, path)
-        # Hard workspace guard: redirect /tmp, /var, /root, or any path outside
-        # ~/.kernel-evolving to the kernel-evolving workspace tmp dir.
-        # The model must not write outside its own workspace.
-        _allowed_prefix = os.path.expanduser("~/.kernel-evolving")
-        _tmp_dir = os.path.join(_allowed_prefix, "workspace", "tmp")
-        if not path.startswith(_allowed_prefix):
-            _basename = os.path.basename(path)
-            path = os.path.join(_tmp_dir, _basename)
-            import logging as _log_wf
-            _log_wf.getLogger(__name__).warning(
-                f"[write_file] path outside workspace — redirected to {path}"
-            )
+        # Sanitize + enforce the workspace guard (shared with read_file).
+        path = _canonicalize_path(path, workspace)
         # Protected identity files: refuse to overwrite AGENTS.md / SOUL.md /
         # IDENTITY.md. These carry the agent's core persona and are managed by
         # setup.py + the identity consolidator — the model must never clobber them.
