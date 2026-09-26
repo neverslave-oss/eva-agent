@@ -243,10 +243,9 @@ TOOLS = [
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "Search term (e.g. 'browser', 'image', 'github', 'security'). Pass empty string to list all skills."
+                        "description": "Search term (e.g. 'browser', 'image', 'github', 'security'). Pass empty string or omit to list all skills."
                     }
-                },
-                "required": ["query"]
+                }
             }
         }
     },
