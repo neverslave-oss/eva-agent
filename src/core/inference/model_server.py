@@ -363,6 +363,34 @@ def _inference_cfg():
     return (_config or {}).get("inference", {})
 
 
+def _critique_cfg():
+    """Return the tool-critique/repair sub-config for this run's tool loop.
+
+    Defaults: schema_validate + repair_critique ON (they are pure, additive,
+    and fail open — a validator bug can never block execution). revisor and
+    refusal-reprompt are also ON by default since they only re-inject a nudge
+    and are fail-open. Read live each turn so config edits take effect without
+    a restart.
+    """
+    global _config
+    if _config is None:
+        try:
+            _load_config(_lazy_config_path)
+        except Exception:
+            pass
+    blk = (_config or {}).get("critique") or {}
+    return {
+        "enabled": bool(blk.get("enabled", True)),
+        "schema_validate": bool(blk.get("schema_validate", True)),
+        "repair_critique": bool(blk.get("repair_critique", True)),
+        "refusal_reprompt": bool(blk.get("refusal_reprompt", True)),
+        "max_repair_retries": int(blk.get("max_repair_retries", 2)),
+        "revisor": {
+            "enabled": bool((blk.get("revisor") or {}).get("enabled", False)),
+        },
+    }
+
+
 # ---------------------------------------------------------------------------
 # Slot registry helpers
 # ---------------------------------------------------------------------------
@@ -2570,11 +2598,14 @@ def _handle_infer_with_tools(params: dict, send_line) -> dict:
             # with broken args. Record a schema failure whose reason is the
             # structured repair hint (T2) so the re-prompt tells the model exactly
             # which key and what the schema expects, instead of a generic "retry".
-            try:
-                from core.tool_arg_utils import validate_tool_args
-                _schema_problems = validate_tool_args(tool_name, tool_args)
-            except Exception:
-                _schema_problems = []  # fail open — never block execution on a validator bug
+            _ccfg = _critique_cfg()
+            _schema_problems = []
+            if _ccfg["enabled"] and _ccfg["schema_validate"]:
+                try:
+                    from core.tool_arg_utils import validate_tool_args
+                    _schema_problems = validate_tool_args(tool_name, tool_args)
+                except Exception:
+                    _schema_problems = []  # fail open — never block execution on a validator bug
             if _schema_problems:
                 result_str = _build_schema_repair_hint(
                     tool_name, tool_args, _schema_problems, _original_query

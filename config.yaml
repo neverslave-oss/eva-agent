@@ -72,13 +72,13 @@ logging:
 # model, model_slots, stt_model, model_catalog, model_context_lengths,
 # model_server, inference, embedding
 model:
-  adapter_path: null
+  adapter_path: /home/pacificDev/.kernel-evolving/workspace/artifacts/finetune/nemotron_fc
   device: cuda:0
   drafter_path: ''
   dtype: bfloat16
   # When true, Nemotron (with our FC adapter) drives the full tool-calling loop
   # itself via the single-model native path instead of the Qwen two-stage detour.
-  native_agentic: false
+  native_agentic: true
   max_context_length: 65536
   name: nvidia/Nemotron-Labs-Diffusion-3B
   path: ${KERNEL_EVO_HF_HUB}/hub_cache/hub/models--nvidia--Nemotron-Labs-Diffusion-3B/snapshots/0d51902da1f8869f83413ce642fab402fa5641e0
@@ -384,3 +384,14 @@ sensors:
   pi:
     base: "${KERNEL_EVO_SENSORS_PI_BASE:-}"   # e.g. http://<hub-ip>:5000
     timeout_s: 5.0
+# ── Tool-call critique/repair layer (2026-09-26 design) ────────────────────
+# T0 refusal re-prompt (additive) / T1 schema-validate / T2 repair-critique /
+# T3 revisor (off by default). All fail-open: a bug here never blocks the loop.
+critique:
+  enabled: true
+  schema_validate: true
+  repair_critique: true
+  refusal_reprompt: true
+  max_repair_retries: 2
+  revisor:
+    enabled: false
