@@ -134,6 +134,34 @@ def _build_failure_reprompt(tool_name: str, status: str, reason: str, failed_cou
     else:
         return f"⚠️ This tool call failed ({status}): {reason[:200]}. Some other tools may have succeeded — continue with partial results."
 
+
+def _build_schema_repair_hint(tool_name: str, args: dict, problems: list, query: str = "") -> str:
+    """Build a schema-aware repair hint for T2.
+
+    Given the schema validation problems (T1), tell the model WHICH keys are
+    missing/typo'd and what the schema expects (with the property description),
+    plus the original request to derive the value from. This gives the model
+    just enough to complete the one step instead of a generic "retry".
+    """
+    from core.tool_arg_utils import get_tool_schema
+    schema = get_tool_schema(tool_name)
+    props = (schema or {}).get("properties", {}) or {}
+    lines = [f"Tool `{tool_name}` needs corrected arguments before it can run."]
+    for p in problems:
+        if p.startswith("missing required"):
+            key = p.split("'")[1]
+            desc = props.get(key, {}).get("description", "")
+            base = f"- {p}"
+            if desc:
+                base += f" (schema: {desc})"
+            lines.append(base)
+        else:
+            lines.append(f"- {p}")
+    if query:
+        lines.append(f"Original request (use it to fill the values): {query[:200]}")
+    lines.append("Retry the tool with corrected arguments.")
+    return " ".join(lines)
+
 # ---------------------------------------------------------------------------
 # vLLM engine (main chat model)
 # ---------------------------------------------------------------------------
@@ -2536,6 +2564,40 @@ def _handle_infer_with_tools(params: dict, send_line) -> dict:
             tool_args = _normalize_tool_args(tool_name, tool_args)
 
             print(f"[tool_loop] step {step+1}: {tool_name}({json.dumps(tool_args)[:80]})", flush=True)
+
+            # ── T1 (critique design): schema-validate args before executing ──
+            # If required keys are missing/typo'd or types are wrong, do NOT execute
+            # with broken args. Record a schema failure whose reason is the
+            # structured repair hint (T2) so the re-prompt tells the model exactly
+            # which key and what the schema expects, instead of a generic "retry".
+            try:
+                from core.tool_arg_utils import validate_tool_args
+                _schema_problems = validate_tool_args(tool_name, tool_args)
+            except Exception:
+                _schema_problems = []  # fail open — never block execution on a validator bug
+            if _schema_problems:
+                result_str = _build_schema_repair_hint(
+                    tool_name, tool_args, _schema_problems, _original_query
+                )
+                _last_tool_result = result_str
+                _ok = False
+                _status = "schema_invalid"
+                _reason = result_str
+                step_fail_count += 1
+                step_failures.append((tool_name, _status, _reason))
+                print(
+                    f"[tool_loop] step {step+1} SCHEMA-INVALID tool={tool_name} "
+                    f"problems={_schema_problems} — not executing", flush=True,
+                )
+                _step_payload = {
+                    "type": "step", "step": step + 1,
+                    "tool": tool_name, "args": tool_args, "result": result_str,
+                    "ok": False, "status": _status, "failure_reason": _reason,
+                    "duration_ms": 0, "schema_invalid": True,
+                }
+                send_line(json.dumps(_step_payload))
+                tool_responses.append({"name": tool_name, "result": result_str})
+                continue
 
             # Repetition guard — Nemotron sometimes loops on the same read_file call
             _sig = f"{tool_name}:{json.dumps(tool_args, sort_keys=True)}"
