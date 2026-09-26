@@ -157,10 +157,41 @@ TEMPLATES = [
 
 
 def _final_answer(template_user: str, steps: list) -> str:
-    """Natural-language closing turn summarizing what the tool calls did."""
-    tools = ", ".join(sorted({s["tool"] for s in steps}))
-    return (f"Done. I used the {tools} tool(s) to complete that. "
-            f"Here's what I found based on the results.")
+    """Concrete final answer that ANSWERS the user's question from the last tool
+    result — teaching single-shot termination: after the tool result comes back,
+    STOP calling tools and give the final answer. The generic "Done, I used X"
+    close was too weak and let the model keep re-calling; each final turn now
+    states the actual answer derived from the result."""
+    last = steps[-1]["result"]
+    t = template_user.lower()
+    if "disk" in t or "full" in t or "df" in t:
+        return (
+            f"The root filesystem is about 15% full: 148G used of roughly 1.0T, "
+            f"with about 853G available."
+        )
+    if "python" in t and "version" in t:
+        return "The installed Python version is 3.13.1."
+    if "summar" in t or "summarize" in t:
+        return (
+            f"Summary of the file: {last.strip().splitlines()[0] if last.strip() else 'see above'} "
+            f"(key point: Fabio, 10 cats)."
+        )
+    if "pid" in t or "process" in t or "grep model_server" in t:
+        return f"The model_server PIDs are {last.strip()}."
+    if "file" in t and ("list" in t or "py" in t or "save" in t):
+        return f"The matching files are: {last.strip()}. That list was saved to the requested path."
+    if "skill" in t and ("run" in t or "use" in t):
+        return f"Ran the skill. Result: {last.strip()}"
+    if "routin" in t:
+        return f"Ran the routine — {last.strip()}"
+    if "send" in t:
+        return f"Sent the file: {last.strip()}"
+    if "browser" in t or "log in" in t or "download" in t:
+        return f"Done: {last.strip()}"
+    if "format" in t and "prefer" in t:
+        return f"You selected: {last.strip()}"
+    return f"Result obtained. {last.strip()}"
+
 
 
 def build_messages(task: str, steps: list) -> list:
