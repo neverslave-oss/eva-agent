@@ -162,15 +162,40 @@ def _extract_tool_calls(messages: list) -> list:
     return out
 
 
+# Live tool registry (canonical). Imported so training renders the SAME schemas
+# EVA exposes at inference — no more empty-shell stubs from observed args.
+LIVE_SOCKET_SCHEMAS = {}
+try:
+    from core.tools import TOOLS as LIVE_TOOLS
+    for _t in LIVE_TOOLS:
+        _fn = _t.get("function", _t)
+        _name = _fn.get("name")
+        if _name:
+            LIVE_SOCKET_SCHEMAS[_name] = _t
+    print(f"[map] loaded {len(LIVE_SOCKET_SCHEMAS)} live tool schemas from core.tools")
+except Exception as _e:
+    print(f"[map] WARNING: could not import live TOOLS from core.tools ({_e}); falling back to TOOL_SCHEMAS/_schema_for_unknown")
+
+
+def _schema_for_name(name: str, args=None) -> dict:
+    """Resolve a tool's schema: live registry first, then hand-authored
+    TOOL_SCHEMAS, then best-effort from observed args. Never an empty shell
+    when the live schema exists."""
+    if name in LIVE_SOCKET_SCHEMAS:
+        return LIVE_SOCKET_SCHEMAS[name]
+    if name in TOOL_SCHEMAS:
+        return TOOL_SCHEMAS[name]
+    return _schema_for_unknown(name, args or {})
+
+
 def collect_tool_schemas(records: list) -> list:
-    """De-duplicated tool list for apply_chat_template(tools=...), from messages."""
+    """De-duplicated tool list for apply_chat_template(tools=...), from messages.
+    Uses live-registry schemas where available so args signatures are always
+    present (empty shells were capping FC learning)."""
     by_name: dict[str, dict] = {}
     for rec in records:
         for name, args in _extract_tool_calls(rec.get("messages", [])):
-            if name in TOOL_SCHEMAS:
-                by_name[name] = TOOL_SCHEMAS[name]
-            elif name not in by_name:
-                by_name[name] = _schema_for_unknown(name, args)
+            by_name.setdefault(name, _schema_for_name(name, args))
     return [by_name[n] for n in sorted(by_name)]
 
 
