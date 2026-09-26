@@ -187,13 +187,13 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "web_search",
-            "description": "Search the web or fetch a URL using the browser-automation skill (Puppeteer + Chromium). Use when you need fresh information, documentation, news, research papers, or anything not in local files. Returns page content or search results.",
+            "description": "Search the web for fresh information, documentation, news, research papers, or anything not in local files (Puppeteer + Chromium). Returns search results or page content. To directly fetch a specific URL, use http_get instead.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "Search query (e.g. 'python asyncio tutorial 2026') or full URL to fetch (e.g. 'https://docs.python.org/3/library/asyncio.html')"
+                        "description": "Search query (e.g. 'python asyncio tutorial 2026')"
                     },
                     "save_to": {
                         "type": "string",

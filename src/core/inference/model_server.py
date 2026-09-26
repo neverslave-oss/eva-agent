@@ -2384,6 +2384,8 @@ def _handle_infer_with_tools(params: dict, send_line) -> dict:
     _empty_reprompt_count: int = 0
     _EMPTY_REPROMPT_LIMIT: int = 3  # max empty-content re-prompts before giving up
     _last_tool_result: str = ""  # latest successful tool output across all steps
+    _schema_invalid_sig: str = ""  # last schema-invalid tool+args sig (T5 steering net)
+    _schema_invalid_repeat: int = 0  # consecutive repeats of that sig
 
     for step in range(max_steps):
         try:
@@ -2649,6 +2651,27 @@ def _handle_infer_with_tools(params: dict, send_line) -> dict:
                         )
                 except Exception:
                     pass
+                # ── T5 steering net: a fixated invalid tool+args (e.g. web_search({})
+                # emitted repeatedly with no args) must break early instead of
+                # burning every step on `continue` — otherwise it runs to
+                # (max steps reached) with no synthesized answer.
+                _sig_inv = f"{tool_name}:{json.dumps(tool_args, sort_keys=True)}"
+                if _sig_inv == _schema_invalid_sig:
+                    _schema_invalid_repeat += 1
+                    if _schema_invalid_repeat >= _REPEAT_LIMIT:
+                        print(
+                            f"[tool_loop] schema-invalid guard: {tool_name}({_sig_inv}) "
+                            f"repeated {_schema_invalid_repeat}x invalid — breaking",
+                            flush=True,
+                        )
+                        return {"type": "result", "result": (
+                            "I could not complete that request — the web fetch "
+                            "kept being attempted without a search query. "
+                            "Please rephrase."
+                        )}
+                else:
+                    _schema_invalid_sig = _sig_inv
+                    _schema_invalid_repeat = 1
                 continue
 
             # Repetition guard — Nemotron sometimes loops on the same read_file call
