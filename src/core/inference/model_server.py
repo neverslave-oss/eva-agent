@@ -214,6 +214,58 @@ def _normalize_tool_args(tool_name: str, args: dict) -> dict:
     return normalize_tool_args(tool_name, args)
 
 
+def _parse_function_eq_xml(raw_content: str) -> list:
+    """Parse Nemotron's `function=` XML into tool_calls-format list.
+
+    Accepts BOTH the alt form `<parameter=key>value</parameter>` AND the native
+    attribute form `<parameter name="key">value</parameter>`. Previously only the
+    alt form matched, so any native-form call silently dropped every argument
+    (write_file/read_file/web_search/etc. all came back `{}` despite the model
+    emitting correct args).
+    """
+    import re as _re
+    fn_blocks = _re.findall(
+        r'<function=([A-Za-z_][\w-]*)>(.*?)(?:</function>|(?=<function=)|$)',
+        raw_content, _re.DOTALL,
+    )
+    if not fn_blocks:
+        return []
+    calls = []
+    for tool_name, fn_body in fn_blocks:
+        params = _re.findall(
+            r'<parameter(?:=([A-Za-z_][\w-]*)|\s+name=["\']([A-Za-z_][\w-]*)["\'])>(.*?)</parameter>',
+            fn_body, _re.DOTALL,
+        )
+        args = {}
+        for p0, p1, val in params:
+            key = p0 if p0 else p1
+            if key:
+                args[key] = val.strip()
+        args = _normalize_tool_args(tool_name.strip(), args)
+        calls.append({"function": {"name": tool_name.strip(), "arguments": args}})
+    return calls
+
+
+def _parse_tag_fallback(raw_content: str) -> list:
+    """Parse the generic `<tool>name(args)</tool>` form into tool_calls-format list."""
+    import re as _re
+    tag_matches = _re.findall(r'<tool>(\w+)\((.*)\)</tool>', raw_content, _re.DOTALL)
+    if not tag_matches:
+        return []
+    calls = []
+    for tool_name, args_str in tag_matches:
+        args_str = args_str.strip()
+        try:
+            args = json.loads(args_str) if args_str.startswith('{') else {}
+            if not args:
+                kv = _re.findall(r'(\w+)=["\']([^"\']*)["\']?', args_str)
+                args = dict(kv)
+        except Exception:
+            args = {}
+        calls.append({"function": {"name": tool_name, "arguments": args}})
+    return calls
+
+
 # ---------------------------------------------------------------------------
 # Tool-loop validation
 # ---------------------------------------------------------------------------
@@ -2391,46 +2443,18 @@ def _handle_infer_with_tools(params: dict, send_line) -> dict:
                         print(f"[tool_loop] Nemotron XML: {len(_nemo_calls)} call(s)", flush=True)
                         tool_calls = _nemo_calls
 
-            # Nemotron alt XML: <function=name> + <parameter=key>value</parameter>
-            # ALSO accept native attribute form <parameter name="key">value</parameter> —
-            # Nemotron switches between them (e.g. write_file/read_file use
-            # name="path" while exec_shell uses parameter=command). Only matching
-            # the alt form silently dropped every arg on the attribute-form calls.
             if not tool_calls:
-                fn_blocks = _re.findall(r'<function=([A-Za-z_][\w-]*)>(.*?)(?:</function>|(?=<function=)|$)', raw_content, _re.DOTALL)
-                if fn_blocks:
-                    _fn_calls = []
-                    for tool_name, fn_body in fn_blocks:
-                        params = _re.findall(r'<parameter(?:=([A-Za-z_][\w-]*)|\s+name=["\']([A-Za-z_][\w-]*)["\'])>(.*?)</parameter>', fn_body, _re.DOTALL)
-                        args = {}
-                        for p0, p1, val in params:
-                            key = p0 if p0 else p1
-                            if key:
-                                args[key] = val.strip()
-                        args = _normalize_tool_args(tool_name.strip(), args)
-                        _fn_calls.append({"function": {"name": tool_name.strip(), "arguments": args}})
-                    if _fn_calls:
-                        print(f"[tool_loop] function= fallback: {len(_fn_calls)} call(s)", flush=True)
-                        tool_calls = _fn_calls
+                _fn_calls = _parse_function_eq_xml(raw_content)
+                if _fn_calls:
+                    print(f"[tool_loop] function= fallback: {len(_fn_calls)} call(s)", flush=True)
+                    tool_calls = _fn_calls
 
             # Generic <tool>name(args)</tool> fallback
             if not tool_calls:
-                tag_matches = _re.findall(r'<tool>(\w+)\((.*)\)</tool>', raw_content, _re.DOTALL)
-                if tag_matches:
-                    _tag_calls = []
-                    for tool_name, args_str in tag_matches:
-                        args_str = args_str.strip()
-                        try:
-                            args = json.loads(args_str) if args_str.startswith('{') else {}
-                            if not args:
-                                kv = _re.findall(r'(\w+)=["\']([^\"\']*)["\']?', args_str)
-                                args = dict(kv)
-                        except Exception:
-                            args = {}
-                        _tag_calls.append({"function": {"name": tool_name, "arguments": args}})
-                    if _tag_calls:
-                        print(f"[tool_loop] tag fallback: {len(_tag_calls)} call(s)", flush=True)
-                        tool_calls = _tag_calls
+                _tag_calls = _parse_tag_fallback(raw_content)
+                if _tag_calls:
+                    print(f"[tool_loop] tag fallback: {len(_tag_calls)} call(s)", flush=True)
+                    tool_calls = _tag_calls
 
         if not tool_calls:
             final_text = parsed.get("content", "")
