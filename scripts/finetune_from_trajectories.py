@@ -47,7 +47,13 @@ def _reduce_loss(loss):
     tensor. TRL/transformers unwrap the model outputs as ``loss = outputs[0]``,
     so the trainer would pass that structure to ``accelerator.backward()`` and
     crash on ``loss / gradient_accumulation_steps``. Recursively collect every
-    tensor leaf and sum them into a single scalar (identity for a plain tensor).
+    tensor leaf and mean them into a single scalar (identity for a plain tensor).
+
+    NOTE: we MEAN (not sum) the leaves. The previous ``sum(leaves)`` produced a
+    loss scaled by sequence length x component count, so ``train_loss`` landed at
+    ~1.1e4 on every run regardless of data (structurally pinned, useless for
+    tuning) and silently multiplied every gradient by that same factor (a hidden
+    LR multiplier). Averaging yields a true per-token/per-component mean.
     """
     if isinstance(loss, torch.Tensor) or not isinstance(loss, (tuple, list)):
         return loss
@@ -61,7 +67,7 @@ def _reduce_loss(loss):
             stack.extend(item)
     if not leaves:
         return loss[0] if loss else loss
-    return sum(leaves)
+    return sum(leaves) / len(leaves)
 
 
 def _make_trainer_cls(base):
