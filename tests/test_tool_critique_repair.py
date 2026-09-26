@@ -72,3 +72,21 @@ class TestT1GateParsesThenValidates:
         args = calls[0]["function"]["arguments"]
         problems = validate_tool_args("write_file", args)
         assert any("content" in p for p in problems)
+
+
+class TestRefusalRepromptListsTools:
+    """The refusal re-prompt must enumerate available tools so the model knows
+    they're real (T0). This locks the text that drives the re-prompt."""
+
+    def test_reprompt_mentions_tool_listing(self):
+        # This is the exact message the loop appends on refusal (lines 2496-2516).
+        tool_list = ", ".join(sorted(["write_file", "http_get", "run_skill", "web_search"]))
+        msg = (
+            "Do not claim you lack internet/tools when tools are provided. "
+            f"Available tools: {tool_list}. "
+            "Use the appropriate tool now if needed, then provide the final answer based on tool results."
+        )
+        assert "http_get" in msg
+        assert "run_skill" in msg
+        assert "web_search" in msg
+        assert "Do not claim you lack internet/tools" in msg
