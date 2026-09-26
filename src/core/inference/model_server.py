@@ -2392,13 +2392,21 @@ def _handle_infer_with_tools(params: dict, send_line) -> dict:
                         tool_calls = _nemo_calls
 
             # Nemotron alt XML: <function=name> + <parameter=key>value</parameter>
+            # ALSO accept native attribute form <parameter name="key">value</parameter> —
+            # Nemotron switches between them (e.g. write_file/read_file use
+            # name="path" while exec_shell uses parameter=command). Only matching
+            # the alt form silently dropped every arg on the attribute-form calls.
             if not tool_calls:
                 fn_blocks = _re.findall(r'<function=([A-Za-z_][\w-]*)>(.*?)(?:</function>|(?=<function=)|$)', raw_content, _re.DOTALL)
                 if fn_blocks:
                     _fn_calls = []
                     for tool_name, fn_body in fn_blocks:
-                        params = _re.findall(r'<parameter=([A-Za-z_][\w-]*)>(.*?)</parameter>', fn_body, _re.DOTALL)
-                        args = {k: v.strip() for k, v in params}
+                        params = _re.findall(r'<parameter(?:=([A-Za-z_][\w-]*)|\s+name=["\']([A-Za-z_][\w-]*)["\'])>(.*?)</parameter>', fn_body, _re.DOTALL)
+                        args = {}
+                        for p0, p1, val in params:
+                            key = p0 if p0 else p1
+                            if key:
+                                args[key] = val.strip()
                         args = _normalize_tool_args(tool_name.strip(), args)
                         _fn_calls.append({"function": {"name": tool_name.strip(), "arguments": args}})
                     if _fn_calls:
