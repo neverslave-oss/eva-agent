@@ -2597,6 +2597,27 @@ def _handle_infer_with_tools(params: dict, send_line) -> dict:
                 }
                 send_line(json.dumps(_step_payload))
                 tool_responses.append({"name": tool_name, "result": result_str})
+                # ── Step 5: feed schema-invalid (unresolvable-at-T1) steps into the
+                # trajectory flywheel. This becomes DPO/next-finetune corpus: a
+                # (task, schema, faulty-args -> repair-hint) negative example.
+                # Fail open — never let trajectory logging break the tool loop.
+                try:
+                    from core.evolution.trajectory_collector import get_collector
+                    _coll = get_collector()
+                    if _coll._enabled:
+                        _coll.record(
+                            task=_original_query,
+                            provider="nemotron",
+                            model_name="Nemotron-Labs-Diffusion-3B",
+                            call_type="tool_schema_invalid",
+                            tool_calls=[{"function": {"name": tool_name, "arguments": tool_args}}],
+                            final_reply=result_str,
+                            artifacts=None,
+                            critic_score=0.0,
+                            critic_verdict="SCHEMA_INVALID",
+                        )
+                except Exception:
+                    pass
                 continue
 
             # Repetition guard — Nemotron sometimes loops on the same read_file call
