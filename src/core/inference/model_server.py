@@ -365,68 +365,19 @@ def _sync_globals_from_slot(state: "SlotState") -> None:  # type: ignore[name-de
 # ---------------------------------------------------------------------------
 # Capability detection helpers
 # ---------------------------------------------------------------------------
-
-_AUDIO_CAPABLE_PREFIXES = ("google/gemma-4", "google/gemma-3", "qwen2.5-omni", "qwen2.5-omni")
-
-# Models that can handle the FULL agentic flow (tool loop + synthesis) natively
-# on their own — no Qwen two-stage detour, no Nemotron synthesis fallback.
-# Any-to-any models like Qwen2.5-Omni are the canonical example.
-_NATIVE_AGENTIC_PREFIXES = ("qwen2.5-omni", "qwen3-omni", "qwen3-omni-moe", "gemma-4", "gemma-3")
-
-# Qwen2.5-Omni (any-to-any) — its generate() has a non-standard signature and
-# needs generation_mode="text" for fast text-only output.
-_OMNI_PREFIXES = ("qwen2.5-omni", "qwen3-omni", "qwen3-omni-moe")
-
-# DeepSeek Janus / Janus-Pro — uses the custom `janus` package
-# (MultiModalityCausalLM + VLChatProcessor), not standard transformers loading.
-_JANUS_PREFIXES = ("deepseek-ai/janus", "janus-pro", "janus-1", "janus-7")
+# Pure matching logic lives in capabilities.py; this shim applies the returned
+# flags to the module-level model state (kept here so behavior is unchanged).
+from .capabilities import detect as _detect_capability_flags
 
 def _detect_capabilities(model_path: str, cfg: dict):
     """Set capability flags from model_path + config."""
     global _model_supports_tools, _audio_capable, _native_agentic, _is_omni, _is_janus
-    model_name = cfg.get("model", {}).get("name", "")
-    # Tool support: Gemma 4 has parse_response (detected later via processor),
-    # but for vLLM path we detect by name.
-    _TOOL_CAPABLE_PREFIXES = ("google/gemma-4",)
-    _model_supports_tools = any(
-        model_name.lower().startswith(p.lower()) for p in _TOOL_CAPABLE_PREFIXES
-    ) or any(
-        model_path.lower().replace("\\", "/").find(p.lower().split("/")[-1]) != -1
-        for p in _TOOL_CAPABLE_PREFIXES
-    )
-    # Audio capability
-    _audio_capable = any(
-        model_name.lower().startswith(p.lower()) for p in _AUDIO_CAPABLE_PREFIXES
-    ) or any(
-        model_path.lower().replace("\\", "/").find(p.lower().split("/")[-1]) != -1
-        for p in _AUDIO_CAPABLE_PREFIXES
-    )
-    # Native agentic: the model drives the whole flow itself. Any-to-any
-    # models (Omni) and native-tool models (Gemma 4) qualify. Nemotron stays
-    # on its tested two-stage path.
-    _native_agentic = (
-        any(model_name.lower().startswith(p.lower()) for p in _NATIVE_AGENTIC_PREFIXES)
-        or any(
-            model_path.lower().replace("\\", "/").find(p.lower().split("/")[-1]) != -1
-            for p in _NATIVE_AGENTIC_PREFIXES
-        )
-    )
-    # Omni any-to-any detection
-    _is_omni = (
-        any(model_name.lower().startswith(p.lower()) for p in _OMNI_PREFIXES)
-        or any(
-            model_path.lower().replace("\\", "/").find(p.lower().split("/")[-1]) != -1
-            for p in _OMNI_PREFIXES
-        )
-    )
-    # Janus detection
-    _is_janus = (
-        any(model_name.lower().startswith(p.lower()) for p in _JANUS_PREFIXES)
-        or any(
-            model_path.lower().replace("\\", "/").find(p.lower().split("/")[-1]) != -1
-            for p in _JANUS_PREFIXES
-        )
-    )
+    flags = _detect_capability_flags(model_path, cfg)
+    _model_supports_tools = flags["supports_tools"]
+    _audio_capable = flags["audio_capable"]
+    _native_agentic = flags["native_agentic"]
+    _is_omni = flags["is_omni"]
+    _is_janus = flags["is_janus"]
     print(f"[model_server] Tool-calling support: {_model_supports_tools}", flush=True)
     print(f"[model_server] Audio capability: {_audio_capable}", flush=True)
     print(f"[model_server] Native agentic: {_native_agentic}", flush=True)
