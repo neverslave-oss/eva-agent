@@ -2479,6 +2479,11 @@ def _handle_infer_with_tools(params: dict, send_line) -> dict:
         # emits instead of native function calls. Parse them into tool_calls format.
         if not tool_calls:
             raw_content = parsed.get("content", "") or ""
+            # Timestamped raw-emission capture — the ONLY place we see the model's
+            # actual output before any parse/fallback. Tells us if it emits empty
+            # args or produces args the parser then drops.
+            from datetime import datetime as _dbg_dt
+            print(f"[tool_loop/raw {_dbg_dt.now().strftime('%H:%M:%S')}] RAW={raw_content!r}", flush=True)
             # Strip thinking block first
             if "<think>" in raw_content and "</think>" in raw_content:
                 raw_content = raw_content[raw_content.index("</think>") + len("</think>"):].strip()
@@ -2506,6 +2511,36 @@ def _handle_infer_with_tools(params: dict, send_line) -> dict:
                 if _fn_calls:
                     print(f"[tool_loop] function= fallback: {len(_fn_calls)} call(s)", flush=True)
                     tool_calls = _fn_calls
+
+            # Malformed-but-recoverable Nemotron FC recovery (captured corrupt
+            # emissions that the strict parser drops to {}). Runs after the
+            # strict parser and only fills in what it missed, so clean
+            # emissions are untouched.
+            if not tool_calls or any(
+                not (f.get("function") or {}).get("arguments")
+                for f in tool_calls
+            ):
+                try:
+                    from core.inference.fc_recovery_parser import recover_function_calls
+                    _rec_calls = recover_function_calls(raw_content)
+                    if _rec_calls:
+                        print(
+                            f"[tool_loop] fc-recovery: {len(_rec_calls)} call(s) salvaged"
+                            f" from malformed XML", flush=True,
+                        )
+                        # Prefer recovered calls that have real args; keep any
+                        # clean calls the strict parser already got.
+                        _merged = []
+                        for _m in _rec_calls:
+                            if any(_m["function"]["name"] == f.get("function", {}).get("name")
+                                   and (f.get("function") or {}).get("arguments")
+                                   for f in tool_calls):
+                                continue  # strict parser already has clean args for this tool
+                            _merged.append(_m)
+                        if _merged:
+                            tool_calls = _merged
+                except Exception as _re:
+                    print(f"[tool_loop] fc-recovery skipped ({_re})", flush=True)
 
             # Generic <tool>name(args)</tool> fallback
             if not tool_calls:
@@ -2582,6 +2617,19 @@ def _handle_infer_with_tools(params: dict, send_line) -> dict:
         step_ok_count = 0
         step_fail_count = 0
         step_failures = []  # track failures for structured re-prompt
+        # Cap how many tool calls we process per model response. v7 sometimes emits
+        # a degenerate burst of dozens of garbage/near-empty calls (observed 45 from
+        # one 8192-NFE response). Each distinct call has its own signature so the
+        # repeat/tally guards never fire, and the loop grinds on past the client's
+        # socket timeout (300s), which then closes the pipe. Bail fast instead.
+        _MAX_CALLS_PER_RESPONSE = 8
+        if len(tool_calls) > _MAX_CALLS_PER_RESPONSE:
+            print(
+                f"[tool_loop] degenerate response: {len(tool_calls)} tool calls in one step "
+                f"(cap {_MAX_CALLS_PER_RESPONSE}) — truncating",
+                flush=True,
+            )
+            tool_calls = tool_calls[:_MAX_CALLS_PER_RESPONSE]
         for tc in tool_calls:
             fn = tc.get("function", {})
             tool_name = fn.get("name", "")
@@ -3759,8 +3807,18 @@ class _RequestHandler(socketserver.StreamRequestHandler):
                         f"[model_server] response method={method} payload=\n{_preview_payload_for_log(payload)}",
                         flush=True,
                     )
-                self.wfile.write((data + "\n").encode("utf-8"))
-                self.wfile.flush()
+                # Harden against a client that already disconnected (e.g. its socket
+                # read timed out and closed). A broken pipe mid-loop used to crash
+                # the whole handler; now we just stop writing to this dead peer.
+                try:
+                    self.wfile.write((data + "\n").encode("utf-8"))
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    print(
+                        "[model_server] client disconnected — aborting response stream",
+                        flush=True,
+                    )
+                    raise
 
             if method == "infer":
                 resp = _handle_infer(params)
@@ -3846,6 +3904,16 @@ def main():
     parser.add_argument("--adapter", default=None, help="Path to LoRA adapter to load after base model")
     parser.add_argument("--model", default=None, help="Override base model path/name, bypassing config.yaml's model.path (for eval: load the adapter's own base model)")
     args = parser.parse_args()
+
+    # Timestamped startup banner — marks each model-server (re)start attempt in the
+    # log so we can tell which run produced which lines (log is shared across restarts).
+    from datetime import datetime as _dt
+    _adapter_banner = args.adapter if args.adapter else os.environ.get("MODEL_ADAPTER_PATH", "(config)")
+    print(
+        f"[model_server] ===== START {_dt.now().strftime('%Y-%m-%d %H:%M:%S')} "
+        f"socket={args.socket or 'default'} adapter={_adapter_banner} =====",
+        flush=True,
+    )
 
     socket_path = args.socket or SOCKET_PATH
 

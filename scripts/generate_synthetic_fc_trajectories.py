@@ -153,6 +153,25 @@ TEMPLATES = [
     ("Open the settings app and change the display brightness",
      [{"tool": "computer", "args": {"goal": "open settings and change display brightness to 50%", "dry_run": False},
        "result": "{\"status\": \"ok\", \"completed\": [\"opened settings\", \"set brightness 50%\"]}"}]),
+
+    # ── Exact battery mirrors (T2 read_file / T4 ps short-result shapes) ──
+    # T2 shape: read a file, get a short line-based result, STOP and summarize.
+    ("Read the file /home/pacificDev/.kernel-evolving/workspace/USER.md and summarize it",
+     [{"tool": "read_file", "args": {"path": "/home/pacificDev/.kernel-evolving/workspace/USER.md"},
+       "result": "# USER.md — About the user\nName: Fabio. Cats: 10. Diet: vegan."}]),
+    ("Read /tmp/kernel_evolving_model_server.log and tell me its last status line",
+     [{"tool": "read_file", "args": {"path": "/tmp/kernel_evolving_model_server.log"},
+       "result": "[model_server] Nemotron ready. mode=linear_spec block=32 threshold=0.9"}]),
+    ("Read config.yaml and tell me the adapter path",
+     [{"tool": "read_file", "args": {"path": "/home/pacificDev/.kernel-evolving/workspace/config.yaml"},
+       "result": "adapter_path: /home/pacificDev/.kernel-evolving/workspace/artifacts/finetune/nemotron_fc_v4"}]),
+    # T4 shape: short ps-style table, STOP and report PID.
+    ("Run ps aux | grep model_server | grep -v grep and report the PIDs",
+     [{"tool": "exec_shell", "args": {"command": "ps aux | grep model_server | grep -v grep"},
+       "result": "pacificDev 1473873 36.8 4.1 89432984 2062920 ? Sl 02:26 1:37 /home/pacificDev/.miniconda/bin/python3 model_server.py"}]),
+    ("Run ps aux | grep uvicorn and report the PIDs",
+     [{"tool": "exec_shell", "args": {"command": "ps aux | grep uvicorn | grep -v grep"},
+       "result": "pacificDev  5678  0.5  1.2 12345678 654321 ? S 01:00 0:03 /usr/bin/uvicorn app:app"}]),
 ]
 
 

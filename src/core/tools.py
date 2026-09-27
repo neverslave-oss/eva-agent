@@ -39,7 +39,9 @@ def _canonicalize_path(raw_path: str, workspace: str) -> str:
     """
     path = str(raw_path).strip()
     if "\n" in path:
-        path = [p.strip() for p in path.split("\n") if p.strip() and not p.strip().endswith(">")][-1]
+        _lines = [p.strip() for p in path.split("\n") if p.strip() and not p.strip().endswith(">")]
+        if _lines:
+            path = _lines[-1]
     path = path.lstrip(">").rstrip("<")
     path = os.path.expanduser(path)
     if not path.startswith("/"):
@@ -98,11 +100,11 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "http_get",
-            "description": "Make an HTTP GET request to a URL and return the response body. Use ONLY for http:// or https:// URLs. For local files use read_file instead.",
+            "description": "Fetch a web page or API over HTTP(S) and return its body. Use when you already have a specific http:// or https:// URL to retrieve. For local files on disk use read_file instead.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "url": {"type": "string"},
+                    "url": {"type": "string", "description": "REQUIRED. The full URL to fetch, including scheme, e.g. https://example.com"},
                     "timeout": {"type": "integer", "description": "Timeout in seconds (default 5)"}
                 },
                 "required": ["url"]
@@ -128,17 +130,17 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "run_skill",
-            "description": "Execute a named skill from the Kernel skill ecosystem. Use this when the user's request matches a skill's purpose (e.g. browser search, image generation, GitHub operations, security scan). Pass the user's original request as 'input'.",
+            "description": "Run an installed skill to perform a specialized task (documentation, security, deployment, media, or other packaged workflow). Use when a task maps to a known skill that provides a dedicated procedure beyond generic tools.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "skill_name": {
                         "type": "string",
-                        "description": "The skill name (e.g. 'browser-automation', 'github', 'security-scanner')"
+                        "description": "REQUIRED. The exact skill name (e.g. 'browser-automation', 'github', 'security-scanner', 'skill-lister')"
                     },
                     "input": {
                         "type": "string",
-                        "description": "The user's request or task to pass to the skill"
+                        "description": "REQUIRED. The user's request or task to pass to the skill"
                     }
                 },
                 "required": ["skill_name", "input"]
@@ -237,15 +239,16 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "search_skills",
-            "description": "Search installed skills by name or description keyword. Use this to find the right skill before calling run_skill. Returns a list of matching skills with their names, commands, and descriptions.",
+            "description": "Search installed skills by keyword and list matches. Use when you need to discover which skill fits a task before running it.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "Search term (e.g. 'browser', 'image', 'github', 'security'). Pass empty string or omit to list all skills."
+                        "description": "REQUIRED. Search term (e.g. 'browser', 'image', 'github', 'security')"
                     }
-                }
+                },
+                "required": ["query"]
             }
         }
     },
@@ -663,7 +666,9 @@ def execute_tool(name: str, arguments: dict, workspace: str = WORKSPACE, chat_id
             # Sanitize the same way read_file does
             local_path = url_str.strip()
             if "\n" in local_path:
-                local_path = [p.strip() for p in local_path.split("\n") if p.strip() and not p.strip().endswith(">")][-1]
+                _lines = [p.strip() for p in local_path.split("\n") if p.strip() and not p.strip().endswith(">")]
+                if _lines:
+                    local_path = _lines[-1]
             local_path = local_path.lstrip(">").rstrip("<")
             local_path = os.path.expanduser(local_path)
             if not local_path.startswith("/"):
@@ -720,7 +725,9 @@ def execute_tool(name: str, arguments: dict, workspace: str = WORKSPACE, chat_id
         # Sanitize: strip newlines and shell redirects Nemotron may emit
         query = (arguments.get("query") or "").lower().strip()
         if "\n" in query:
-            query = [p.strip() for p in query.split("\n") if p.strip() and not p.strip().endswith(">")][-1]
+            _lines = [p.strip() for p in query.split("\n") if p.strip() and not p.strip().endswith(">")]
+            if _lines:
+                query = _lines[-1]
         query = query.lstrip(">").rstrip("<")
         try:
             import yaml as _yaml
@@ -834,7 +841,9 @@ def execute_tool(name: str, arguments: dict, workspace: str = WORKSPACE, chat_id
         # Sanitize: strip newlines and shell redirects Nemotron may emit
         skill_name = skill_name.strip()
         if "\n" in skill_name:
-            skill_name = [p.strip() for p in skill_name.split("\n") if p.strip() and not p.strip().endswith(">")][-1]
+            _lines = [p.strip() for p in skill_name.split("\n") if p.strip() and not p.strip().endswith(">")]
+            if _lines:
+                skill_name = _lines[-1]
         skill_name = skill_name.lstrip(">").rstrip("<")
         if not input_text:
             return "(error: run_skill requires 'input' argument)"

@@ -18,7 +18,7 @@ import pytest
 SRC_DIR = Path(__file__).parent.parent / "src"
 sys.path.insert(0, str(SRC_DIR))
 
-from core.tool_arg_utils import get_tool_schema, validate_tool_args
+from core.tool_arg_utils import get_tool_schema, validate_tool_args, sanitize_text
 
 
 class TestGetToolSchema:
@@ -83,3 +83,19 @@ class TestValidateToolArgs:
         # browser_use max_steps is integer; a string should be flagged
         assert validate_tool_args("browser_use", {"task": "do x", "max_steps": "15"}) != []
         assert validate_tool_args("browser_use", {"task": "do x", "max_steps": 15}) == []
+
+
+class TestSanitizeText:
+    def test_multiline_picks_last_content_line(self):
+        assert sanitize_text("line1\nline2\nvoice-clone") == "voice-clone"
+
+    def test_multiline_all_xml_close_lines_does_not_crash(self):
+        # Every line ends with '>' (leaked XML close remnant) -> list comp
+        # filters all out; previously `[-1]` raised IndexError. Must not crash
+        # and must return a string.
+        out = sanitize_text("content</name>\n</parameter>")
+        assert isinstance(out, str)
+        assert out  # non-empty
+
+    def test_non_string_passthrough(self):
+        assert sanitize_text(42) == 42

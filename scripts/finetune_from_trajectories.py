@@ -70,15 +70,36 @@ def _reduce_loss(loss):
     return sum(leaves) / len(leaves)
 
 
-def _make_trainer_cls(base):
+def _make_trainer_cls(base, normalize_by_tokens=False):
     """Return an ``SFTTrainer`` subclass whose ``compute_loss`` collapses any
-    nested/tuple loss from the model forward into a single scalar tensor."""
+    nested/tuple loss from the model forward into a single scalar tensor, and
+    (optionally) re-normalizes a SUM-over-tokens loss into a true per-token mean.
+
+    ``normalize_by_tokens=True`` is used for custom architectures (e.g.
+    Nemotron-Labs-Diffusion-3B via trust_remote_code) whose forward returns a
+    loss that is the raw sum over tokens rather than a per-token mean. In that
+    case Trainer treats the huge scalar as-is: loss lands in the thousands and
+    token accuracy stays ~0.45 because gradients are scaled by the token count
+    (a hidden LR multiplier). ``_reduce_loss`` below only collapses nested
+    leaves into one scalar — it does NOT divide by token count, so the huge
+    value survives. Here we divide by the number of valid (non-ignored) labels
+    to get a true per-token cross-entropy mean.
+    """
+    IGNORE = -100
+
     class TupleLossCompatTrainer(base):
         def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+            labels = inputs.get("labels")
             loss, outputs = super().compute_loss(
                 model, inputs, return_outputs=True, num_items_in_batch=num_items_in_batch
             )
             loss = _reduce_loss(loss)
+            if normalize_by_tokens and loss is not None and labels is not None:
+                valid = (labels != IGNORE).sum().float()
+                # True per-token mean of a summed loss. Guard: only apply when
+                # there are actual label tokens to divide by.
+                if valid > 0:
+                    loss = loss / valid
             if return_outputs:
                 return loss, outputs
             return loss
@@ -109,7 +130,7 @@ FAMILY_PRESETS = {
     },
     "nemotron": {
         "load_class": "auto",                 # AutoModel (custom remote, trust_remote_code)
-        "lora_targets": ["o_proj"],           # NVIDIA's own linear_spec adapter targets o_proj
+        "lora_targets": ["o_proj", "q_proj", "k_proj", "v_proj", "gate_proj", "up_proj", "down_proj"],  # NVIDIA linear_spec targets o_proj; adding attention+MLP projections for adapt capacity
         "lora_r": 128,
         "lora_alpha": 512,
         "quantize": True,
@@ -293,6 +314,103 @@ def records_to_sft_dataset(records: list, tokenizer, assistant_role: str = "mode
     return Dataset.from_list(rows)
 
 
+def _token_ids_with_offsets(tokenizer, text: str):
+    """Tokenize a rendered text, returning (input_ids, char_offsets) where
+    char_offsets is a parallel list of (start, end) unicode offsets per token.
+    Falls back to a no-offset tokenization if the fast tokenizer is unavailable.
+    """
+    try:
+        enc = tokenizer(text, return_offsets_mapping=True, add_special_tokens=False)
+        return enc["input_ids"], enc.get("offset_mapping", [])
+    except (TypeError, ValueError):
+        ids = tokenizer(text, add_special_tokens=False)["input_ids"]
+        return ids, []
+
+
+def build_assistant_masked_dataset(records: list, tokenizer, base_texts: list) -> "Dataset":
+    """Build a pre-tokenized SFT dataset whose loss is masked to ASSISTANT turns
+    only (i.e. the tool-call emissions and final answers), zeroing out the large
+    system/schema/user scaffolding that dominates a full-sequence loss.
+
+    The rendered Nemotron text uses <|im_start|>assistant ... <|im_end|> blocks.
+    We keep labels (not -100) only for tokens that fall inside an assistant block,
+    so the model is forced to learn the argument-emission tokens instead of
+    coasting on memorizing the repeated tool-schema preamble.
+
+    Returns a datasets.Dataset with input_ids + labels columns for use with
+    SFTTrainer(dataset_kwargs={"skip_prepare_dataset": True}).
+    """
+    from datasets import Dataset
+
+    ASSISTANT_TAG = "<|im_start|>assistant"
+    IM_END = "<|im_end|>"
+
+    rows = []
+    trainable_total = 0
+    total_tokens = 0
+    for text in base_texts:
+        ids, offsets = _token_ids_with_offsets(tokenizer, text)
+        n = len(ids)
+        labels = [-100] * n
+        # Find assistant spans as (start_char, end_char) directly in the raw text,
+        # robust to how the <|im_start|>/<|im_end|> sentinels tokenize.
+        spans = []
+        search_from = 0
+        while True:
+            a = text.find(ASSISTANT_TAG, search_from)
+            if a == -1:
+                break
+            b = text.find(IM_END, a)
+            if b == -1:
+                b = len(text)
+            spans.append((a, b + len(IM_END)))
+            search_from = b + len(IM_END)
+        # Map each span's char range onto token indices via offset_mapping.
+        if offsets:
+            for (sa, sb) in spans:
+                if sb <= sa:
+                    continue
+                for i, (ts, te) in enumerate(offsets):
+                    if te is None:
+                        continue
+                    if te > sa and ts < sb:  # token overlaps the assistant span
+                        labels[i] = ids[i]
+        else:
+            # No offset map available: fall back to full-text token + role decode.
+            text_ids = tokenizer(text, add_special_tokens=False)["input_ids"]
+            i = 0
+            while i < n:
+                seg = tokenizer.decode(text_ids[i:i + 2])
+                if seg.startswith("<|im_start|>assistant"):
+                    k = i
+                    while k < n and "<|im_end|>" not in tokenizer.decode(text_ids[k:k + 1]):
+                        labels[k] = ids[k]
+                        k += 1
+                    if k < n:
+                        labels[k] = ids[k]
+                    i = k + 1
+                    continue
+                i += 1
+        trainable = sum(1 for x in labels if x != -100)
+        trainable_total += trainable
+        total_tokens += n
+        rows.append({"input_ids": ids, "labels": labels, "task": ""})
+
+    frac = (trainable_total / max(total_tokens, 1)) * 100
+    print(
+        f"[loss-mask] assistant-only: {trainable_total} trainable tokens / "
+        f"{total_tokens} total ({frac:.1f}% of sequence)",
+        flush=True,
+    )
+    if trainable_total == 0:
+        raise RuntimeError(
+            "loss-mask produced 0 trainable tokens — assistant spans not detected. "
+            "Check the rendered assistant marker (current assumption: "
+            "'<|im_start|>assistant'). Aborting rather than training a no-op."
+        )
+    return Dataset.from_list(rows)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", required=True, help="Path to JSONL export from trajectory_collector")
@@ -301,11 +419,12 @@ def main():
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--batch-size", type=int, default=1, help="Per-device batch size (keep at 1 for 16GB VRAM)")
     parser.add_argument("--lr", type=float, default=2e-4)
-    parser.add_argument("--max-seq-len", type=int, default=2048)
+    parser.add_argument("--max-seq-len", type=int, default=4096, help="Max sequence length. All 90 augmented failing-tool records are ~3750-3850 tokens, so 4096 covers them fully (0 truncation).")
     parser.add_argument("--local", action="store_true", help="Run locally instead of HF Jobs")
     parser.add_argument("--output-dir", default=str(Path.home() / ".kernel-evolving/workspace/artifacts/finetune"))
     parser.add_argument("--push-to-hub", type=str, default=None, help="HF repo to push adapter to")
     parser.add_argument("--min-score", type=float, default=0.7, help="Min critic score to include")
+    parser.add_argument("--loss-mask", action="store_true", help="Mask loss to assistant turns only (zero out system/schema/user tokens), so the model is forced to learn the tool-call argument emission instead of memorizing the repeated schema preamble. Uses a pre-tokenized input_ids+labels dataset (skip_prepare_dataset=True).")
     args = parser.parse_args()
 
     # Resolve model path
@@ -345,12 +464,15 @@ def main():
     from transformers import AutoProcessor, AutoTokenizer, AutoModel, AutoModelForCausalLM, AutoModelForImageTextToText
     from trl import SFTTrainer, SFTConfig
     from peft import LoraConfig, get_peft_model
-    SFTTrainer = _make_trainer_cls(SFTTrainer)
-
     # Resolve family + tokenizer path from the chosen model.
     family = detect_family(model_path)
     preset = FAMILY_PRESETS[family]
     print(f"Model family: {family} (preset: {preset})")
+    # Custom architectures (Nemotron trust_remote_code) return a SUM-over-tokens
+    # loss; normalize it into a true per-token mean or token accuracy stays pinned
+    # ~0.45 and loss lands in the thousands. Qwen/Gemma return a mean already.
+    normalize = family == "nemotron"
+    SFTTrainer = _make_trainer_cls(SFTTrainer, normalize_by_tokens=normalize)
 
     # Legacy E2B default: keep the env override for backwards compatibility.
     E2B_MODEL = os.environ.get(
@@ -390,6 +512,23 @@ def main():
         sys.exit(1)
 
     dataset = records_to_sft_dataset(records, tokenizer, assistant_role=preset.get("assistant_role", "model"))
+
+    # Optional assistant-only loss mask: rebuild as a pre-tokenized input_ids+labels
+    # dataset whose labels are -100 outside assistant tool-call/answer turns, so the
+    # model is forced to learn the argument-emission tokens instead of the repeated
+    # system/schema preamble (which dominates the full-sequence loss/accuracy).
+    if args.loss_mask:
+        base_texts = [r["text"] for r in dataset]
+        masked_ds = build_assistant_masked_dataset(records, tokenizer, base_texts)
+        print(f"[loss-mask] built masked dataset with {len(masked_ds)} records", flush=True)
+        # Sanity: count trainable (non -100) tokens across the whole dataset.
+        try:
+            trainable = sum(1 for lab in masked_ds["labels"] for x in lab if x != -100)
+            total = sum(len(lab) for lab in masked_ds["labels"])
+            print(f"[loss-mask] trainable tokens {trainable}/{total} ({100*trainable/max(total,1):.1f}%)", flush=True)
+        except Exception as e:
+            print(f"[loss-mask] sanity count skipped: {e}", flush=True)
+        dataset = masked_ds
 
     # Load model with LoRA
     print("Loading model...")
@@ -452,7 +591,7 @@ def main():
 
     # SFT training — memory-safe config for 5B model on 16GB VRAM
     # batch=1 + grad_accum=16 = effective batch 16; grad_checkpointing halves VRAM usage
-    sft_config = SFTConfig(
+    sft_config_kwargs = dict(
         output_dir=args.output_dir,
         num_train_epochs=args.epochs,
         per_device_train_batch_size=1,          # MUST be 1 — batch=4 OOMs on logit alloc
@@ -460,7 +599,7 @@ def main():
         learning_rate=args.lr,
         warmup_ratio=0.1,
         lr_scheduler_type="cosine",
-        max_length=512,                          # 1024 OOMs with 494-example dataset; 512 fits
+        max_length=args.max_seq_len,              # was hardcoded 512 → truncated arg-bearing multi-step tails; now configurable (default 768)
         fp16=False,
         bf16=True,                               # RTX 4090 supports BF16; model weights are BF16
         gradient_checkpointing=True,             # recompute activations — saves ~50% VRAM
@@ -468,10 +607,16 @@ def main():
         save_steps=50,
         save_total_limit=2,
         report_to=["trackio"] if not args.local else ["none"],
-        dataset_text_field="text",
         dataloader_pin_memory=False,             # avoid extra VRAM pinning
         torch_empty_cache_steps=1,               # free cache every step — needed for larger datasets
     )
+    if args.loss_mask:
+        # Pre-tokenized input_ids+labels dataset: skip TRL's re-tokenization and
+        # its dataset_text_field (there is no plain text column to tokenize).
+        sft_config_kwargs["dataset_kwargs"] = {"skip_prepare_dataset": True}
+    else:
+        sft_config_kwargs["dataset_text_field"] = "text"
+    sft_config = SFTConfig(**sft_config_kwargs)
 
     trainer = SFTTrainer(
         model=model,

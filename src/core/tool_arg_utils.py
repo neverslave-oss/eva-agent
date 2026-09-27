@@ -21,7 +21,14 @@ def sanitize_text(val: str) -> str:
         return val
     val = val.strip()
     if "\n" in val:
-        val = [p.strip() for p in val.split("\n") if p.strip() and not p.strip().endswith(">")][-1]
+        # Keep the last line that has real content and isn't a leaked XML/`>`
+        # closing remnant. Guard against a value whose *every* line is filtered
+        # out (all end with '>' or all blank) — previously `[...][-1]` blew up
+        # with IndexError. Fall back to the raw (stripped) value in that case so
+        # the tool loop never crashes on a malformed arg.
+        _lines = [p.strip() for p in val.split("\n") if p.strip() and not p.strip().endswith(">")]
+        if _lines:
+            val = _lines[-1]
     val = val.lstrip(">").lstrip("\n").rstrip("<")
     return val
 
