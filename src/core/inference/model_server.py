@@ -200,9 +200,17 @@ def _load_config(path="config.yaml"):
     return _config
 
 
+# Config access helpers moved to config.py (leaf); wrappers preserve the
+# lazy-load side effect that _critique_cfg had on module state.
+from .config import (  # noqa: E402
+    inference_cfg as _inference_cfg_impl,
+    critique_cfg as _critique_cfg_impl,
+)
+
+
 def _inference_cfg():
     """Return inference sub-config with defaults."""
-    return (_config or {}).get("inference", {})
+    return _inference_cfg_impl(_config)
 
 
 def _critique_cfg():
@@ -220,17 +228,8 @@ def _critique_cfg():
             _load_config(_lazy_config_path)
         except Exception:
             pass
-    blk = (_config or {}).get("critique") or {}
-    return {
-        "enabled": bool(blk.get("enabled", True)),
-        "schema_validate": bool(blk.get("schema_validate", True)),
-        "repair_critique": bool(blk.get("repair_critique", True)),
-        "refusal_reprompt": bool(blk.get("refusal_reprompt", True)),
-        "max_repair_retries": int(blk.get("max_repair_retries", 2)),
-        "revisor": {
-            "enabled": bool((blk.get("revisor") or {}).get("enabled", False)),
-        },
-    }
+    return _critique_cfg_impl(_config)
+
 
 
 # ---------------------------------------------------------------------------
