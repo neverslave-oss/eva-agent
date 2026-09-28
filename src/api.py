@@ -1944,7 +1944,7 @@ def get_provider_routing():
         "model_catalog": providers_cfg.get("models", {}),
         "model_overrides": providers_cfg.get("model_overrides", {}),
         "call_types": ["task_inference", "synthesis", "critic", "planning", "trajectory_teacher", "vision", "stt", "tts"],
-        "providers": ["local", "openai", "anthropic", "hf", "copilot", "openrouter", "google"],
+        "providers": ["local", "openai", "anthropic", "hf", "copilot", "openrouter", "google", "doubleword"],
     }
 
 
@@ -1990,7 +1990,7 @@ def set_provider_routing(body: dict):
     from core.inference.model_client import is_server_running
     p = _gp()  # get existing singleton — do not pass _cfg (would recreate)
     valid_call_types = {"task_inference", "synthesis", "critic", "planning", "trajectory_teacher", "vision", "stt", "tts"}
-    valid_providers  = {"local", "openai", "anthropic", "hf", "copilot", "openrouter"}
+    valid_providers  = {"local", "openai", "anthropic", "hf", "copilot", "openrouter", "doubleword"}
     changed = {}
     vram_actions = []  # messages about GPU actions taken
 
