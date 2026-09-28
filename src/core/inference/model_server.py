@@ -13,6 +13,8 @@ Backend: vLLM AsyncLLMEngine (primary) with HF transformers fallback.
 Usage:
     python3 src/model_server.py [--config config.yaml]
 """
+from . import state as server_state
+
 import asyncio
 import contextlib
 import json
@@ -68,9 +70,6 @@ except ImportError:
 
 SOCKET_PATH = "/tmp/kernel_evolving_model.sock"
 
-_config = None
-_lazy_config_path = "config.yaml"  # set at startup, used by lazy load in handlers
-_lazy_model_override = None  # set at startup via --model, forces base model path independent of config.yaml
 
 
 # ── Failure re-prompt helpers (Plan 007) ────────────────────────────────
@@ -111,30 +110,17 @@ def _mark_activity_end():
 # ---------------------------------------------------------------------------
 # HF transformers fallback (main chat model — used when vLLM fails to load)
 # ---------------------------------------------------------------------------
-_model = None
-_processor = None          # AutoProcessor (Gemma/Qwen) or AutoTokenizer (Nemotron)
-_drafter = None
-_drafter_tokenizer = None
 
 # ---------------------------------------------------------------------------
 # Nemotron-specific state
 # ---------------------------------------------------------------------------
-_is_nemotron = False       # True when nvidia/Nemotron-Labs-Diffusion-* is loaded
-_nemotron_mode = "linear_spec"  # ar | diffusion | linear_spec (from config)
-_nemotron_block_length = 32
-_nemotron_threshold = 0.9
 
 # ---------------------------------------------------------------------------
 # Capability flags (set during model load)
 # ---------------------------------------------------------------------------
-_model_supports_tools = True  # True only for Gemma 4+ with native parse_response
-_audio_capable = False         # True when main model natively handles audio (Gemma 4)
-_native_agentic = False        # True when the main model can handle the full agentic flow
                                # (tool loop + synthesis) itself — e.g. any-to-any Omni —
                                # so we skip the Qwen two-stage detour entirely.
-_is_omni = False               # True for Qwen2.5-Omni (any-to-any) — needs its special
                                # generate(generation_mode="text") path, not the generic one.
-_is_janus = False              # True for DeepSeek Janus/Janus-Pro — uses the custom janus
                                # package (MultiModalityCausalLM + VLChatProcessor), not standard
                                # AutoProcessor + model.generate(**inputs).
 
@@ -143,8 +129,6 @@ _is_janus = False              # True for DeepSeek Janus/Janus-Pro — uses the 
 # Handles STT (audio), vision (image), and combined audio+vision inference.
 # Lazy-loaded on first voice note OR first PDF/image — whichever comes first.
 # ---------------------------------------------------------------------------
-_mm_model = None
-_mm_processor = None
 
 # ---------------------------------------------------------------------------
 # Tool-calling slot — Qwen3-0.6B loaded via HF transformers.
@@ -152,22 +136,14 @@ _mm_processor = None
 # infer_with_tools call. Nemotron only called at the end for conversation
 # synthesis (never sees <function_calls>).
 # ---------------------------------------------------------------------------
-_tool_calling_model = None
-_tool_calling_processor = None
-_tool_calling_slot_loaded = False
 
 # ---------------------------------------------------------------------------
 # Internal locks / adapter registry
 # ---------------------------------------------------------------------------
 # Named model slot registry (optional; None = legacy single-slot mode)
 # ---------------------------------------------------------------------------
-_slot_registry: "SlotRegistry | None" = None  # type: ignore[name-defined]
 
 # ---------------------------------------------------------------------------
-_load_lock = threading.Lock()
-_infer_lock = threading.RLock()
-_loaded_adapters: dict[str, str] = {}
-_current_adapter_name: str | None = None
 
 
 # (parsing helpers moved to parsing.py — see import above)
@@ -189,10 +165,9 @@ from .validation import (  # noqa: E402
 # ---------------------------------------------------------------------------
 
 def _load_config(path="config.yaml"):
-    global _config
     from runtime_paths import load_config as _load_expanded
-    _config = _load_expanded(path)
-    return _config
+    server_state.config = _load_expanded(path)
+    return server_state.config
 
 
 # Config access helpers moved to config.py (leaf); wrappers preserve the
@@ -205,7 +180,7 @@ from .config import (  # noqa: E402
 
 def _inference_cfg():
     """Return inference sub-config with defaults."""
-    return _inference_cfg_impl(_config)
+    return _inference_cfg_impl(server_state.config)
 
 
 def _critique_cfg():
@@ -217,13 +192,12 @@ def _critique_cfg():
     and are fail-open. Read live each turn so config edits take effect without
     a restart.
     """
-    global _config
-    if _config is None:
+    if server_state.config is None:
         try:
-            _load_config(_lazy_config_path)
+            _load_config(server_state.lazy_config_path)
         except Exception:
             pass
-    return _critique_cfg_impl(_config)
+    return _critique_cfg_impl(server_state.config)
 
 
 
@@ -241,15 +215,14 @@ def _sync_globals_from_slot(state: "SlotState") -> None:  # type: ignore[name-de
     request handlers reference.  This keeps every handler working unchanged
     while the slot registry manages the objects.
     """
-    global _model, _processor, _is_nemotron, _audio_capable, _model_supports_tools, _native_agentic, _is_omni, _is_janus
-    _model = state.model
-    _processor = state.processor
-    _is_nemotron = state.is_nemotron
-    _audio_capable = state.audio_capable
-    _model_supports_tools = state.supports_tools
-    _native_agentic = getattr(state, 'native_agentic', False)
-    _is_omni = getattr(state, 'is_omni', False)
-    _is_janus = getattr(state, 'is_janus', False)
+    server_state.model = state.model
+    server_state.processor = state.processor
+    server_state.is_nemotron = state.is_nemotron
+    server_state.audio_capable = state.audio_capable
+    server_state.model_supports_tools = state.supports_tools
+    server_state.native_agentic = getattr(state, 'native_agentic', False)
+    server_state.is_omni = getattr(state, 'is_omni', False)
+    server_state.is_janus = getattr(state, 'is_janus', False)
 
 
 # ---------------------------------------------------------------------------
@@ -261,18 +234,17 @@ from .capabilities import detect as _detect_capability_flags
 
 def _detect_capabilities(model_path: str, cfg: dict):
     """Set capability flags from model_path + config."""
-    global _model_supports_tools, _audio_capable, _native_agentic, _is_omni, _is_janus
     flags = _detect_capability_flags(model_path, cfg)
-    _model_supports_tools = flags["supports_tools"]
-    _audio_capable = flags["audio_capable"]
-    _native_agentic = flags["native_agentic"]
-    _is_omni = flags["is_omni"]
-    _is_janus = flags["is_janus"]
-    print(f"[model_server] Tool-calling support: {_model_supports_tools}", flush=True)
-    print(f"[model_server] Audio capability: {_audio_capable}", flush=True)
-    print(f"[model_server] Native agentic: {_native_agentic}", flush=True)
-    print(f"[model_server] Omni any-to-any: {_is_omni}", flush=True)
-    print(f"[model_server] Janus: {_is_janus}", flush=True)
+    server_state.model_supports_tools = flags["supports_tools"]
+    server_state.audio_capable = flags["audio_capable"]
+    server_state.native_agentic = flags["native_agentic"]
+    server_state.is_omni = flags["is_omni"]
+    server_state.is_janus = flags["is_janus"]
+    print(f"[model_server] Tool-calling support: {server_state.model_supports_tools}", flush=True)
+    print(f"[model_server] Audio capability: {server_state.audio_capable}", flush=True)
+    print(f"[model_server] Native agentic: {server_state.native_agentic}", flush=True)
+    print(f"[model_server] Omni any-to-any: {server_state.is_omni}", flush=True)
+    print(f"[model_server] Janus: {server_state.is_janus}", flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -308,7 +280,7 @@ def _omni_generate_text(inputs: dict, max_new_tokens: int = 1024) -> "object":
     _mark_activity_start()
     try:
         with torch.no_grad():
-            out = _model.generate(
+            out = server_state.model.generate(
                 input_ids=inputs["input_ids"],
                 generation_mode="text",
                 thinker_max_new_tokens=max_new_tokens,
@@ -325,17 +297,16 @@ def _omni_generate_text(inputs: dict, max_new_tokens: int = 1024) -> "object":
 
 def _get_vllm_processor():
     """Get (or lazily load) the tokenizer/processor for prompt formatting."""
-    global _processor
-    if _processor is not None:
-        return _processor
+    if server_state.processor is not None:
+        return server_state.processor
     if _vllm.model_path():
         try:
             from transformers import AutoProcessor
-            _processor = AutoProcessor.from_pretrained(_vllm.model_path(), trust_remote_code=True)
+            server_state.processor = AutoProcessor.from_pretrained(_vllm.model_path(), trust_remote_code=True)
             print("[model_server] Processor loaded for prompt formatting.", flush=True)
         except Exception as e:
             print(f"[model_server] WARNING: processor load failed ({e})", flush=True)
-    return _processor
+    return server_state.processor
 # ---------------------------------------------------------------------------
 # HF transformers fallback
 # ---------------------------------------------------------------------------
@@ -346,14 +317,13 @@ def _load_hf_model(config_path="config.yaml", model_path_override: str | None = 
     model_path_override: when swap_model has already updated _config in-memory,
     pass the path directly to avoid re-reading stale disk config (mirrors _load_nemotron).
     """
-    global _model, _processor, _config, _drafter, _drafter_tokenizer
-    if _model is not None:
+    if server_state.model is not None:
         return
 
     import torch
     from transformers import AutoProcessor, AutoModelForImageTextToText, AutoModelForCausalLM, AutoTokenizer
 
-    cfg = _config if _config is not None else _load_config(config_path)
+    cfg = server_state.config if server_state.config is not None else _load_config(config_path)
     model_source = os.environ.get("MODEL_SOURCE", "local")
     if model_path_override:
         model_path = model_path_override
@@ -418,7 +388,7 @@ def _load_hf_model(config_path="config.yaml", model_path_override: str | None = 
         load_kwargs["config"] = model_cfg
 
     print(f"[model_server] Loading HF model: {model_path} ({quantize or 'bfloat16'}) ...", flush=True)
-    _processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+    server_state.processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
     # AutoModelForImageTextToText doesn't expose .generate() in transformers ≥5.8 dev;
     # use the model-specific class via AutoConfig to ensure GenerationMixin is present.
     try:
@@ -442,35 +412,34 @@ def _load_hf_model(config_path="config.yaml", model_path_override: str | None = 
                         _cls_name = _fcg_name
             if _ModelCls is not None and hasattr(_ModelCls, 'generate'):
                 print(f"[model_server] Using architecture class: {_cls_name}", flush=True)
-                _model = _ModelCls.from_pretrained(model_path, trust_remote_code=True, **load_kwargs)
+                server_state.model = _ModelCls.from_pretrained(model_path, trust_remote_code=True, **load_kwargs)
             else:
                 raise AttributeError(f"{_cls_name} not found in transformers or lacks .generate")
         else:
             raise AttributeError("No architectures in config")
     except Exception as _arch_err:
         print(f"[model_server] Architecture lookup failed ({_arch_err}), trying AutoModelForImageTextToText", flush=True)
-        _model = AutoModelForImageTextToText.from_pretrained(model_path, trust_remote_code=True, **load_kwargs)
-    if not hasattr(_model, 'generate'):
+        server_state.model = AutoModelForImageTextToText.from_pretrained(model_path, trust_remote_code=True, **load_kwargs)
+    if not hasattr(server_state.model, 'generate'):
         # Last resort: try AutoModelForCausalLM (covers some multimodal VL models)
         print("[model_server] WARNING: loaded model has no .generate() — retrying with AutoModelForCausalLM", flush=True)
-        del _model
+        del server_state.model
         import gc; gc.collect()
-        _model = AutoModelForCausalLM.from_pretrained(model_path, trust_remote_code=True, **load_kwargs)
+        server_state.model = AutoModelForCausalLM.from_pretrained(model_path, trust_remote_code=True, **load_kwargs)
     print("[model_server] HF Model loaded.", flush=True)
 
     _detect_capabilities(model_path, cfg)
 
     # Processor-based tool support refinement (Gemma parse_response)
-    global _model_supports_tools
     try:
-        _model_supports_tools = callable(getattr(_processor, 'parse_response', None))
-        _processor.parse_response("")
-        _model_supports_tools = True
+        server_state.model_supports_tools = callable(getattr(server_state.processor, 'parse_response', None))
+        server_state.processor.parse_response("")
+        server_state.model_supports_tools = True
     except AttributeError:
-        _model_supports_tools = False
+        server_state.model_supports_tools = False
     except Exception:
-        _model_supports_tools = True
-    print(f"[model_server] Tool-calling support (refined): {_model_supports_tools}", flush=True)
+        server_state.model_supports_tools = True
+    print(f"[model_server] Tool-calling support (refined): {server_state.model_supports_tools}", flush=True)
 
     # Load MTP drafter
     drafter_path = cfg["model"].get("drafter_path")
@@ -478,36 +447,35 @@ def _load_hf_model(config_path="config.yaml", model_path_override: str | None = 
     if drafter_path and use_speculative:
         try:
             print(f"[model_server] Loading drafter: {drafter_path}", flush=True)
-            _drafter = AutoModelForCausalLM.from_pretrained(drafter_path, dtype=dtype, device_map="auto")
-            _drafter_tokenizer = AutoTokenizer.from_pretrained(drafter_path)
+            server_state.drafter = AutoModelForCausalLM.from_pretrained(drafter_path, dtype=dtype, device_map="auto")
+            server_state.drafter_tokenizer = AutoTokenizer.from_pretrained(drafter_path)
             print("[model_server] Drafter loaded.", flush=True)
         except Exception as e:
             print(f"[model_server] WARNING: drafter load failed ({e})", flush=True)
-            _drafter = None
-            _drafter_tokenizer = None
+            server_state.drafter = None
+            server_state.drafter_tokenizer = None
 
     # Wire primary slot into registry (additive — all existing globals remain set)
-    global _slot_registry
-    if _slot_registry is not None and _SLOTS_AVAILABLE:
+    if server_state.slot_registry is not None and _SLOTS_AVAILABLE:
         try:
             from model_slots import SlotState, SlotSpec  # type: ignore
-            _spec = _slot_registry._specs.get("primary") or SlotSpec(
+            _spec = server_state.slot_registry._specs.get("primary") or SlotSpec(
                 name="primary",
                 model_path=model_path,
                 role="primary",
             )
             _state = SlotState(
                 spec=_spec,
-                model=_model,
-                processor=_processor,
-                is_nemotron=_is_nemotron,
-                audio_capable=_audio_capable,
-                supports_tools=_model_supports_tools,
-                native_agentic=_native_agentic,
-                is_omni=_is_omni,
-                is_janus=_is_janus,
+                model=server_state.model,
+                processor=server_state.processor,
+                is_nemotron=server_state.is_nemotron,
+                audio_capable=server_state.audio_capable,
+                supports_tools=server_state.model_supports_tools,
+                native_agentic=server_state.native_agentic,
+                is_omni=server_state.is_omni,
+                is_janus=server_state.is_janus,
             )
-            _slot_registry._loaded["primary"] = _state
+            server_state.slot_registry._loaded["primary"] = _state
             print("[model_server] Primary slot wired into SlotRegistry", flush=True)
         except Exception as _se:
             print(f"[model_server] WARNING: could not wire primary slot: {_se}", flush=True)
@@ -525,24 +493,21 @@ def _load_nemotron(config_path="config.yaml", model_path_override: str | None = 
     model_path_override: when swap_model has already updated _config in-memory,
     pass the path directly to avoid re-reading stale disk config.
     """
-    global _model, _processor, _config, _is_nemotron
-    global _nemotron_mode, _nemotron_block_length, _nemotron_threshold
-    global _model_supports_tools, _audio_capable, _native_agentic
 
-    if _model is not None:
+    if server_state.model is not None:
         return
 
     import torch
     from transformers import AutoModel, AutoTokenizer
 
-    cfg = _config if _config is not None else _load_config(config_path)
+    cfg = server_state.config if server_state.config is not None else _load_config(config_path)
     model_path = model_path_override or cfg["model"].get("path") or cfg["model"].get("name")
     dtype = getattr(torch, cfg["model"].get("dtype", "bfloat16"))
 
     # Nemotron generation config
-    _nemotron_mode = cfg["model"].get("generation_mode", "linear_spec")
-    _nemotron_block_length = int(cfg["model"].get("block_length", 32))
-    _nemotron_threshold = float(cfg["model"].get("threshold", 0.9))
+    server_state.nemotron_mode = cfg["model"].get("generation_mode", "linear_spec")
+    server_state.nemotron_block_length = int(cfg["model"].get("block_length", 32))
+    server_state.nemotron_threshold = float(cfg["model"].get("threshold", 0.9))
 
     # VRAM guard — Nemotron 3B bf16 ~6GB, 4bit ~3GB
     quantize = cfg["model"].get("quantize", "none")
@@ -601,15 +566,15 @@ def _load_nemotron(config_path="config.yaml", model_path_override: str | None = 
         except Exception as _ctx_err:
             print(f"[model_server] Nemotron: context cap failed ({_ctx_err}) — using model default", flush=True)
 
-    print(f"[model_server] Loading Nemotron: {model_path} (mode={_nemotron_mode}) ...", flush=True)
+    print(f"[model_server] Loading Nemotron: {model_path} (mode={server_state.nemotron_mode}) ...", flush=True)
     # AutoTokenizer — Nemotron has no multimodal processor
-    _processor = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+    server_state.processor = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
     raw = AutoModel.from_pretrained(model_path, **load_kwargs)
 
     # If no CUDA placement already done via quantise, move to GPU
     if not bnb_config and torch.cuda.is_available():
         raw = raw.cuda()
-    _model = raw
+    server_state.model = raw
 
     # ── Adapter selection ──────────────────────────────────────────────────
     # native_agentic mode (config: model.native_agentic=true): Nemotron drives the
@@ -624,10 +589,10 @@ def _load_nemotron(config_path="config.yaml", model_path_override: str | None = 
             try:
                 from peft import PeftModel
                 adapter_name = _adapter_name(adapter_path)
-                _model = PeftModel.from_pretrained(
-                    _model, adapter_path, adapter_name=adapter_name
+                server_state.model = PeftModel.from_pretrained(
+                    server_state.model, adapter_path, adapter_name=adapter_name
                 )
-                _loaded_adapters[adapter_path] = adapter_name
+                server_state.loaded_adapters[adapter_path] = adapter_name
                 print(f"[model_server] Nemotron: FC adapter loaded from {adapter_path}", flush=True)
             except Exception as e:
                 print(f"[model_server] Nemotron: FC adapter load failed ({e}) — continuing without", flush=True)
@@ -635,27 +600,27 @@ def _load_nemotron(config_path="config.yaml", model_path_override: str | None = 
             print("[model_server] Nemotron: native_agentic=true but no adapter_path set — running native tool loop unadaptered", flush=True)
     else:
         # Original linear_spec path — optional speed-drafter (linear_spec_lora subfolder)
-        if _nemotron_mode == "linear_spec" and not adapter_path:
+        if server_state.nemotron_mode == "linear_spec" and not adapter_path:
             import os as _os
             _lora_path = _os.path.join(model_path, "linear_spec_lora")
             if _os.path.isdir(_lora_path):
                 adapter_path = _lora_path
-        if adapter_path and _nemotron_mode == "linear_spec":
+        if adapter_path and server_state.nemotron_mode == "linear_spec":
             try:
                 from peft import PeftModel
-                _peft = PeftModel.from_pretrained(_model, adapter_path).eval()
-                _model = _peft.model  # unwrap to call linear_spec_generate directly
+                _peft = PeftModel.from_pretrained(server_state.model, adapter_path).eval()
+                server_state.model = _peft.model  # unwrap to call linear_spec_generate directly
                 print(f"[model_server] Nemotron: LoRA drafter loaded from {adapter_path}", flush=True)
             except Exception as e:
                 print(f"[model_server] Nemotron: LoRA drafter load failed ({e}) — continuing without", flush=True)
 
-    _is_nemotron = True
+    server_state.is_nemotron = True
     # Nemotron has full tool-calling via its chat template (XML function_calls format)
-    _model_supports_tools = True
-    _audio_capable = False
+    server_state.model_supports_tools = True
+    server_state.audio_capable = False
     # Nemotron stays on its tested Qwen two-stage path unless native_agentic is set.
-    _native_agentic = native_agentic
-    print(f"[model_server] Nemotron ready. mode={_nemotron_mode} block={_nemotron_block_length} threshold={_nemotron_threshold}", flush=True)
+    server_state.native_agentic = native_agentic
+    print(f"[model_server] Nemotron ready. mode={server_state.nemotron_mode} block={server_state.nemotron_block_length} threshold={server_state.nemotron_threshold}", flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -667,13 +632,11 @@ def _load_nemotron(config_path="config.yaml", model_path_override: str | None = 
 # Inference is NOT model.generate(**inputs); it uses prepare_inputs_embeds() then
 # language_model.generate(inputs_embeds=...). We keep the model in _model and the
 # tokenizer/processor in _processor so existing handlers can route to it.
-_janus_processor = None   # VLChatProcessor (also exposes .tokenizer)
 
 def _load_janus(config_path="config.yaml", model_path_override: str | None = None):
     """Load a DeepSeek Janus/Janus-Pro model via the custom `janus` package."""
-    global _model, _processor, _is_janus, _janus_processor
     _load_config(config_path)
-    cfg = _config or {}
+    cfg = server_state.config or {}
     model_path = model_path_override or cfg.get("model", {}).get("path") or cfg.get("model", {}).get("name", "")
 
     try:
@@ -688,11 +651,11 @@ def _load_janus(config_path="config.yaml", model_path_override: str | None = Non
     print(f"[model_server] Loading Janus model: {model_path} ...", flush=True)
     # Load the processor first (it carries the tokenizer)
     try:
-        _janus_processor = VLChatProcessor.from_pretrained(model_path)
-        _processor = _janus_processor.tokenizer
+        server_state.janus_processor = VLChatProcessor.from_pretrained(model_path)
+        server_state.processor = server_state.janus_processor.tokenizer
     except Exception as e:
         print(f"[model_server] Janus processor load failed ({e})", flush=True)
-        _processor = None
+        server_state.processor = None
 
     # Load the model in bfloat16 on GPU
     import torch
@@ -703,22 +666,22 @@ def _load_janus(config_path="config.yaml", model_path_override: str | None = Non
     else:
         load_kwargs["torch_dtype"] = torch.bfloat16
 
-    _model = AutoModelForCausalLM.from_pretrained(
+    server_state.model = AutoModelForCausalLM.from_pretrained(
         model_path, trust_remote_code=True, **load_kwargs
     )
-    _model.eval()
+    server_state.model.eval()
 
-    _is_janus = True
-    _audio_capable = False
-    _model_supports_tools = False
-    _native_agentic = True  # Janus drives its own flow (text + vision)
-    print(f"[model_server] Janus loaded: {type(_model).__name__}", flush=True)
+    server_state.is_janus = True
+    server_state.audio_capable = False
+    server_state.model_supports_tools = False
+    server_state.native_agentic = True  # Janus drives its own flow (text + vision)
+    print(f"[model_server] Janus loaded: {type(server_state.model).__name__}", flush=True)
 
 
 def _janus_infer_text(messages: list, max_new_tokens: int = 8192) -> str:
     """Text-only inference for Janus via prepare_inputs_embeds + language_model.generate."""
     import torch
-    if _janus_processor is None:
+    if server_state.janus_processor is None:
         raise RuntimeError("Janus processor not loaded")
     # Flatten to a single user prompt (Janus is not a chat model in the standard sense)
     text = "\n".join(
@@ -728,15 +691,15 @@ def _janus_infer_text(messages: list, max_new_tokens: int = 8192) -> str:
         {"role": "<|User|>", "content": text},
         {"role": "<|Assistant|>", "content": ""},
     ]
-    prepare_inputs = _janus_processor(
+    prepare_inputs = server_state.janus_processor(
         conversations=conversation, images=[], force_batchify=True
     ).to(_target_device())
-    inputs_embeds = _model.prepare_inputs_embeds(**prepare_inputs)
-    tokenizer = _janus_processor.tokenizer
+    inputs_embeds = server_state.model.prepare_inputs_embeds(**prepare_inputs)
+    tokenizer = server_state.janus_processor.tokenizer
     _mark_activity_start()
     try:
         with torch.no_grad():
-            outputs = _model.language_model.generate(
+            outputs = server_state.model.language_model.generate(
                 inputs_embeds=inputs_embeds,
                 attention_mask=prepare_inputs.attention_mask,
                 pad_token_id=tokenizer.eos_token_id,
@@ -757,7 +720,7 @@ def _janus_infer_text(messages: list, max_new_tokens: int = 8192) -> str:
 def _janus_infer_image(image_path: str, prompt: str, max_new_tokens: int = 1024) -> str:
     """Vision inference for Janus via prepare_inputs_embeds + language_model.generate."""
     import torch
-    if _janus_processor is None:
+    if server_state.janus_processor is None:
         raise RuntimeError("Janus processor not loaded")
     from PIL import Image
     img = Image.open(image_path).convert("RGB")
@@ -765,15 +728,15 @@ def _janus_infer_image(image_path: str, prompt: str, max_new_tokens: int = 1024)
         {"role": "<|User|>", "content": f"<image_placeholder>\n{prompt}", "images": [img]},
         {"role": "<|Assistant|>", "content": ""},
     ]
-    prepare_inputs = _janus_processor(
+    prepare_inputs = server_state.janus_processor(
         conversations=conversation, images=[img], force_batchify=True
     ).to(_target_device())
-    inputs_embeds = _model.prepare_inputs_embeds(**prepare_inputs)
-    tokenizer = _janus_processor.tokenizer
+    inputs_embeds = server_state.model.prepare_inputs_embeds(**prepare_inputs)
+    tokenizer = server_state.janus_processor.tokenizer
     _mark_activity_start()
     try:
         with torch.no_grad():
-            outputs = _model.language_model.generate(
+            outputs = server_state.model.language_model.generate(
                 inputs_embeds=inputs_embeds,
                 attention_mask=prepare_inputs.attention_mask,
                 pad_token_id=tokenizer.eos_token_id,
@@ -797,38 +760,38 @@ def _nemotron_infer(messages: list, max_new_tokens: int = 8192) -> str:
     Returns the decoded output string.
     """
     import torch
-    prompt = _processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    prompt_ids = _processor(prompt, return_tensors="pt").input_ids
+    prompt = server_state.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    prompt_ids = server_state.processor(prompt, return_tensors="pt").input_ids
     if torch.cuda.is_available():
         prompt_ids = prompt_ids.cuda()
 
-    eos_id = _processor.eos_token_id
+    eos_id = server_state.processor.eos_token_id
 
     print(f"[DEBUG model_server] Nemotron messages: {messages}", flush=True)
 
     
     with torch.no_grad():
-        if _nemotron_mode == "ar":
-            out_ids, nfe = _model.ar_generate(prompt_ids, max_new_tokens=max_new_tokens)
-        elif _nemotron_mode == "diffusion":
-            out_ids, nfe = _model.generate(
+        if server_state.nemotron_mode == "ar":
+            out_ids, nfe = server_state.model.ar_generate(prompt_ids, max_new_tokens=max_new_tokens)
+        elif server_state.nemotron_mode == "diffusion":
+            out_ids, nfe = server_state.model.generate(
                 prompt_ids,
                 max_new_tokens=max_new_tokens,
-                block_length=_nemotron_block_length,
-                threshold=_nemotron_threshold,
+                block_length=server_state.nemotron_block_length,
+                threshold=server_state.nemotron_threshold,
                 eos_token_id=eos_id,
             )
         else:  # linear_spec (default — fastest)
-            out_ids, nfe = _model.linear_spec_generate(
+            out_ids, nfe = server_state.model.linear_spec_generate(
                 prompt_ids,
                 max_new_tokens=max_new_tokens,
-                block_length=_nemotron_block_length,
+                block_length=server_state.nemotron_block_length,
                 eos_token_id=eos_id,
             )
 
     new_ids = out_ids[:, prompt_ids.shape[1]:]
-    text = _processor.batch_decode(new_ids, skip_special_tokens=True)[0]
-    print(f"[model_server] Nemotron NFE={nfe} mode={_nemotron_mode}", flush=True)
+    text = server_state.processor.batch_decode(new_ids, skip_special_tokens=True)[0]
+    print(f"[model_server] Nemotron NFE={nfe} mode={server_state.nemotron_mode}", flush=True)
     return text.strip()
 
 
@@ -838,8 +801,7 @@ def _nemotron_infer(messages: list, max_new_tokens: int = 8192) -> str:
 
 def _load_adapter(adapter_path: str) -> str:
     """Load a LoRA adapter onto the already-loaded HF model and return its adapter name."""
-    global _model
-    if _model is None:
+    if server_state.model is None:
         print("[adapter] WARNING: base model not loaded — cannot attach adapter", flush=True)
         raise RuntimeError("base model not loaded")
     if _vllm.is_enabled():
@@ -849,18 +811,18 @@ def _load_adapter(adapter_path: str) -> str:
     if not Path(adapter_path).exists():
         raise FileNotFoundError(f"adapter path not found: {adapter_path}")
 
-    existing = _loaded_adapters.get(adapter_path)
+    existing = server_state.loaded_adapters.get(adapter_path)
     if existing:
         return existing
 
     try:
         from peft import PeftModel
         adapter_name = _adapter_name(adapter_path)
-        if _is_peft_model(_model):
-            _model.load_adapter(adapter_path, adapter_name=adapter_name)
+        if _is_peft_model(server_state.model):
+            server_state.model.load_adapter(adapter_path, adapter_name=adapter_name)
         else:
-            _model = PeftModel.from_pretrained(_model, adapter_path, adapter_name=adapter_name)
-        _loaded_adapters[adapter_path] = adapter_name
+            server_state.model = PeftModel.from_pretrained(server_state.model, adapter_path, adapter_name=adapter_name)
+        server_state.loaded_adapters[adapter_path] = adapter_name
         print(f"[adapter] loaded LoRA adapter '{adapter_name}' from {adapter_path}", flush=True)
         return adapter_name
     except Exception as e:
@@ -871,34 +833,33 @@ def _load_adapter(adapter_path: str) -> str:
 @contextlib.contextmanager
 def _use_adapter(adapter_path: str | None):
     """Temporarily activate an adapter for generation on the shared base model."""
-    global _current_adapter_name
     _ensure_model()
 
     if adapter_path and _vllm.is_enabled():
         raise RuntimeError("adapter-aware inference is not supported with vLLM backend")
 
-    with _infer_lock:
+    with server_state.infer_lock:
         if not adapter_path:
-            if _model is not None and _is_peft_model(_model):
-                with _model.disable_adapter():
+            if server_state.model is not None and _is_peft_model(server_state.model):
+                with server_state.model.disable_adapter():
                     yield
             else:
                 yield
             return
 
         adapter_name = _load_adapter(adapter_path)
-        previous = _current_adapter_name
-        if hasattr(_model, "set_adapter"):
-            _model.set_adapter(adapter_name)
-        _current_adapter_name = adapter_name
+        previous = server_state.current_adapter_name
+        if hasattr(server_state.model, "set_adapter"):
+            server_state.model.set_adapter(adapter_name)
+        server_state.current_adapter_name = adapter_name
         try:
             yield
         finally:
-            if previous and hasattr(_model, "set_adapter"):
-                _model.set_adapter(previous)
-                _current_adapter_name = previous
+            if previous and hasattr(server_state.model, "set_adapter"):
+                server_state.model.set_adapter(previous)
+                server_state.current_adapter_name = previous
             else:
-                _current_adapter_name = None
+                server_state.current_adapter_name = None
 
 def _make_slot_loader():
     """Return a loader callable for SlotRegistry.set_loader().
@@ -963,9 +924,8 @@ def _load_model(config_path="config.yaml", model_path_override: str | None = Non
     a given LoRA adapter (adapter.base_model_name_or_path), independent of whatever
     model is currently configured for live inference.
     """
-    global _config, _slot_registry
-    with _load_lock:
-        if _vllm.is_enabled() or _model is not None:
+    with server_state.load_lock:
+        if _vllm.is_enabled() or server_state.model is not None:
             return  # already loaded
 
         cfg = _load_config(config_path)
@@ -974,7 +934,7 @@ def _load_model(config_path="config.yaml", model_path_override: str | None = Non
         if _SLOTS_AVAILABLE and "model_slots" in cfg and cfg["model_slots"]:
             try:
                 from model_slots import SlotRegistry as _SR, SlotSpec as _SS  # type: ignore
-                _slot_registry = _SR(vram_threshold_mb=cfg.get("vram_threshold_mb", 3000))
+                server_state.slot_registry = _SR(vram_threshold_mb=cfg.get("vram_threshold_mb", 3000))
                 for slot_name, slot_cfg in (cfg["model_slots"] or {}).items():
                     slot_cfg = slot_cfg or {}
                     spec = _SS(
@@ -987,13 +947,13 @@ def _load_model(config_path="config.yaml", model_path_override: str | None = Non
                         max_context_length=slot_cfg.get("max_context_length", 8192),
                         adapter_path=slot_cfg.get("adapter_path"),
                     )
-                    _slot_registry.register(spec)
+                    server_state.slot_registry.register(spec)
                 # Wire a slot loader so load_slot() RPC can hot-load any registered spec
-                _slot_registry.set_loader(_make_slot_loader())
+                server_state.slot_registry.set_loader(_make_slot_loader())
                 print(f"[model_server] SlotRegistry built with {len(cfg['model_slots'])} slot(s)", flush=True)
             except Exception as _sre:
                 print(f"[model_server] WARNING: failed to build SlotRegistry: {_sre}", flush=True)
-                _slot_registry = None
+                server_state.slot_registry = None
         model_path = model_path_override or cfg["model"].get("path") or cfg["model"].get("name", "")
 
         # Janus uses the custom `janus` package — completely different API
@@ -1011,7 +971,7 @@ def _load_model(config_path="config.yaml", model_path_override: str | None = Non
         backend = cfg.get("inference", {}).get("backend", "vllm")
 
         if backend == "vllm":
-            success = _vllm.load_engine(_config, _detect_capabilities, model_path_override=model_path if model_path_override else None)
+            success = _vllm.load_engine(server_state.config, _detect_capabilities, model_path_override=model_path if model_path_override else None)
             if not success:
                 # Fallback to HF
                 _load_hf_model(config_path, model_path_override=model_path if model_path_override else None)
@@ -1022,8 +982,8 @@ def _load_model(config_path="config.yaml", model_path_override: str | None = Non
 
 
 def _ensure_model():
-    if not _vllm.is_enabled() and _model is None:
-        _load_model(_lazy_config_path, model_path_override=_lazy_model_override)
+    if not _vllm.is_enabled() and server_state.model is None:
+        _load_model(server_state.lazy_config_path, model_path_override=server_state.lazy_model_override)
         adapter_path = os.environ.get("MODEL_ADAPTER_PATH")
         if adapter_path:
             _load_adapter(adapter_path)
@@ -1039,8 +999,7 @@ def _ensure_multimodal_slot():
     main model, reuse _model/_processor directly to avoid a second ~9GB
     copy in VRAM.
     """
-    global _mm_model, _mm_processor
-    if _mm_model is not None:
+    if server_state.mm_model is not None:
         print("[model_server] Multimodal slot already loaded", flush=True)
         return
     print("[model_server] Multimodal slot not yet loaded, initializing...", flush=True)
@@ -1049,9 +1008,9 @@ def _ensure_multimodal_slot():
     # which is unnecessary for vision/STT and can fail if the main model path
     # is a cloud-only config (e.g. ${KERNEL_EVO_HF_HUB} unexpanded in a spawned
     # on-demand server). The multimodal slot is loaded independently below.
-    if _config is None:
-        _load_config(_lazy_config_path)
-    stt_cfg = (_config or {}).get("stt_model", {})
+    if server_state.config is None:
+        _load_config(server_state.lazy_config_path)
+    stt_cfg = (server_state.config or {}).get("stt_model", {})
     stt_path = stt_cfg.get("path") or stt_cfg.get("name")
     if not stt_path:
         err = "stt_model not configured in config.yaml"
@@ -1062,16 +1021,16 @@ def _ensure_multimodal_slot():
     # Resolve both paths and compare. If they point to the same weights, alias
     # the STT handle to the already-loaded main model — zero extra VRAM.
     import os
-    main_path = ((_config or {}).get("model") or {}).get("path") or ""
+    main_path = ((server_state.config or {}).get("model") or {}).get("path") or ""
     stt_resolved  = os.path.realpath(os.path.expanduser(stt_path))
     main_resolved = os.path.realpath(os.path.expanduser(main_path))
-    if stt_resolved == main_resolved and _model is not None:
+    if stt_resolved == main_resolved and server_state.model is not None:
         print(
             f"[model_server] STT path == main model path — reusing loaded model (saves ~9GB VRAM)",
             flush=True,
         )
-        _mm_model     = _model
-        _mm_processor = _processor
+        server_state.mm_model     = server_state.model
+        server_state.mm_processor = server_state.processor
         return
     # ─────────────────────────────────────────────────────────────────────────
 
@@ -1090,7 +1049,7 @@ def _ensure_multimodal_slot():
         quantize = None
     print(f"[model_server] Loading multimodal slot: {stt_path} (device={device}, dtype={dtype_str})", flush=True)
     try:
-        _mm_processor = AutoProcessor.from_pretrained(stt_path)
+        server_state.mm_processor = AutoProcessor.from_pretrained(stt_path)
         print(f"[model_server] STT processor loaded", flush=True)
     except Exception as e:
         print(f"[model_server] ERROR loading STT processor: {e}", flush=True)
@@ -1099,8 +1058,8 @@ def _ensure_multimodal_slot():
         # AutoModel loads the base class (e.g. Gemma4Model) which lacks .generate().
         # Use AutoModelForCausalLM so GenerationMixin is always present.
         from transformers import AutoModelForCausalLM as _AutoCLM
-        _mm_model = _AutoCLM.from_pretrained(stt_path, **load_kwargs, trust_remote_code=True)
-        if not hasattr(_mm_model, 'generate'):
+        server_state.mm_model = _AutoCLM.from_pretrained(stt_path, **load_kwargs, trust_remote_code=True)
+        if not hasattr(server_state.mm_model, 'generate'):
             # Fallback: architecture-specific class via AutoConfig
             from transformers import AutoConfig as _AConf
             _arch = getattr(_AConf.from_pretrained(stt_path, trust_remote_code=True), 'architectures', [])
@@ -1108,35 +1067,35 @@ def _ensure_multimodal_slot():
                 import importlib as _il
                 _Cls = getattr(_il.import_module('transformers'), _arch[0], None)
                 if _Cls and hasattr(_Cls, 'generate'):
-                    del _mm_model
-                    _mm_model = _Cls.from_pretrained(stt_path, **load_kwargs, trust_remote_code=True)
-        print(f"[model_server] Multimodal slot loaded to {next(_mm_model.parameters()).device} (class: {_mm_model.__class__.__name__})", flush=True)
-        if not hasattr(_mm_model, 'generate'):
-            raise AttributeError(f"Multimodal slot class {_mm_model.__class__.__name__} has no .generate() — STT unavailable")
+                    del server_state.mm_model
+                    server_state.mm_model = _Cls.from_pretrained(stt_path, **load_kwargs, trust_remote_code=True)
+        print(f"[model_server] Multimodal slot loaded to {next(server_state.mm_model.parameters()).device} (class: {server_state.mm_model.__class__.__name__})", flush=True)
+        if not hasattr(server_state.mm_model, 'generate'):
+            raise AttributeError(f"Multimodal slot class {server_state.mm_model.__class__.__name__} has no .generate() — STT unavailable")
     except Exception as e:
-        _mm_model = None
-        _mm_processor = None
+        server_state.mm_model = None
+        server_state.mm_processor = None
         print(f"[model_server] ERROR loading multimodal slot: {e}", flush=True)
         raise
 
     # Wire audio slot into registry (additive — existing _mm_model/_mm_processor remain set)
-    if _slot_registry is not None and _SLOTS_AVAILABLE:
+    if server_state.slot_registry is not None and _SLOTS_AVAILABLE:
         try:
             from model_slots import SlotState, SlotSpec  # type: ignore
-            _audio_spec = _slot_registry._specs.get("audio") or SlotSpec(
+            _audio_spec = server_state.slot_registry._specs.get("audio") or SlotSpec(
                 name="audio",
                 model_path=stt_path,
                 role="audio",
             )
             _audio_state = SlotState(
                 spec=_audio_spec,
-                model=_mm_model,
-                processor=_mm_processor,
+                model=server_state.mm_model,
+                processor=server_state.mm_processor,
                 is_nemotron=False,
                 audio_capable=True,
                 supports_tools=False,
             )
-            _slot_registry._loaded["audio"] = _audio_state
+            server_state.slot_registry._loaded["audio"] = _audio_state
             print("[model_server] Audio slot wired into SlotRegistry", flush=True)
         except Exception as _se:
             print(f"[model_server] WARNING: could not wire audio slot: {_se}", flush=True)
@@ -1153,19 +1112,18 @@ def _ensure_tool_calling_slot():
     microplanning + native tool calling without thinking overflow.
     Nemotron only gets called at the end for conversation synthesis.
     """
-    global _tool_calling_model, _tool_calling_processor, _tool_calling_slot_loaded
 
-    if _tool_calling_slot_loaded:
+    if server_state.tool_calling_slot_loaded:
         return
 
     _ensure_model()  # config must be loaded first
 
     # Check if tool_calling slot is configured
-    if _slot_registry is None:
+    if server_state.slot_registry is None:
         print("[model_server] No SlotRegistry — tool_calling slot unavailable", flush=True)
         return
 
-    tc_spec = _slot_registry._specs.get("tool_calling")
+    tc_spec = server_state.slot_registry._specs.get("tool_calling")
     if tc_spec is None:
         print("[model_server] No tool_calling slot in config — skipping", flush=True)
         return
@@ -1189,22 +1147,22 @@ def _ensure_tool_calling_slot():
 
     try:
         from transformers import AutoTokenizer, AutoModelForCausalLM
-        _tool_calling_processor = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-        print(f"[model_server] Tool-calling tokenizer loaded (vocab={_tool_calling_processor.vocab_size})", flush=True)
+        server_state.tool_calling_processor = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+        print(f"[model_server] Tool-calling tokenizer loaded (vocab={server_state.tool_calling_processor.vocab_size})", flush=True)
     except Exception as e:
         print(f"[model_server] ERROR loading tool-calling tokenizer: {e}", flush=True)
         return
 
     try:
         load_kwargs = {"device_map": device, "torch_dtype": dtype, "trust_remote_code": True}
-        _tool_calling_model = AutoModelForCausalLM.from_pretrained(model_path, **load_kwargs)
-        if not hasattr(_tool_calling_model, 'generate'):
-            raise AttributeError(f"Tool-calling model class {_tool_calling_model.__class__.__name__} has no .generate()")
-        print(f"[model_server] Tool-calling slot loaded to {next(_tool_calling_model.parameters()).device} (class: {_tool_calling_model.__class__.__name__})", flush=True)
+        server_state.tool_calling_model = AutoModelForCausalLM.from_pretrained(model_path, **load_kwargs)
+        if not hasattr(server_state.tool_calling_model, 'generate'):
+            raise AttributeError(f"Tool-calling model class {server_state.tool_calling_model.__class__.__name__} has no .generate()")
+        print(f"[model_server] Tool-calling slot loaded to {next(server_state.tool_calling_model.parameters()).device} (class: {server_state.tool_calling_model.__class__.__name__})", flush=True)
     except Exception as e:
         print(f"[model_server] ERROR loading tool-calling model: {e}", flush=True)
-        _tool_calling_model = None
-        _tool_calling_processor = None
+        server_state.tool_calling_model = None
+        server_state.tool_calling_processor = None
         # Retry once after 30s — GPU may have recovered from transient OOM/fragmentation
         import time as _retry_time
         print("[model_server] Retrying tool_calling slot load in 30s...", flush=True)
@@ -1215,29 +1173,29 @@ def _ensure_tool_calling_slot():
             import torch
             torch.cuda.empty_cache()
             print(f"[model_server] Retry attempt: loading tool_calling slot...", flush=True)
-            _tool_calling_model = AutoModelForCausalLM.from_pretrained(model_path, **load_kwargs)
-            print(f"[model_server] Tool-calling slot loaded on retry to {next(_tool_calling_model.parameters()).device}", flush=True)
+            server_state.tool_calling_model = AutoModelForCausalLM.from_pretrained(model_path, **load_kwargs)
+            print(f"[model_server] Tool-calling slot loaded on retry to {next(server_state.tool_calling_model.parameters()).device}", flush=True)
         except Exception as e2:
             print(f"[model_server] ERROR tool-calling slot retry failed: {e2}", flush=True)
-            _tool_calling_model = None
-            _tool_calling_processor = None
+            server_state.tool_calling_model = None
+            server_state.tool_calling_processor = None
             return
 
-    _tool_calling_slot_loaded = True
+    server_state.tool_calling_slot_loaded = True
 
     # Wire into slot registry for status reporting
-    if _slot_registry is not None:
+    if server_state.slot_registry is not None:
         try:
             from model_slots import SlotState
             _tc_state = SlotState(
                 spec=tc_spec,
-                model=_tool_calling_model,
-                processor=_tool_calling_processor,
+                model=server_state.tool_calling_model,
+                processor=server_state.tool_calling_processor,
                 is_nemotron=False,
                 audio_capable=False,
                 supports_tools=True,
             )
-            _slot_registry._loaded["tool_calling"] = _tc_state
+            server_state.slot_registry._loaded["tool_calling"] = _tc_state
             print("[model_server] Tool-calling slot wired into SlotRegistry", flush=True)
         except Exception as _se:
             print(f"[model_server] WARNING: could not wire tool_calling slot: {_se}", flush=True)
@@ -1250,9 +1208,9 @@ def _ensure_tool_calling_slot():
 def _target_device():
     """Return the device of the model's first parameter (HF fallback path)."""
     import torch
-    if _model is not None:
+    if server_state.model is not None:
         try:
-            return next(_model.parameters()).device
+            return next(server_state.model.parameters()).device
         except StopIteration:
             pass
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -1340,7 +1298,7 @@ def _handle_infer(params: dict) -> dict:
         print("[model_server] _handle_infer: injected default system prompt (was missing)", flush=True)
 
     # ── Nemotron path — custom generate API, no processor.parse_response
-    if _is_nemotron:
+    if server_state.is_nemotron:
         try:
             formatted = [
                 {"role": m["role"], "content": str(m.get("content", ""))}
@@ -1369,12 +1327,12 @@ def _handle_infer(params: dict) -> dict:
                 except Exception as e:
                     print(f"[model_server] vLLM infer error: {e} — falling back to HF", flush=True)
                     # Fall through to HF path if model available
-                    if _model is None:
+                    if server_state.model is None:
                         return {"error": f"vLLM failed and HF model not loaded: {e}"}
 
             # HF transformers path
             import torch
-            inputs = _processor.apply_chat_template(
+            inputs = server_state.processor.apply_chat_template(
                 formatted,
                 tokenize=True,
                 return_dict=True,
@@ -1392,11 +1350,11 @@ def _handle_infer(params: dict) -> dict:
                     top_p=0.95,
                     top_k=64,
                 )
-                if _drafter is not None:
-                    _gen_kwargs["assistant_model"] = _drafter
-                out = _model.generate(**inputs, **_gen_kwargs)
-            response_raw = _processor.decode(out[0][input_len:], skip_special_tokens=False)
-            parsed = _processor.parse_response(response_raw)
+                if server_state.drafter is not None:
+                    _gen_kwargs["assistant_model"] = server_state.drafter
+                out = server_state.model.generate(**inputs, **_gen_kwargs)
+            response_raw = server_state.processor.decode(out[0][input_len:], skip_special_tokens=False)
+            parsed = server_state.processor.parse_response(response_raw)
             result = parsed.get("content", "").strip()
             return {"result": result}
     except Exception as e:
@@ -1434,7 +1392,7 @@ def _handle_infer_plain(params: dict) -> dict:
         print("[model_server] _handle_infer_plain: injected default system prompt (was missing)", flush=True)
 
     # ── Janus path
-    if _is_janus:
+    if server_state.is_janus:
         try:
             result = _janus_infer_text(messages, max_new_tokens=8192)
             return {"result": result}
@@ -1442,7 +1400,7 @@ def _handle_infer_plain(params: dict) -> dict:
             return {"error": str(e)}
 
     # ── Nemotron path
-    if _is_nemotron:
+    if server_state.is_nemotron:
         try:
             chat = [
                 {"role": m["role"], "content": str(m.get("content", ""))}
@@ -1472,24 +1430,24 @@ def _handle_infer_plain(params: dict) -> dict:
                     return {"result": result.strip()}
                 except Exception as e:
                     print(f"[model_server] vLLM infer_plain error: {e} — falling back to HF", flush=True)
-                    if _model is None:
+                    if server_state.model is None:
                         return {"error": f"vLLM failed and HF model not loaded: {e}"}
 
             # HF path
             import torch
             try:
-                text = _processor.apply_chat_template(chat, tokenize=False, add_generation_prompt=True)
-                inputs = _processor(text=text, return_tensors="pt").to(_target_device())
+                text = server_state.processor.apply_chat_template(chat, tokenize=False, add_generation_prompt=True)
+                inputs = server_state.processor(text=text, return_tensors="pt").to(_target_device())
             except Exception as e:
                 last = next((m["content"] for m in reversed(chat) if m["role"] == "user"), "")
-                inputs = _processor(text=last, return_tensors="pt").to(_target_device())
+                inputs = server_state.processor(text=last, return_tensors="pt").to(_target_device())
 
             input_len = inputs["input_ids"].shape[-1]
-            if _is_omni:
+            if server_state.is_omni:
                 out = _omni_generate_text(inputs, max_new_tokens=8192)
             else:
                 with torch.no_grad():
-                    out = _model.generate(
+                    out = server_state.model.generate(
                         **inputs,
                         max_new_tokens=8192,
                         do_sample=True,
@@ -1497,7 +1455,7 @@ def _handle_infer_plain(params: dict) -> dict:
                         top_p=0.9,
                         top_k=50,
                     )
-            result = _processor.decode(out[0][input_len:], skip_special_tokens=True).strip()
+            result = server_state.processor.decode(out[0][input_len:], skip_special_tokens=True).strip()
             return {"result": result}
     except Exception as e:
         return {"error": str(e)}
@@ -1509,11 +1467,10 @@ def _handle_infer_plain(params: dict) -> dict:
 
 def _run_two_stage_if_available(params: dict, send_line) -> dict | None:
     """Try the two-stage pipeline. Returns None if tool_calling slot unavailable."""
-    global _tool_calling_slot_loaded, _tool_calling_model, _tool_calling_processor
 
-    if not _tool_calling_slot_loaded:
+    if not server_state.tool_calling_slot_loaded:
         _ensure_tool_calling_slot()
-    if not _tool_calling_slot_loaded:
+    if not server_state.tool_calling_slot_loaded:
         return None  # fall through to single-model path
 
     import json
@@ -1616,7 +1573,7 @@ def _run_two_stage_if_available(params: dict, send_line) -> dict | None:
 
     for step in range(max_steps):
         try:
-            inputs = _tool_calling_processor.apply_chat_template(
+            inputs = server_state.tool_calling_processor.apply_chat_template(
                 current_messages,
                 tools=tools_openai,
                 tokenize=True,
@@ -1629,7 +1586,7 @@ def _run_two_stage_if_available(params: dict, send_line) -> dict | None:
             # Without dtype alignment, float32 token tensors hit a BFloat16 weight
             # mismatch inside model.generate(), producing:
             #   "expected mat1 and mat2 to have the same dtype, but got: c10::BFloat16 != float"
-            _tc_param = next(_tool_calling_model.parameters())
+            _tc_param = next(server_state.tool_calling_model.parameters())
             _tc_device = _tc_param.device
             _tc_dtype = _tc_param.dtype
             inputs = {
@@ -1645,7 +1602,7 @@ def _run_two_stage_if_available(params: dict, send_line) -> dict | None:
             _mark_activity_start()
             try:
                 with torch.no_grad():
-                    out = _tool_calling_model.generate(
+                    out = server_state.tool_calling_model.generate(
                         **inputs,
                         max_new_tokens=1024,
                         do_sample=True,
@@ -1658,13 +1615,13 @@ def _run_two_stage_if_available(params: dict, send_line) -> dict | None:
                         top_p=0.3,
                         top_k=20,
                         repetition_penalty=1.05,
-                        pad_token_id=_tool_calling_processor.eos_token_id,
+                        pad_token_id=server_state.tool_calling_processor.eos_token_id,
                     )
             finally:
                 _mark_activity_end()
 
-            response_raw = _tool_calling_processor.decode(out[0][input_len:], skip_special_tokens=False)
-            response_clean = _tool_calling_processor.decode(out[0][input_len:], skip_special_tokens=True).strip()
+            response_raw = server_state.tool_calling_processor.decode(out[0][input_len:], skip_special_tokens=False)
+            response_clean = server_state.tool_calling_processor.decode(out[0][input_len:], skip_special_tokens=True).strip()
             token_count = out[0].shape[-1] - input_len
             if _DEBUG_TWO_STAGE:
                 print(f"[DEBUG two_stage] step {step}: {token_count} tokens", flush=True)
@@ -1799,22 +1756,22 @@ def _nemotron_synthesize_answer(original_query, qwen_answer, tool_results, send_
         print("[two_stage] Stage 2: Nemotron synthesis (no tools — with full system prompt)", flush=True)
         _mnt = max_new_tokens or 2048
         try:
-            if _is_nemotron:
+            if server_state.is_nemotron:
                 result = _nemotron_infer(chat, max_new_tokens=_mnt)
             elif _vllm.is_enabled():
                 p = _build_chat_prompt(chat, enable_thinking=False)
                 result = _vllm.infer(p, max_new_tokens=_mnt)
             else:
                 import torch
-                inputs = _processor.apply_chat_template(
+                inputs = server_state.processor.apply_chat_template(
                     chat, tokenize=True, return_dict=True,
                     return_tensors="pt", add_generation_prompt=True,
                     enable_thinking=False,
                 ).to(_target_device())
                 input_len = inputs["input_ids"].shape[-1]
                 with torch.no_grad():
-                    out = _model.generate(**inputs, max_new_tokens=_mnt, do_sample=True, temperature=0.7)
-                result = _processor.decode(out[0][input_len:], skip_special_tokens=True).strip()
+                    out = server_state.model.generate(**inputs, max_new_tokens=_mnt, do_sample=True, temperature=0.7)
+                result = server_state.processor.decode(out[0][input_len:], skip_special_tokens=True).strip()
             return {"type": "result", "result": result}
         except Exception as e:
             print(f"[two_stage] Nemotron no-tools synthesis error: {e}", flush=True)
@@ -1842,22 +1799,22 @@ def _nemotron_synthesize_answer(original_query, qwen_answer, tool_results, send_
             print(f"[two_stage] Stage 2 (tooled): {min(len(history_context), _MAX_SYNTHESIS_HISTORY)} history turns injected (cap={_MAX_SYNTHESIS_HISTORY})", flush=True)
         chat.append({"role": "user", "content": prompt})
         _mnt = max_new_tokens or 4096
-        if _is_nemotron:
+        if server_state.is_nemotron:
             result = _nemotron_infer(chat, max_new_tokens=_mnt)
         elif _vllm.is_enabled():
             p = _build_chat_prompt(chat, enable_thinking=False)
             result = _vllm.infer(p, max_new_tokens=_mnt)
         else:
             import torch
-            inputs = _processor.apply_chat_template(
+            inputs = server_state.processor.apply_chat_template(
                 chat, tokenize=True, return_dict=True,
                 return_tensors="pt", add_generation_prompt=True,
                 enable_thinking=False,
             ).to(_target_device())
             input_len = inputs["input_ids"].shape[-1]
             with torch.no_grad():
-                out = _model.generate(**inputs, max_new_tokens=_mnt, do_sample=True, temperature=0.7)
-            result = _processor.decode(out[0][input_len:], skip_special_tokens=True).strip()
+                out = server_state.model.generate(**inputs, max_new_tokens=_mnt, do_sample=True, temperature=0.7)
+            result = server_state.processor.decode(out[0][input_len:], skip_special_tokens=True).strip()
 
         return {"type": "result", "result": result}
     except Exception as e:
@@ -1891,7 +1848,7 @@ def _handle_infer_with_tools(params: dict, send_line) -> dict:
     # Native-agentic models (any-to-any like Qwen2.5-Omni, or Gemma 4 with
     # parse_response — and Nemotron with native_agentic=true) handle the ENTIRE
     # flow on their own and skip the two-stage pipeline.
-    if not _native_agentic:
+    if not server_state.native_agentic:
         _two_stage_result = _run_two_stage_if_available(params, send_line)
         if _two_stage_result is not None:
             return _two_stage_result
@@ -1901,7 +1858,7 @@ def _handle_infer_with_tools(params: dict, send_line) -> dict:
     # models with no tool support go straight to plain inference. Janus is a
     # VLM without a standard tool loop, so it also goes to plain inference
     # (which routes to _janus_infer_text).
-    if not _model_supports_tools and (not _native_agentic or _is_janus):
+    if not server_state.model_supports_tools and (not server_state.native_agentic or server_state.is_janus):
         return _handle_infer_plain(params)
 
     messages = params["messages"]
@@ -2034,7 +1991,7 @@ def _handle_infer_with_tools(params: dict, send_line) -> dict:
                     # HF transformers path
                     import torch
                     try:
-                        inputs = _processor.apply_chat_template(
+                        inputs = server_state.processor.apply_chat_template(
                             current_messages,
                             tools=tools_openai,
                             tokenize=True,
@@ -2045,11 +2002,11 @@ def _handle_infer_with_tools(params: dict, send_line) -> dict:
                         ).to(_target_device())
                     except Exception as e:
                         print(f"[tool_loop/hf] template error: {e}", flush=True)
-                        text = _processor.apply_chat_template(
+                        text = server_state.processor.apply_chat_template(
                             current_messages, tools=tools_openai, tokenize=False,
                             add_generation_prompt=True, enable_thinking=False,
                         )
-                        inputs = _processor(text=text, return_tensors="pt").to(_target_device())
+                        inputs = server_state.processor(text=text, return_tensors="pt").to(_target_device())
 
                     input_len = inputs["input_ids"].shape[-1]
                     _mark_activity_start()
@@ -2058,16 +2015,16 @@ def _handle_infer_with_tools(params: dict, send_line) -> dict:
                             _gen_kwargs = dict(
                                 max_new_tokens=max_new_tokens, do_sample=True, temperature=1.0, top_p=0.95, top_k=64,
                             )
-                            if _drafter is not None:
-                                _gen_kwargs["assistant_model"] = _drafter
+                            if server_state.drafter is not None:
+                                _gen_kwargs["assistant_model"] = server_state.drafter
                             try:
-                                if _is_nemotron:
+                                if server_state.is_nemotron:
                                     # Nemotron returns (out_ids, nfe); use AR for tool loops
-                                    out_ids, _nfe = _model.ar_generate(inputs["input_ids"], max_new_tokens=max_new_tokens)
+                                    out_ids, _nfe = server_state.model.ar_generate(inputs["input_ids"], max_new_tokens=max_new_tokens)
                                     out = out_ids
                                     print(f"[tool_loop/nemotron] AR NFE={_nfe}", flush=True)
                                 else:
-                                    out = _model.generate(**inputs, **_gen_kwargs)
+                                    out = server_state.model.generate(**inputs, **_gen_kwargs)
                             except Exception as e:
                                 import logging
                                 logging.getLogger(__name__).error(f"[tool_loop/hf] generate error at step {step}: {e}")
@@ -2075,11 +2032,11 @@ def _handle_infer_with_tools(params: dict, send_line) -> dict:
                                 return {"type": "result", "result": f"(HF generate error: {e})"}
                     finally:
                         _mark_activity_end()
-                    response_raw = _processor.decode(out[0][input_len:], skip_special_tokens=False)
+                    response_raw = server_state.processor.decode(out[0][input_len:], skip_special_tokens=False)
                     try:
-                        parsed = _processor.parse_response(response_raw)
+                        parsed = server_state.processor.parse_response(response_raw)
                     except (AttributeError, NotImplementedError):
-                        plain = _processor.decode(out[0][input_len:], skip_special_tokens=True).strip()
+                        plain = server_state.processor.decode(out[0][input_len:], skip_special_tokens=True).strip()
                         parsed = {"content": plain}
         except Exception as e:
             return {"type": "result", "result": f"(adapter error: {e})"}
@@ -2101,7 +2058,7 @@ def _handle_infer_with_tools(params: dict, send_line) -> dict:
             import re as _re
 
             # Nemotron XML: <function_calls><invoke>...</invoke></function_calls>
-            if _is_nemotron and "<function_calls>" in raw_content:
+            if server_state.is_nemotron and "<function_calls>" in raw_content:
                 invokes = _re.findall(r'<invoke>(.*?)</invoke>', raw_content, _re.DOTALL)
                 if invokes:
                     _nemo_calls = []
@@ -2418,7 +2375,7 @@ def _handle_infer_with_tools(params: dict, send_line) -> dict:
         # The custom `tool_responses` dict format renders as empty in Nemotron's Jinja template.
         # We store the assistant turn as raw text (preserving <tool_call> blocks) and inject
         # each tool result as a separate role=tool message with plain content.
-        if _is_nemotron:
+        if server_state.is_nemotron:
             # Nemotron: assistant message = raw decoded text (preserves <tool_call> XML).
             # Note: raw_content was set from parsed["content"] earlier in this step;
             # use it directly instead of re-decoding out[0] which is only defined in the HF branch.
@@ -2454,7 +2411,7 @@ def _handle_infer_with_image(params: dict) -> dict:
     force_local = bool(params.get("force_local", False))
 
     # ── Janus path (custom MultiModalityCausalLM — not standard generate) ───
-    if _is_janus:
+    if server_state.is_janus:
         try:
             result = _janus_infer_image(image_path, prompt, max_new_tokens=max_new_tokens)
             return {"result": result}
@@ -2464,9 +2421,9 @@ def _handle_infer_with_image(params: dict) -> dict:
 
     # ── Cloud vision routing (only when NOT forced local) ─────────────────────
     if not force_local:
-        if _config is None:
-            _load_config(_lazy_config_path)
-        provider_cfg = (_config or {}).get("providers", {})
+        if server_state.config is None:
+            _load_config(server_state.lazy_config_path)
+        provider_cfg = (server_state.config or {}).get("providers", {})
         vision_provider = provider_cfg.get("vision", "local")
         if vision_provider != "local":
             vision_model = provider_cfg.get("model_overrides", {}).get("vision",
@@ -2494,21 +2451,21 @@ def _handle_infer_with_image(params: dict) -> dict:
     active_processor = None
     use_hf_path = False
 
-    if not _audio_capable:
+    if not server_state.audio_capable:
         # Main model is text-only — ensure Gemma 4 vision slot is loaded
         try:
             _ensure_multimodal_slot()
         except Exception as e:
             print(f"[model_server] infer_with_image: multimodal slot load failed ({e}) — falling back to main model", flush=True)
-        if _mm_model is not None and _mm_processor is not None:
+        if server_state.mm_model is not None and server_state.mm_processor is not None:
             print("[model_server] infer_with_image: routing to audio/vision slot (Gemma 4)", flush=True)
-            active_model = _mm_model
-            active_processor = _mm_processor
+            active_model = server_state.mm_model
+            active_processor = server_state.mm_processor
             use_hf_path = True
-    elif _mm_model is not None and _mm_processor is not None:
+    elif server_state.mm_model is not None and server_state.mm_processor is not None:
         # Main model IS audio-capable but we still have a warm slot — prefer it
-        active_model = _mm_model
-        active_processor = _mm_processor
+        active_model = server_state.mm_model
+        active_processor = server_state.mm_processor
         use_hf_path = True
 
     if active_model is None:
@@ -2516,9 +2473,9 @@ def _handle_infer_with_image(params: dict) -> dict:
         _ensure_model()
         # If the main model is loaded, use it as the processor fallback (it may
         # have a processor even when the dedicated multimodal slot is absent).
-        if active_processor is None and _model is not None and _processor is not None:
-            active_model = _model
-            active_processor = _processor
+        if active_processor is None and server_state.model is not None and server_state.processor is not None:
+            active_model = server_state.model
+            active_processor = server_state.processor
             use_hf_path = False
 
     # Guard: if the multimodal slot load left partial state behind, degrade
@@ -2583,7 +2540,7 @@ def _handle_infer_with_image(params: dict) -> dict:
             return {"result": result.strip()}
         except Exception as e:
             print(f"[model_server] vLLM image inference failed ({e}) — falling back to HF", flush=True)
-            if _model is None:
+            if server_state.model is None:
                 return {"error": f"vLLM failed and HF model not loaded: {e}"}
 
     # HF path
@@ -2594,22 +2551,22 @@ def _handle_infer_with_image(params: dict) -> dict:
             {"type": "text", "text": prompt},
         ]}
     ]
-    text = _processor.apply_chat_template(
+    text = server_state.processor.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
     )
-    inputs = _processor(text=text, images=[img], return_tensors="pt").to(_target_device())
+    inputs = server_state.processor(text=text, images=[img], return_tensors="pt").to(_target_device())
     input_len = inputs["input_ids"].shape[-1]
-    if _is_omni:
+    if server_state.is_omni:
         # Omni's generate() is non-standard — use generation_mode="text" so it
         # returns text tokens fast instead of doing slow audio synthesis.
         out = _omni_generate_text(inputs, max_new_tokens=max_new_tokens)
     else:
         with torch.no_grad():
             _gen_kwargs = dict(max_new_tokens=max_new_tokens, do_sample=False)
-            if _drafter is not None:
-                _gen_kwargs["assistant_model"] = _drafter
-            out = _model.generate(**inputs, **_gen_kwargs)
-    result = _processor.decode(out[0][input_len:], skip_special_tokens=True).strip()
+            if server_state.drafter is not None:
+                _gen_kwargs["assistant_model"] = server_state.drafter
+            out = server_state.model.generate(**inputs, **_gen_kwargs)
+    result = server_state.processor.decode(out[0][input_len:], skip_special_tokens=True).strip()
     return {"result": result}
 
 
@@ -2627,9 +2584,9 @@ def _handle_infer_with_audio(params: dict) -> dict:
     audio-capable model.
     """
     # ── Cloud audio routing ──────────────────────────────────────────────────
-    if _config is None:
-        _load_config(_lazy_config_path)
-    provider_cfg = (_config or {}).get("providers", {})
+    if server_state.config is None:
+        _load_config(server_state.lazy_config_path)
+    provider_cfg = (server_state.config or {}).get("providers", {})
     audio_provider = provider_cfg.get("stt", "local")
     if audio_provider != "local":
         audio_model = provider_cfg.get("model_overrides", {}).get("stt",
@@ -2664,27 +2621,27 @@ def _handle_infer_with_audio(params: dict) -> dict:
     # Pick which model/processor to use
     # Priority: named slot (if registry present and slot specified/loaded) → legacy path
     _requested_slot = params.get("slot")
-    _use_slot_name = _requested_slot or ("audio" if _slot_registry is not None else None)
-    _slot_state = _slot_registry.get(_use_slot_name) if (_slot_registry is not None and _use_slot_name) else None
+    _use_slot_name = _requested_slot or ("audio" if server_state.slot_registry is not None else None)
+    _slot_state = server_state.slot_registry.get(_use_slot_name) if (server_state.slot_registry is not None and _use_slot_name) else None
 
     if _slot_state is not None:
         active_model = _slot_state.model
         active_processor = _slot_state.processor
         print(f"[model_server] infer_with_audio: using named slot {_use_slot_name!r}", flush=True)
-    elif _audio_capable and not _vllm.is_enabled():
+    elif server_state.audio_capable and not _vllm.is_enabled():
         # Legacy: main model is audio-capable on HF path. Only now do we load
         # the main model — it is the audio-capable model in this config.
         _ensure_model()
-        active_model = _model
-        active_processor = _processor
+        active_model = server_state.model
+        active_processor = server_state.processor
         print(f"[model_server] infer_with_audio: using main model (HF, audio_capable)", flush=True)
     else:
         try:
             _ensure_multimodal_slot()
         except Exception as e:
             print(f"[model_server] infer_with_audio: multimodal slot load failed ({e}) — falling back to main model", flush=True)
-        active_model = _mm_model
-        active_processor = _mm_processor
+        active_model = server_state.mm_model
+        active_processor = server_state.mm_processor
         print(f"[model_server] infer_with_audio: using multimodal slot (HF)", flush=True)
 
     # Guard: if the multimodal slot load left partial state behind, degrade
@@ -2761,7 +2718,7 @@ def _handle_infer_with_audio(params: dict) -> dict:
     text = active_processor.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
     )
-    target_device = _target_device() if active_model is _model else next(active_model.parameters()).device
+    target_device = _target_device() if active_model is server_state.model else next(active_model.parameters()).device
     target_dtype = next(active_model.parameters()).dtype
     print(f"[infer_with_audio] Target: device={target_device}, dtype={target_dtype}", flush=True)
 
@@ -2786,15 +2743,15 @@ def _handle_infer_with_audio(params: dict) -> dict:
     print(f"[infer_with_audio] Input IDs length: {input_len}", flush=True)
     _mark_activity_start()
     try:
-        if active_model is _model and _is_omni:
+        if active_model is server_state.model and server_state.is_omni:
             # Omni any-to-any: text-only STT via generation_mode="text"
             print(f"[infer_with_audio] Omni STT generating (text mode)...", flush=True)
             out = _omni_generate_text(inputs, max_new_tokens=max_new_tokens)
         else:
             with torch.no_grad():
                 _gen_kwargs = dict(max_new_tokens=max_new_tokens, do_sample=False)
-                if active_model is _model and _drafter is not None:
-                    _gen_kwargs["assistant_model"] = _drafter
+                if active_model is server_state.model and server_state.drafter is not None:
+                    _gen_kwargs["assistant_model"] = server_state.drafter
                 print(f"[infer_with_audio] Generating...", flush=True)
                 out = active_model.generate(**inputs, **_gen_kwargs)
             print(f"[infer_with_audio] Generation complete, output shape: {out.shape}", flush=True)
@@ -2832,9 +2789,9 @@ def _handle_infer_local(params: dict) -> dict:
     active_processor = None
 
     # Prefer a registered named slot (e.g. "audio" wired into the SlotRegistry).
-    if _slot_registry is not None:
+    if server_state.slot_registry is not None:
         try:
-            _state = _slot_registry.get(slot)
+            _state = server_state.slot_registry.get(slot)
             if _state is not None:
                 active_model = _state.model
                 active_processor = _state.processor
@@ -2848,9 +2805,9 @@ def _handle_infer_local(params: dict) -> dict:
             _ensure_multimodal_slot()
         except Exception as e:
             print(f"[model_server] infer_local: multimodal slot load failed ({e})", flush=True)
-        if _mm_model is not None and _mm_processor is not None:
-            active_model = active_model or _mm_model
-            active_processor = active_processor or _mm_processor
+        if server_state.mm_model is not None and server_state.mm_processor is not None:
+            active_model = active_model or server_state.mm_model
+            active_processor = active_processor or server_state.mm_processor
             print("[model_server] infer_local: using multimodal slot (Gemma 4)", flush=True)
 
     if active_model is None or active_processor is None:
@@ -3007,21 +2964,21 @@ def _resolve_loaded_model_name() -> str:
     """
     if _vllm.is_enabled() and _vllm.model_path():
         return _friendly_model_name(_vllm.model_path())
-    if _model is not None:
-        name_or_path = getattr(_model, "name_or_path", None) \
-            or getattr(getattr(_model, "config", None), "_name_or_path", None)
+    if server_state.model is not None:
+        name_or_path = getattr(server_state.model, "name_or_path", None) \
+            or getattr(getattr(server_state.model, "config", None), "_name_or_path", None)
         if name_or_path:
             return _friendly_model_name(str(name_or_path))
-        return _model.__class__.__name__
-    if _slot_registry is not None:
+        return server_state.model.__class__.__name__
+    if server_state.slot_registry is not None:
         try:
-            primary = _slot_registry._loaded.get("primary")
+            primary = server_state.slot_registry._loaded.get("primary")
             model_path = getattr(getattr(primary, "spec", None), "model_path", None)
             if model_path:
                 return _friendly_model_name(str(model_path))
         except Exception:
             pass
-    return (_config or {}).get("model", {}).get("name", "unknown") if _config else "unknown"
+    return (server_state.config or {}).get("model", {}).get("name", "unknown") if server_state.config else "unknown"
 
 
 def _handle_health(params: dict) -> dict:
@@ -3031,20 +2988,20 @@ def _handle_health(params: dict) -> dict:
     h = {
         "status": "ready",
         "model": model_name,
-        "adapter": _current_adapter_name,
+        "adapter": server_state.current_adapter_name,
         "vram_free_mb": vram_free,
         "vram_warning": vram_warning,
-        "main_model_loaded": _vllm.is_enabled() or _model is not None,
+        "main_model_loaded": _vllm.is_enabled() or server_state.model is not None,
         "vllm_engine": _vllm.is_enabled(),
-        "drafter_loaded": _drafter is not None,
-        "audio_capable": _audio_capable,
-        "multimodal_slot_loaded": _mm_model is not None,
+        "drafter_loaded": server_state.drafter is not None,
+        "audio_capable": server_state.audio_capable,
+        "multimodal_slot_loaded": server_state.mm_model is not None,
     }
-    if _is_nemotron:
+    if server_state.is_nemotron:
         h["nemotron"] = True
-        h["nemotron_mode"] = _nemotron_mode
-        h["nemotron_block_length"] = _nemotron_block_length
-    h["slots"] = _slot_registry.status() if _slot_registry is not None else []
+        h["nemotron_mode"] = server_state.nemotron_mode
+        h["nemotron_block_length"] = server_state.nemotron_block_length
+    h["slots"] = server_state.slot_registry.status() if server_state.slot_registry is not None else []
     return h
 
 
@@ -3057,10 +3014,10 @@ def _handle_load_slot(params: dict) -> dict:
     slot_name = params.get("slot")
     if not slot_name:
         return {"error": "missing required param: slot"}
-    if _slot_registry is None:
+    if server_state.slot_registry is None:
         return {"error": "SlotRegistry not initialised (no model_slots in config)"}
     try:
-        state = _slot_registry.load(slot_name)
+        state = server_state.slot_registry.load(slot_name)
         return {"ok": True, "slot": slot_name, "loaded_at": state.loaded_at}
     except Exception as exc:
         return {"error": str(exc)}
@@ -3071,10 +3028,10 @@ def _handle_unload_slot(params: dict) -> dict:
     slot_name = params.get("slot")
     if not slot_name:
         return {"error": "missing required param: slot"}
-    if _slot_registry is None:
+    if server_state.slot_registry is None:
         return {"error": "SlotRegistry not initialised"}
     try:
-        _slot_registry.unload(slot_name)
+        server_state.slot_registry.unload(slot_name)
         return {"ok": True, "slot": slot_name}
     except Exception as exc:
         return {"error": str(exc)}
@@ -3082,15 +3039,13 @@ def _handle_unload_slot(params: dict) -> dict:
 
 def _handle_slot_status(params: dict) -> dict:
     """Return JSON-serialisable status of all registered slots."""
-    return {"slots": _slot_registry.status() if _slot_registry is not None else []}
+    return {"slots": server_state.slot_registry.status() if server_state.slot_registry is not None else []}
 
 
 def _handle_unload(params: dict) -> dict:
     """Unload the current model from GPU memory without reloading.
     Called before switching task_inference to a cloud provider, freeing VRAM.
     """
-    global _model, _processor, _drafter, _drafter_tokenizer
-    global _is_nemotron, _mm_model, _mm_processor, _slot_registry
     import gc
     import torch
 
@@ -3114,15 +3069,15 @@ def _handle_unload(params: dict) -> dict:
             globals()[attr] = None
 
     # Free all named slots in the SlotRegistry (e.g. tool_calling/Qwen).
-    if _slot_registry is not None:
+    if server_state.slot_registry is not None:
         try:
-            for _sname in list((_slot_registry.loaded_slots() or {}).keys()):
-                _slot_registry.unload(_sname)
+            for _sname in list((server_state.slot_registry.loaded_slots() or {}).keys()):
+                server_state.slot_registry.unload(_sname)
         except Exception as _sl_err:
             print(f"[model_server] unload: slot cleanup error ({_sl_err})", flush=True)
 
-    _is_nemotron = False
-    _native_agentic = False
+    server_state.is_nemotron = False
+    server_state.native_agentic = False
 
     gc.collect()
     freed_mb = 0
@@ -3142,8 +3097,6 @@ def _handle_swap_model(params: dict) -> dict:
     For HF backend: unloads and reloads as before.
     Routes Nemotron-Labs-Diffusion models to the dedicated loader.
     """
-    global _model, _processor, _drafter, _drafter_tokenizer, _config
-    global _is_nemotron
 
     import gc
     import torch
@@ -3167,7 +3120,7 @@ def _handle_swap_model(params: dict) -> dict:
             del obj
             globals()[attr] = None
 
-    _is_nemotron = False
+    server_state.is_nemotron = False
 
     gc.collect()
     free_before = 0
@@ -3177,63 +3130,63 @@ def _handle_swap_model(params: dict) -> dict:
         print(f"[model_server] swap_model: {free_before}MB VRAM free after unload", flush=True)
 
     # Update config for new path
-    if _config:
-        _config["model"]["path"] = new_path
-        _config["model"]["name"] = new_path
-        _config["model"]["dtype"] = dtype_str
+    if server_state.config:
+        server_state.config["model"]["path"] = new_path
+        server_state.config["model"]["name"] = new_path
+        server_state.config["model"]["dtype"] = dtype_str
         # MS3: wire drafter_path through so speculative decoding survives a swap.
         # HF backend reads model.drafter_path/model.speculative_decoding; vLLM
         # backend reads inference.speculative_drafter/inference.speculative_decoding.
         # drafter_path=None (param omitted) means "keep current" — leave both untouched.
         if drafter_path is not None:
-            _config["model"]["drafter_path"] = drafter_path
-            _config["model"]["speculative_decoding"] = bool(drafter_path)
-            _config.setdefault("inference", {})
-            _config["inference"]["speculative_drafter"] = drafter_path
-            _config["inference"]["speculative_decoding"] = bool(drafter_path)
+            server_state.config["model"]["drafter_path"] = drafter_path
+            server_state.config["model"]["speculative_decoding"] = bool(drafter_path)
+            server_state.config.setdefault("inference", {})
+            server_state.config["inference"]["speculative_drafter"] = drafter_path
+            server_state.config["inference"]["speculative_decoding"] = bool(drafter_path)
 
     # Reload via unified path
     print(f"[model_server] swap_model: loading {new_path}...", flush=True)
     try:
         if _is_nemotron_model(new_path):
             print("[model_server] swap_model: Nemotron-Labs-Diffusion detected", flush=True)
-            _load_nemotron(_lazy_config_path, model_path_override=new_path)
+            _load_nemotron(server_state.lazy_config_path, model_path_override=new_path)
         else:
-            backend = (_config or {}).get("inference", {}).get("backend", "vllm")
+            backend = (server_state.config or {}).get("inference", {}).get("backend", "vllm")
             if backend == "vllm":
-                success = _vllm.load_engine(_config, _detect_capabilities, model_path_override=new_path)
+                success = _vllm.load_engine(server_state.config, _detect_capabilities, model_path_override=new_path)
                 if not success:
-                    _load_hf_model(_lazy_config_path, model_path_override=new_path)
+                    _load_hf_model(server_state.lazy_config_path, model_path_override=new_path)
             else:
-                _load_hf_model(_lazy_config_path, model_path_override=new_path)
+                _load_hf_model(server_state.lazy_config_path, model_path_override=new_path)
     except Exception as e:
         return {"error": f"model load failed: {e}"}
 
     model_name = _resolve_loaded_model_name()
-    backend_tag = "nemotron" if _is_nemotron else ("vllm" if _vllm.is_enabled() else "transformers")
+    backend_tag = "nemotron" if server_state.is_nemotron else ("vllm" if _vllm.is_enabled() else "transformers")
     print(f"[model_server] swap_model: ready — {model_name} ({backend_tag})", flush=True)
 
     # Re-sync primary slot in registry so slot_status() reflects the new model
-    if _slot_registry is not None and _SLOTS_AVAILABLE:
+    if server_state.slot_registry is not None and _SLOTS_AVAILABLE:
         try:
             from model_slots import SlotState, SlotSpec  # type: ignore
-            _spec = _slot_registry._specs.get("primary") or SlotSpec(
+            _spec = server_state.slot_registry._specs.get("primary") or SlotSpec(
                 name="primary", model_path=new_path, role="primary"
             )
             _spec.model_path = new_path
             _state = SlotState(
                 spec=_spec,
-                model=_model,
-                processor=_processor,
-                is_nemotron=_is_nemotron,
-                audio_capable=_audio_capable,
-                supports_tools=_model_supports_tools,
-                native_agentic=_native_agentic,
-                is_omni=_is_omni,
-                is_janus=_is_janus,
+                model=server_state.model,
+                processor=server_state.processor,
+                is_nemotron=server_state.is_nemotron,
+                audio_capable=server_state.audio_capable,
+                supports_tools=server_state.model_supports_tools,
+                native_agentic=server_state.native_agentic,
+                is_omni=server_state.is_omni,
+                is_janus=server_state.is_janus,
             )
-            _slot_registry._loaded["primary"] = _state
-            _slot_registry._specs["primary"] = _spec
+            server_state.slot_registry._loaded["primary"] = _state
+            server_state.slot_registry._specs["primary"] = _spec
             print("[model_server] swap_model: primary slot synced in registry", flush=True)
         except Exception as _se:
             print(f"[model_server] WARNING: could not sync primary slot after swap: {_se}", flush=True)
@@ -3243,22 +3196,21 @@ def _handle_swap_model(params: dict) -> dict:
 
 def _ensure_drafter_only():
     """Load just the drafter + tokenizer without pulling in the full main model."""
-    global _drafter, _drafter_tokenizer, _config
-    if _drafter is not None and _drafter_tokenizer is not None:
+    if server_state.drafter is not None and server_state.drafter_tokenizer is not None:
         return
 
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    cfg = _load_config(_lazy_config_path)
+    cfg = _load_config(server_state.lazy_config_path)
     drafter_path = cfg.get("model", {}).get("drafter_path", "")
     if not drafter_path:
         return
 
     dtype = getattr(torch, cfg["model"].get("dtype", "bfloat16"))
     print(f"[model_server] Loading standalone drafter: {drafter_path}", flush=True)
-    _drafter = AutoModelForCausalLM.from_pretrained(drafter_path, dtype=dtype, device_map="cuda:0")
-    _drafter_tokenizer = AutoTokenizer.from_pretrained(drafter_path)
+    server_state.drafter = AutoModelForCausalLM.from_pretrained(drafter_path, dtype=dtype, device_map="cuda:0")
+    server_state.drafter_tokenizer = AutoTokenizer.from_pretrained(drafter_path)
     print("[model_server] Standalone drafter ready", flush=True)
 
 
@@ -3271,7 +3223,7 @@ def _handle_infer_draft(params: dict) -> dict:
     - Otherwise: return error so model_client falls back to full infer().
     """
     # ── Nemotron path: self-draft via NFE=3 linear_spec ───────────────────────
-    if _is_nemotron and _model is not None:
+    if server_state.is_nemotron and server_state.model is not None:
         import torch
         messages = params.get("messages", [])
         prompt   = params.get("prompt", "")
@@ -3283,24 +3235,24 @@ def _handle_infer_draft(params: dict) -> dict:
             messages = [{"role": "user", "content": messages}]
 
         try:
-            prompt_text = _processor.apply_chat_template(
+            prompt_text = server_state.processor.apply_chat_template(
                 messages, tokenize=False, add_generation_prompt=True
             )
-            prompt_ids = _processor(prompt_text, return_tensors="pt").input_ids
+            prompt_ids = server_state.processor(prompt_text, return_tensors="pt").input_ids
             if torch.cuda.is_available():
                 prompt_ids = prompt_ids.cuda()
-            eos_id = _processor.eos_token_id
-            with _infer_lock:
+            eos_id = server_state.processor.eos_token_id
+            with server_state.infer_lock:
                 with torch.no_grad():
                     # NFE=3: one speculative draft pass — fast, low-cost
-                    out_ids, nfe = _model.linear_spec_generate(
+                    out_ids, nfe = server_state.model.linear_spec_generate(
                         prompt_ids,
                         max_new_tokens=max_new_tokens,
                         block_length=3,   # NFE=3 — drafter mode
                         eos_token_id=eos_id,
                     )
             new_ids = out_ids[:, prompt_ids.shape[1]:]
-            text = _processor.batch_decode(new_ids, skip_special_tokens=True)[0]
+            text = server_state.processor.batch_decode(new_ids, skip_special_tokens=True)[0]
             print(f"[model_server] infer_draft (Nemotron NFE={nfe} block=3)", flush=True)
             return {"result": text.strip()}
         except Exception as e:
@@ -3310,7 +3262,7 @@ def _handle_infer_draft(params: dict) -> dict:
 
     # ── Legacy AR drafter path ─────────────────────────────────────────────────
     _ensure_drafter_only()
-    if _drafter is None or _drafter_tokenizer is None:
+    if server_state.drafter is None or server_state.drafter_tokenizer is None:
         return {"error": "drafter not available"}
 
     import torch
@@ -3334,11 +3286,11 @@ def _handle_infer_draft(params: dict) -> dict:
     prompt_text = "\n".join(text_parts)
 
     try:
-        tokenizer = _drafter_tokenizer
-        inputs = tokenizer(prompt_text, return_tensors="pt").to(_drafter.device)
+        tokenizer = server_state.drafter_tokenizer
+        inputs = tokenizer(prompt_text, return_tensors="pt").to(server_state.drafter.device)
         input_len = inputs["input_ids"].shape[-1]
         with torch.no_grad():
-            out = _drafter.generate(
+            out = server_state.drafter.generate(
                 inputs["input_ids"],
                 max_new_tokens=max_new_tokens,
                 do_sample=False,
@@ -3509,11 +3461,9 @@ def main():
             print(f"[model_server] Removing stale socket {socket_path}", flush=True)
             os.unlink(socket_path)
 
-    global _lazy_config_path
-    _lazy_config_path = os.path.abspath(args.config)
+    server_state.lazy_config_path = os.path.abspath(args.config)
 
-    global _lazy_model_override
-    _lazy_model_override = args.model
+    server_state.lazy_model_override = args.model
 
     if args.adapter:
         import os as _os

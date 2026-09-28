@@ -84,13 +84,13 @@ class TestVisionCloudFallback:
         tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
         tmp.close()
 
-        with patch.object(ms, "_config", cfg), \
+        with patch.object(ms.server_state, "config", cfg), \
              patch.object(ms, "_cloud_multimodal_infer",
                           return_value={"error": "Cloud vision failed: HTTP 402"}) as m_cloud, \
              patch("PIL.Image.open", return_value=img), \
-             patch.object(ms, "_audio_capable", False), \
-             patch.object(ms, "_mm_model", model), \
-             patch.object(ms, "_mm_processor", proc), \
+             patch.object(ms.server_state, "audio_capable", False), \
+             patch.object(ms.server_state, "mm_model", model), \
+             patch.object(ms.server_state, "mm_processor", proc), \
              patch.object(ms, "_ensure_multimodal_slot", lambda: None):
             result = ms._handle_infer_with_image(
                 {"image_path": tmp.name, "prompt": "Describe this"})
@@ -111,13 +111,13 @@ class TestVisionCloudFallback:
         tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
         tmp.close()
 
-        with patch.object(ms, "_config", cfg), \
+        with patch.object(ms.server_state, "config", cfg), \
              patch.object(ms, "_cloud_multimodal_infer",
                           return_value={"result": "cloud description"}) as m_cloud, \
              patch("PIL.Image.open", return_value=img), \
-             patch.object(ms, "_audio_capable", False), \
-             patch.object(ms, "_mm_model", model), \
-             patch.object(ms, "_mm_processor", proc):
+             patch.object(ms.server_state, "audio_capable", False), \
+             patch.object(ms.server_state, "mm_model", model), \
+             patch.object(ms.server_state, "mm_processor", proc):
             result = ms._handle_infer_with_image(
                 {"image_path": tmp.name, "prompt": "Describe this"})
 
@@ -149,14 +149,14 @@ class TestAudioCloudFallback:
         import numpy as np
         audio_array = np.zeros(16000, dtype=np.float32)  # 1-D array (ndim==1)
 
-        with patch.object(ms, "_config", cfg), \
+        with patch.object(ms.server_state, "config", cfg), \
              patch.object(ms, "_cloud_multimodal_infer",
                           return_value={"error": "Cloud audio failed: HTTP 402"}) as m_cloud, \
              patch.object(ms, "_ensure_model", lambda: None), \
-             patch.object(ms, "_slot_registry", None), \
-             patch.object(ms, "_audio_capable", False), \
-             patch.object(ms, "_mm_model", model), \
-             patch.object(ms, "_mm_processor", proc), \
+             patch.object(ms.server_state, "slot_registry", None), \
+             patch.object(ms.server_state, "audio_capable", False), \
+             patch.object(ms.server_state, "mm_model", model), \
+             patch.object(ms.server_state, "mm_processor", proc), \
              patch("subprocess.run", return_value=MagicMock(returncode=0)), \
              patch("soundfile.read", return_value=(audio_array, 16000)), \
              patch("os.path.exists", return_value=True), \
@@ -177,7 +177,7 @@ class TestAudioCloudFallback:
         """When cloud STT succeeds, its result is returned (no native fallback)."""
         cfg, model, proc = self._setup()
 
-        with patch.object(ms, "_config", cfg), \
+        with patch.object(ms.server_state, "config", cfg), \
              patch.object(ms, "_cloud_multimodal_infer",
                           return_value={"result": "transcribed text"}) as m_cloud, \
              patch.object(ms, "_ensure_model", lambda: None):
@@ -261,13 +261,13 @@ class TestAudioSttSkipsMainModelLoad:
         import numpy as np
         audio_array = np.zeros(16000, dtype=np.float32)
 
-        with patch.object(ms, "_config", cfg), \
+        with patch.object(ms.server_state, "config", cfg), \
              patch.object(ms, "_ensure_model", MagicMock()) as m_ensure, \
-             patch.object(ms, "_slot_registry", None), \
-             patch.object(ms, "_audio_capable", False), \
+             patch.object(ms.server_state, "slot_registry", None), \
+             patch.object(ms.server_state, "audio_capable", False), \
              patch.object(ms._vllm, "_vllm_enabled", False), \
-             patch.object(ms, "_mm_model", model), \
-             patch.object(ms, "_mm_processor", proc), \
+             patch.object(ms.server_state, "mm_model", model), \
+             patch.object(ms.server_state, "mm_processor", proc), \
              patch.object(ms, "_ensure_multimodal_slot", lambda: None), \
              patch("subprocess.run", return_value=MagicMock(returncode=0)), \
              patch("soundfile.read", return_value=(audio_array, 16000)), \
@@ -295,13 +295,13 @@ class TestAudioSttSkipsMainModelLoad:
         import numpy as np
         audio_array = np.zeros(16000, dtype=np.float32)
 
-        with patch.object(ms, "_config", cfg), \
+        with patch.object(ms.server_state, "config", cfg), \
              patch.object(ms, "_ensure_model", MagicMock()) as m_ensure, \
-             patch.object(ms, "_slot_registry", None), \
-             patch.object(ms, "_audio_capable", True), \
+             patch.object(ms.server_state, "slot_registry", None), \
+             patch.object(ms.server_state, "audio_capable", True), \
              patch.object(ms._vllm, "_vllm_enabled", False), \
-             patch.object(ms, "_model", model), \
-             patch.object(ms, "_processor", proc), \
+             patch.object(ms.server_state, "model", model), \
+             patch.object(ms.server_state, "processor", proc), \
              patch("subprocess.run", return_value=MagicMock(returncode=0)), \
              patch("soundfile.read", return_value=(audio_array, 16000)), \
              patch("os.path.exists", return_value=True), \
@@ -324,13 +324,13 @@ class TestAudioSttSkipsMainModelLoad:
                "model_overrides": {}, "models": {}}
         proc = MagicMock()
 
-        with patch.object(ms, "_config", cfg), \
+        with patch.object(ms.server_state, "config", cfg), \
              patch.object(ms, "_ensure_model", MagicMock()) as m_ensure, \
-             patch.object(ms, "_slot_registry", None), \
-             patch.object(ms, "_audio_capable", False), \
+             patch.object(ms.server_state, "slot_registry", None), \
+             patch.object(ms.server_state, "audio_capable", False), \
              patch.object(ms._vllm, "_vllm_enabled", False), \
-             patch.object(ms, "_mm_model", None), \
-             patch.object(ms, "_mm_processor", proc), \
+             patch.object(ms.server_state, "mm_model", None), \
+             patch.object(ms.server_state, "mm_processor", proc), \
              patch.object(ms, "_ensure_multimodal_slot", lambda: None), \
              patch("subprocess.run", return_value=MagicMock(returncode=0)), \
              patch("soundfile.read", return_value=(_np.zeros(16000, dtype=_np.float32), 16000)), \
