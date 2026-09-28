@@ -108,11 +108,6 @@ def _mark_activity_end():
 # ---------------------------------------------------------------------------
 # vLLM engine (main chat model)
 # ---------------------------------------------------------------------------
-_vllm_engine = None          # vllm.AsyncLLMEngine instance (or None if fallback)
-_vllm_model_path = None      # which path is loaded into vllm
-_vllm_enabled = False        # True if vLLM backend is active
-_vllm_loop = None            # asyncio event loop running in background thread
-
 # ---------------------------------------------------------------------------
 # HF transformers fallback (main chat model — used when vLLM fails to load)
 # ---------------------------------------------------------------------------
@@ -232,6 +227,10 @@ def _critique_cfg():
 
 
 
+
+# vLLM backend subsystem moved to vllm.py — owns its own engine/loop state.
+from . import vllm as _vllm
+
 # ---------------------------------------------------------------------------
 # Slot registry helpers
 # ---------------------------------------------------------------------------
@@ -324,174 +323,19 @@ def _omni_generate_text(inputs: dict, max_new_tokens: int = 1024) -> "object":
 # vLLM backend
 # ---------------------------------------------------------------------------
 
-def _start_vllm_event_loop():
-    """Start a dedicated asyncio event loop in a background thread for vLLM."""
-    global _vllm_loop
-    loop = asyncio.new_event_loop()
-    _vllm_loop = loop
-    loop.run_forever()
-
-
-def _vllm_run(coro):
-    """Submit a coroutine to the vLLM event loop and block until done."""
-    if _vllm_loop is None:
-        raise RuntimeError("vLLM event loop not started")
-    fut = asyncio.run_coroutine_threadsafe(coro, _vllm_loop)
-    return fut.result(timeout=300)
-
-
-def _load_vllm_engine(config_path="config.yaml", model_path_override: str | None = None):
-    """Load vLLM AsyncLLMEngine. Returns True on success, False on failure.
-
-    model_path_override: when swap_model has already updated _config in-memory,
-    pass the path directly to avoid re-reading stale disk config (mirrors _load_nemotron).
-    """
-    global _vllm_engine, _vllm_model_path, _vllm_enabled, _vllm_loop
-
-    # vLLM uses IPC sockets for worker communication — must be on a real Linux FS.
-    # Windows-mounted drives (e.g. /mnt/...) don't support Unix sockets. Force /tmp.
-    import tempfile
-    if not os.environ.get("TMPDIR", "").startswith("/tmp"):
-        os.environ["TMPDIR"] = "/tmp"
-        tempfile.tempdir = "/tmp"
-
-    cfg = _config if _config is not None else _load_config(config_path)
-    model_path = model_path_override \
-                 or (os.environ.get("MODEL_SOURCE") == "docker-hub" and os.environ.get("MODEL_ID")) \
-                 or cfg["model"].get("path") or cfg["model"]["name"]
-    inf_cfg = cfg.get("inference", {})
-
-    gpu_util = inf_cfg.get("gpu_memory_utilization", 0.80)
-    max_model_len = inf_cfg.get("max_model_len") or cfg["model"].get("max_context_length", 8192)
-    dtype = cfg["model"].get("dtype", "bfloat16")
-    # vLLM quantization — prefer bitsandbytes if config has 4bit
-    quantize_cfg = cfg["model"].get("quantize", "none")
-    if quantize_cfg in ("4bit", "4"):
-        quantization = "bitsandbytes"
-    else:
-        quantization = None  # rely on dtype + PagedAttention
-
-    # Speculative decoding config
-    use_speculative = inf_cfg.get("speculative_decoding", False)
-    drafter_path = inf_cfg.get("speculative_drafter", "")
-    num_spec_tokens = inf_cfg.get("speculative_num_speculative_tokens", 5)
-
-    print(f"[model_server] Loading vLLM engine: {model_path}", flush=True)
-    print(f"[model_server]   gpu_util={gpu_util}, max_model_len={max_model_len}, dtype={dtype}", flush=True)
-    if quantization:
-        print(f"[model_server]   quantization={quantization}", flush=True)
-
-    try:
-        from vllm import AsyncLLMEngine, AsyncEngineArgs
-
-        engine_args = AsyncEngineArgs(
-            model=model_path,
-            gpu_memory_utilization=gpu_util,
-            max_model_len=int(max_model_len),
-            dtype=dtype,
-            trust_remote_code=True,
-            # Multimodal support (Qwen3-VL)
-            limit_mm_per_prompt={"image": 4, "video": 0, "audio": 0},
-            enable_log_requests=False,
-        )
-        if quantization:
-            engine_args.quantization = quantization
-
-        # Speculative decoding — text-only drafter for text decode steps
-        if use_speculative and drafter_path:
-            try:
-                engine_args.speculative_config = {
-                    "model": drafter_path,
-                    "num_speculative_tokens": int(num_spec_tokens),
-                }
-                print(f"[model_server] Speculative decoding: drafter={drafter_path}, tokens={num_spec_tokens}", flush=True)
-            except Exception as e:
-                print(f"[model_server] WARNING: speculative config failed ({e}) — disabling", flush=True)
-
-        # Start background event loop before creating engine
-        if _vllm_loop is None:
-            t = threading.Thread(target=_start_vllm_event_loop, daemon=True)
-            t.start()
-            # Give it a moment to initialise
-            import time; time.sleep(0.1)
-
-        async def _create():
-            return AsyncLLMEngine.from_engine_args(engine_args)
-
-        _vllm_engine = _vllm_run(_create())
-        _vllm_model_path = model_path
-        _vllm_enabled = True
-
-        _detect_capabilities(model_path, cfg)
-        print("[model_server] vLLM engine ready.", flush=True)
-        return True
-
-    except Exception as e:
-        print(f"[model_server] WARNING: vLLM engine load failed: {e}", flush=True)
-        print("[model_server] Falling back to HF transformers backend.", flush=True)
-        _vllm_enabled = False
-        return False
-
-
-async def _vllm_generate_async(prompt: str, sampling_params, request_id: str = None) -> str:
-    """Run a single vLLM generation and return the full output text."""
-    import uuid
-    from vllm import SamplingParams
-
-    if request_id is None:
-        request_id = str(uuid.uuid4())
-
-    full_output = ""
-    async for output in _vllm_engine.generate(prompt, sampling_params, request_id):
-        if output.outputs:
-            full_output = output.outputs[0].text
-
-    return full_output
-
-
-async def _vllm_generate_multimodal_async(inputs: dict, sampling_params, request_id: str = None) -> str:
-    """Run a vLLM multimodal generation (image + text) and return output text."""
-    import uuid
-
-    if request_id is None:
-        request_id = str(uuid.uuid4())
-
-    full_output = ""
-    async for output in _vllm_engine.generate(inputs, sampling_params, request_id):
-        if output.outputs:
-            full_output = output.outputs[0].text
-
-    return full_output
-
-
-def _vllm_infer(prompt: str, max_new_tokens: int = 8192, temperature: float = 1.0,
-                top_p: float = 0.95, top_k: int = 64) -> str:
-    """Synchronous wrapper around vLLM generation."""
-    from vllm import SamplingParams
-    sp = SamplingParams(
-        max_tokens=max_new_tokens,
-        temperature=temperature,
-        top_p=top_p,
-        top_k=top_k,
-    )
-    return _vllm_run(_vllm_generate_async(prompt, sp))
-
-
 def _get_vllm_processor():
     """Get (or lazily load) the tokenizer/processor for prompt formatting."""
     global _processor
     if _processor is not None:
         return _processor
-    if _vllm_model_path:
+    if _vllm.model_path():
         try:
             from transformers import AutoProcessor
-            _processor = AutoProcessor.from_pretrained(_vllm_model_path, trust_remote_code=True)
+            _processor = AutoProcessor.from_pretrained(_vllm.model_path(), trust_remote_code=True)
             print("[model_server] Processor loaded for prompt formatting.", flush=True)
         except Exception as e:
             print(f"[model_server] WARNING: processor load failed ({e})", flush=True)
     return _processor
-
-
 # ---------------------------------------------------------------------------
 # HF transformers fallback
 # ---------------------------------------------------------------------------
@@ -998,7 +842,7 @@ def _load_adapter(adapter_path: str) -> str:
     if _model is None:
         print("[adapter] WARNING: base model not loaded — cannot attach adapter", flush=True)
         raise RuntimeError("base model not loaded")
-    if _vllm_enabled:
+    if _vllm.is_enabled():
         raise RuntimeError("adapter-aware inference is not supported with vLLM backend")
 
     adapter_path = str(Path(adapter_path).expanduser())
@@ -1030,7 +874,7 @@ def _use_adapter(adapter_path: str | None):
     global _current_adapter_name
     _ensure_model()
 
-    if adapter_path and _vllm_enabled:
+    if adapter_path and _vllm.is_enabled():
         raise RuntimeError("adapter-aware inference is not supported with vLLM backend")
 
     with _infer_lock:
@@ -1121,7 +965,7 @@ def _load_model(config_path="config.yaml", model_path_override: str | None = Non
     """
     global _config, _slot_registry
     with _load_lock:
-        if _vllm_enabled or _model is not None:
+        if _vllm.is_enabled() or _model is not None:
             return  # already loaded
 
         cfg = _load_config(config_path)
@@ -1167,7 +1011,7 @@ def _load_model(config_path="config.yaml", model_path_override: str | None = Non
         backend = cfg.get("inference", {}).get("backend", "vllm")
 
         if backend == "vllm":
-            success = _load_vllm_engine(config_path, model_path_override=model_path if model_path_override else None)
+            success = _vllm.load_engine(_config, _detect_capabilities, model_path_override=model_path if model_path_override else None)
             if not success:
                 # Fallback to HF
                 _load_hf_model(config_path, model_path_override=model_path if model_path_override else None)
@@ -1178,7 +1022,7 @@ def _load_model(config_path="config.yaml", model_path_override: str | None = Non
 
 
 def _ensure_model():
-    if not _vllm_enabled and _model is None:
+    if not _vllm.is_enabled() and _model is None:
         _load_model(_lazy_config_path, model_path_override=_lazy_model_override)
         adapter_path = os.environ.get("MODEL_ADAPTER_PATH")
         if adapter_path:
@@ -1517,10 +1361,10 @@ def _handle_infer(params: dict) -> dict:
 
     try:
         with _use_adapter(adapter_path):
-            if _vllm_enabled:
+            if _vllm.is_enabled():
                 try:
                     prompt = _build_chat_prompt(formatted, enable_thinking=False)
-                    result = _vllm_infer(prompt, max_new_tokens=max_new_tokens)
+                    result = _vllm.infer(prompt, max_new_tokens=max_new_tokens)
                     return {"result": result.strip()}
                 except Exception as e:
                     print(f"[model_server] vLLM infer error: {e} — falling back to HF", flush=True)
@@ -1621,10 +1465,10 @@ def _handle_infer_plain(params: dict) -> dict:
 
     try:
         with _use_adapter(adapter_path):
-            if _vllm_enabled:
+            if _vllm.is_enabled():
                 try:
                     prompt = _build_chat_prompt(chat, enable_thinking=False)
-                    result = _vllm_infer(prompt, max_new_tokens=8192, temperature=0.7, top_p=0.9, top_k=50)
+                    result = _vllm.infer(prompt, max_new_tokens=8192, temperature=0.7, top_p=0.9, top_k=50)
                     return {"result": result.strip()}
                 except Exception as e:
                     print(f"[model_server] vLLM infer_plain error: {e} — falling back to HF", flush=True)
@@ -1957,9 +1801,9 @@ def _nemotron_synthesize_answer(original_query, qwen_answer, tool_results, send_
         try:
             if _is_nemotron:
                 result = _nemotron_infer(chat, max_new_tokens=_mnt)
-            elif _vllm_enabled:
+            elif _vllm.is_enabled():
                 p = _build_chat_prompt(chat, enable_thinking=False)
-                result = _vllm_infer(p, max_new_tokens=_mnt)
+                result = _vllm.infer(p, max_new_tokens=_mnt)
             else:
                 import torch
                 inputs = _processor.apply_chat_template(
@@ -2000,9 +1844,9 @@ def _nemotron_synthesize_answer(original_query, qwen_answer, tool_results, send_
         _mnt = max_new_tokens or 4096
         if _is_nemotron:
             result = _nemotron_infer(chat, max_new_tokens=_mnt)
-        elif _vllm_enabled:
+        elif _vllm.is_enabled():
             p = _build_chat_prompt(chat, enable_thinking=False)
-            result = _vllm_infer(p, max_new_tokens=_mnt)
+            result = _vllm.infer(p, max_new_tokens=_mnt)
         else:
             import torch
             inputs = _processor.apply_chat_template(
@@ -2157,7 +2001,7 @@ def _handle_infer_with_tools(params: dict, send_line) -> dict:
     for step in range(max_steps):
         try:
             with _use_adapter(adapter_path):
-                if _vllm_enabled:
+                if _vllm.is_enabled():
                     # vLLM path — use processor to format with tools, then vLLM to generate
                     proc = _get_vllm_processor()
                     try:
@@ -2175,7 +2019,7 @@ def _handle_infer_with_tools(params: dict, send_line) -> dict:
                     try:
                         from vllm import SamplingParams
                         sp = SamplingParams(max_tokens=max_new_tokens, temperature=1.0, top_p=0.95, top_k=64)
-                        response_raw = _vllm_run(_vllm_generate_async(prompt, sp))
+                        response_raw = _vllm.run(_vllm.generate_async(prompt, sp))
                     except Exception as e:
                         print(f"[tool_loop/vllm] generate error at step {step}: {e} — aborting", flush=True)
                         return {"type": "result", "result": f"(vLLM error: {e})"}
@@ -2713,7 +2557,7 @@ def _handle_infer_with_image(params: dict) -> dict:
         result = active_processor.decode(out[0][input_len:], skip_special_tokens=True).strip()
         return {"result": result}
 
-    if _vllm_enabled:
+    if _vllm.is_enabled():
         try:
             proc = _get_vllm_processor()
             messages = [
@@ -2735,7 +2579,7 @@ def _handle_infer_with_image(params: dict) -> dict:
             vllm_input = {"prompt": text}
             if mm_data:
                 vllm_input["multi_modal_data"] = mm_data
-            result = _vllm_run(_vllm_generate_multimodal_async(vllm_input, sp))
+            result = _vllm.run(_vllm.generate_multimodal_async(vllm_input, sp))
             return {"result": result.strip()}
         except Exception as e:
             print(f"[model_server] vLLM image inference failed ({e}) — falling back to HF", flush=True)
@@ -2827,7 +2671,7 @@ def _handle_infer_with_audio(params: dict) -> dict:
         active_model = _slot_state.model
         active_processor = _slot_state.processor
         print(f"[model_server] infer_with_audio: using named slot {_use_slot_name!r}", flush=True)
-    elif _audio_capable and not _vllm_enabled:
+    elif _audio_capable and not _vllm.is_enabled():
         # Legacy: main model is audio-capable on HF path. Only now do we load
         # the main model — it is the audio-capable model in this config.
         _ensure_model()
@@ -3161,8 +3005,8 @@ def _resolve_loaded_model_name() -> str:
     what's actually loaded (e.g. MS1's swap-clobber bug). Falls back to config
     only when nothing is loaded yet.
     """
-    if _vllm_enabled and _vllm_model_path:
-        return _friendly_model_name(_vllm_model_path)
+    if _vllm.is_enabled() and _vllm.model_path():
+        return _friendly_model_name(_vllm.model_path())
     if _model is not None:
         name_or_path = getattr(_model, "name_or_path", None) \
             or getattr(getattr(_model, "config", None), "_name_or_path", None)
@@ -3190,8 +3034,8 @@ def _handle_health(params: dict) -> dict:
         "adapter": _current_adapter_name,
         "vram_free_mb": vram_free,
         "vram_warning": vram_warning,
-        "main_model_loaded": _vllm_enabled or _model is not None,
-        "vllm_engine": _vllm_enabled,
+        "main_model_loaded": _vllm.is_enabled() or _model is not None,
+        "vllm_engine": _vllm.is_enabled(),
         "drafter_loaded": _drafter is not None,
         "audio_capable": _audio_capable,
         "multimodal_slot_loaded": _mm_model is not None,
@@ -3246,21 +3090,13 @@ def _handle_unload(params: dict) -> dict:
     Called before switching task_inference to a cloud provider, freeing VRAM.
     """
     global _model, _processor, _drafter, _drafter_tokenizer
-    global _vllm_engine, _vllm_model_path, _vllm_enabled
     global _is_nemotron, _mm_model, _mm_processor, _slot_registry
     import gc
     import torch
 
     print("[model_server] unload: releasing model from VRAM...", flush=True)
 
-    if _vllm_engine is not None:
-        try:
-            _vllm_run(_vllm_engine.abort_request("*"))
-        except Exception:
-            pass
-        _vllm_engine = None
-        _vllm_model_path = None
-        _vllm_enabled = False
+    _vllm.reset()
 
     for attr in ("_model", "_processor", "_drafter", "_drafter_tokenizer"):
         obj = globals().get(attr)
@@ -3307,7 +3143,7 @@ def _handle_swap_model(params: dict) -> dict:
     Routes Nemotron-Labs-Diffusion models to the dedicated loader.
     """
     global _model, _processor, _drafter, _drafter_tokenizer, _config
-    global _vllm_engine, _vllm_model_path, _vllm_enabled, _is_nemotron
+    global _is_nemotron
 
     import gc
     import torch
@@ -3322,14 +3158,7 @@ def _handle_swap_model(params: dict) -> dict:
     print(f"[model_server] swap_model: unloading current model...", flush=True)
 
     # Unload vLLM engine
-    if _vllm_engine is not None:
-        try:
-            _vllm_run(_vllm_engine.abort_request("*"))
-        except Exception:
-            pass
-        _vllm_engine = None
-        _vllm_model_path = None
-        _vllm_enabled = False
+    _vllm.reset()
 
     # Unload HF model
     for attr in ("_model", "_processor", "_drafter", "_drafter_tokenizer"):
@@ -3372,7 +3201,7 @@ def _handle_swap_model(params: dict) -> dict:
         else:
             backend = (_config or {}).get("inference", {}).get("backend", "vllm")
             if backend == "vllm":
-                success = _load_vllm_engine(_lazy_config_path, model_path_override=new_path)
+                success = _vllm.load_engine(_config, _detect_capabilities, model_path_override=new_path)
                 if not success:
                     _load_hf_model(_lazy_config_path, model_path_override=new_path)
             else:
@@ -3381,7 +3210,7 @@ def _handle_swap_model(params: dict) -> dict:
         return {"error": f"model load failed: {e}"}
 
     model_name = _resolve_loaded_model_name()
-    backend_tag = "nemotron" if _is_nemotron else ("vllm" if _vllm_enabled else "transformers")
+    backend_tag = "nemotron" if _is_nemotron else ("vllm" if _vllm.is_enabled() else "transformers")
     print(f"[model_server] swap_model: ready — {model_name} ({backend_tag})", flush=True)
 
     # Re-sync primary slot in registry so slot_status() reflects the new model
@@ -3703,8 +3532,7 @@ def main():
     def _shutdown(signum, frame):
         print(f"\n[model_server] Caught signal {signum}, shutting down...", flush=True)
         # Shut down vLLM event loop if running
-        if _vllm_loop is not None:
-            _vllm_loop.call_soon_threadsafe(_vllm_loop.stop)
+        _vllm.shutdown()
         if server:
             threading.Thread(target=server.shutdown, daemon=True).start()
         sys.exit(0)
