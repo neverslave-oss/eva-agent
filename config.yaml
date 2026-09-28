@@ -188,6 +188,7 @@ providers:
     openai: gpt-5.4
     openrouter: deepseek-ai/DeepSeek-V4-Flash-0731
     openrouter_tool: openrouter/auto
+    doubleword: deepseek-ai/DeepSeek-V4-Flash-0731
   planning: hf
   streaming:
     enabled: true

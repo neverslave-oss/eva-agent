@@ -2,7 +2,11 @@
 provider.py — ADR-013: Multi-provider inference wrapper.
 
 Routes infer() and infer_with_tools() calls to configured provider per call type.
-Providers: local (Gemma 4 via model_server), openai, anthropic, hf, copilot, olly (OpenClaw/claude-sonnet-4.6)
+Providers: local (Gemma 4 via model_server), openai, anthropic, hf, copilot, openrouter, doubleword, olly (OpenClaw/claude-sonnet-4.6)
+
+Doubleword (https://api.doubleword.ai/v1) is an OpenAI-compatible async/real-time
+inference provider that can be far cheaper than real-time endpoints for batch/async
+work (see https://doubleword.ai/use-cases/openclaw). Config key: DOUBLEWORD_API_KEY.
 
 Local-first routing:
   - Primary: local Gemma 4 E2B-it via model_server socket.
@@ -127,7 +131,7 @@ class InferenceProvider:
         """Route a standard (non-tool) inference call with ordered fallback chain."""
         provider = self.get_provider(call_type)
         # Build fallback chain: primary first, then all others in priority order, excluding primary
-        _CHAIN = ["local", "openai", "anthropic", "openrouter", "copilot", "hf"]
+        _CHAIN = ["local", "openai", "anthropic", "openrouter", "copilot", "hf", "doubleword"]
         # computer_use must use the configured cloud provider (vision/inference) —
         # never fall back to the local model (GPU-full/OOM poisons the chain).
         if call_type == "computer_use":
@@ -140,6 +144,7 @@ class InferenceProvider:
             "openrouter": os.environ.get("OPENROUTER_API_KEY"),
             "hf": os.environ.get("HF_TOKEN"),
             "copilot": (os.environ.get("GITHUB_COPILOT_TOKEN") or os.environ.get("GITHUB_TOKEN")),
+            "doubleword": os.environ.get("DOUBLEWORD_API_KEY"),
         }
         last_err = ""
         for p in chain:
@@ -171,6 +176,8 @@ class InferenceProvider:
                     return self._call_hf(messages, model, call_type)
                 elif p == "copilot":
                     return self._call_copilot(messages, model)
+                elif p == "doubleword":
+                    return self._call_doubleword(messages, model)
                 else:
                     continue
             except Exception as e:
@@ -190,7 +197,7 @@ class InferenceProvider:
         loops execute tools in-process here, where the module global already works.
         """
         provider = self.get_provider(call_type)
-        _CHAIN = ["local", "openai", "anthropic", "openrouter", "copilot", "hf"]
+        _CHAIN = ["local", "openai", "anthropic", "openrouter", "copilot", "hf", "doubleword"]
         # computer_use must use the configured cloud provider (vision/inference) —
         # never fall back to the local model (GPU-full/OOM poisons the chain).
         if call_type == "computer_use":
@@ -203,6 +210,7 @@ class InferenceProvider:
             "openrouter": os.environ.get("OPENROUTER_API_KEY"),
             "hf": os.environ.get("HF_TOKEN"),
             "copilot": (os.environ.get("GITHUB_COPILOT_TOKEN") or os.environ.get("GITHUB_TOKEN")),
+            "doubleword": os.environ.get("DOUBLEWORD_API_KEY"),
         }
         last_err = ""
         for p in chain:
@@ -228,7 +236,7 @@ class InferenceProvider:
                         logger.warning(f"[provider] local infer_with_tools returned error — trying next in chain: {result[:120]}")
                         continue
                     return result
-                elif p in ("openai", "copilot", "openrouter"):
+                elif p in ("openai", "copilot", "openrouter", "doubleword"):
                     return self._openai_tool_loop(messages, tools, workspace, max_steps, step_callback, model, p, chunk_callback=chunk_callback)
                 elif p == "anthropic":
                     return self._anthropic_tool_loop(messages, tools, workspace, max_steps, step_callback, model)
@@ -405,6 +413,34 @@ class InferenceProvider:
         data = json.loads(resp.read())
         return data["choices"][0]["message"]["content"]
 
+    def _call_doubleword(self, messages: list, model: str | None) -> str:
+        """Doubleword API — OpenAI-compatible endpoint (https://api.doubleword.ai/v1).
+
+        Doubleword offers a cheaper async/batch inference tier for background,
+        latency-insensitive work (see doubleword.ai/use-cases/openclaw). This is the
+        real-time chat/completions path, driven by DOUBLEWORD_API_KEY.
+        """
+        api_key = os.environ.get("DOUBLEWORD_API_KEY")
+        if not api_key:
+            raise RuntimeError("No DOUBLEWORD_API_KEY")
+        resolved_model = model or "deepseek-ai/DeepSeek-V4-Flash-0731"
+        payload = json.dumps({
+            "model": resolved_model,
+            "messages": messages,
+            "max_tokens": 4096,
+        }).encode()
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        }
+        req = urllib.request.Request(
+            "https://api.doubleword.ai/v1/chat/completions",
+            data=payload, headers=headers, method="POST"
+        )
+        resp = urllib.request.urlopen(req, timeout=120)
+        data = json.loads(resp.read())
+        return data["choices"][0]["message"]["content"]
+
     def _call_openrouter(self, messages: list, model: str | None) -> str:
         """OpenRouter API — OpenAI-compatible endpoint with model routing."""
         api_key = os.environ.get("OPENROUTER_API_KEY")
@@ -440,6 +476,8 @@ class InferenceProvider:
             api_key = os.environ.get("GITHUB_TOKEN")
         if provider == "openrouter":
             api_key = os.environ.get("OPENROUTER_API_KEY")
+        if provider == "doubleword":
+            api_key = os.environ.get("DOUBLEWORD_API_KEY")
         if not api_key:
             raise RuntimeError(f"No API key for {provider}")
 
@@ -449,6 +487,8 @@ class InferenceProvider:
             base_url = "https://api.githubcopilot.com"
         elif provider == "openrouter":
             base_url = "https://openrouter.ai/api/v1"
+        elif provider == "doubleword":
+            base_url = "https://api.doubleword.ai/v1"
         else:
             base_url = "https://api.openai.com/v1"
         workspace = os.path.expanduser(workspace)
