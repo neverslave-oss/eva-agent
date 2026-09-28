@@ -1,0 +1,35 @@
+[project]
+name = "kernel-evolving-computer-use"
+version = "0.1.0"
+description = "First-party modular computer-use expansion for kernel-evolving"
+requires-python = ">=3.11"
+dependencies = [
+  "pydantic>=2.13",
+  "tenacity>=9.1",
+  "structlog>=26.1",
+  "httpx>=0.28",
+  "Pillow>=12.3",
+  "mss>=10.2",
+  "opencv-python>=5.0",
+  "easyocr>=1.7",
+]
+
+[project.optional-dependencies]
+desktop = [
+  "pyautogui>=0.9.54",
+  "pynput>=1.8.2",
+  "pywinauto>=0.6.9; platform_system == 'Windows'",
+]
+browser = [
+  "playwright>=1.62",
+]
+all = [
+  "pyautogui>=0.9.54",
+  "pynput>=1.8.2",
+  "pywinauto>=0.6.9; platform_system == 'Windows'",
+  "playwright>=1.62",
+]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+python_files = ["test_*.py"]

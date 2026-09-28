@@ -18,12 +18,25 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 CONFIG="$REPO_DIR/config.yaml"
-PYTHON="python3"
 LOG="/tmp/kernel_evo_shadow.log"
+
+# ── Python resolution (mirrors start.sh) ────────────────────────────────────
+# The gate daemon runs under a systemd env where bare `python3` = /usr/bin/python3
+# (no yaml module) — so never hardcode it. Prefer explicit KERNEL_EVO_PYTHON,
+# then repo venv, then miniconda, then whatever python3 resolves to.
+if [[ -n "${KERNEL_EVO_PYTHON:-}" ]]; then
+  PYTHON="$KERNEL_EVO_PYTHON"
+elif [[ -x "$REPO_DIR/.venv/bin/python3" ]]; then
+  PYTHON="$REPO_DIR/.venv/bin/python3"
+elif [[ -x "$HOME/.miniconda/bin/python3" ]]; then
+  PYTHON="$HOME/.miniconda/bin/python3"
+else
+  PYTHON="$(command -v python3)"
+fi
 
 # ── Read config values ───────────────────────────────────────────────────────
 _cfg() {
-  python3 -c "
+  "$PYTHON" -c "
 import yaml, sys
 with open('$CONFIG') as f:
     cfg = yaml.safe_load(f)
@@ -47,9 +60,23 @@ ADAPTER_OUTPUT_DIR="${ADAPTER_OUTPUT_DIR:-$HOME/.kernel-evolving/workspace/artif
 SHADOW_PORT="${SHADOW_PORT:-8780}"
 SHADOW_SOCKET="${SHADOW_SOCKET:-/tmp/kernel_evo_shadow.sock}"
 
-# Allow override via arg
-ADAPTER_PATH="${1:-$ADAPTER_OUTPUT_DIR/adapter_model.safetensors}"
-ADAPTER_DIR="$(dirname "$ADAPTER_PATH")"
+# Allow override via arg — accept either a dir containing adapter_config.json/adapter weights,
+# or a direct path to the safetensors file. When given a dir, point ADAPTER_PATH at the
+# expected weights file inside it so adapter_config.json resolution lands on the right dir.
+ADAPTER_ARG="${1:-}"
+if [ -z "$ADAPTER_ARG" ]; then
+  ADAPTER_PATH="$ADAPTER_OUTPUT_DIR/adapter_model.safetensors"
+  ADAPTER_DIR="$ADAPTER_OUTPUT_DIR"
+elif [ -d "$ADAPTER_ARG" ]; then
+  ADAPTER_DIR="$ADAPTER_ARG"
+  ADAPTER_PATH="$ADAPTER_ARG/adapter_model.safetensors"
+elif [ -f "$ADAPTER_ARG" ]; then
+  ADAPTER_PATH="$ADAPTER_ARG"
+  ADAPTER_DIR="$(dirname "$ADAPTER_ARG")"
+else
+  ADAPTER_PATH="$ADAPTER_ARG"
+  ADAPTER_DIR="$(dirname "$ADAPTER_ARG")"
+fi
 
 log() { echo "[$(date '+%H:%M:%S')] $*" | tee -a "$LOG"; }
 
@@ -65,6 +92,32 @@ if [ ! -f "$ADAPTER_PATH" ] && [ ! -d "$ADAPTER_DIR" ]; then
   exit 2
 fi
 log "✅ Adapter found: $ADAPTER_PATH"
+
+# ── 1b. Resolve the adapter's OWN base model dynamically ─────────────────────
+# LoRA adapters are trained against a specific base model (Gemma, Qwen, Nemotron,
+# etc). Loading them onto whatever model config.yaml currently points at (e.g. the
+# live Nemotron inference model) silently mismatches and crashes. Read the base
+# model straight from the adapter's own adapter_config.json — the ground truth
+# peft wrote at training time — instead of assuming config.yaml's model.
+ADAPTER_CFG_JSON="$ADAPTER_DIR/adapter_config.json"
+if [ -f "$ADAPTER_CFG_JSON" ]; then
+  ADAPTER_BASE_MODEL=$("$PYTHON" -c "
+import json
+try:
+    d = json.load(open('$ADAPTER_CFG_JSON'))
+    print(d.get('base_model_name_or_path') or '')
+except Exception:
+    print('')
+")
+else
+  ADAPTER_BASE_MODEL=""
+fi
+
+if [ -n "$ADAPTER_BASE_MODEL" ]; then
+  log "✅ Adapter's own base model (from adapter_config.json): $ADAPTER_BASE_MODEL"
+else
+  log "⚠️  No adapter_config.json/base_model_name_or_path found — falling back to config.yaml's model (may mismatch)"
+fi
 
 # ── 2. Track which GPU services are running ───────────────────────────────────
 FANTASIA_WAS_RUNNING=false
@@ -94,13 +147,32 @@ rm -f "$SHADOW_SOCKET"
 SHADOW_API_PID_FILE="/tmp/kernel_evo_shadow_api.pid"
 SHADOW_MODEL_PID_FILE="/tmp/kernel_evo_shadow_model.pid"
 
+# bitsandbytes 4-bit quant needs libnvJitLink.so.13 (CUDA 13 runtime), which the
+# nvidia-nvjitlink package ships to site-packages/nvidia/cu13/lib/. It is NOT on the
+# default loader path, so without this bitsandbytes fails with:
+#   🚨 CUDA SETUP ERROR: Missing dependency: libnvJitLink.so.13 🚨
+# Prepend it so the shadow server can quantize its base model in 4-bit like production.
+NVIDIA_CU13_LIB="$HOME/.miniconda/lib/python3.13/site-packages/nvidia/cu13/lib"
+if [ -d "$NVIDIA_CU13_LIB" ]; then
+  export LD_LIBRARY_PATH="$NVIDIA_CU13_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  log "LD_LIBRARY_PATH prepended: $NVIDIA_CU13_LIB (libnvJitLink.so.13)"
+else
+  log "⚠️  nvidia/cu13 lib dir not found at $NVIDIA_CU13_LIB — 4-bit quant may fail"
+fi
+
 log "Starting shadow model_server (socket: $SHADOW_SOCKET, adapter: $ADAPTER_DIR)..."
 cd "$REPO_DIR"
-nohup "$PYTHON" src/model_server.py \
+SHADOW_CMD=("$PYTHON" src/core/inference/model_server.py \
   --config "$CONFIG" \
   --socket "$SHADOW_SOCKET" \
-  --adapter "$ADAPTER_DIR" \
-  >> "$LOG" 2>&1 &
+  --adapter "$ADAPTER_DIR")
+# Pass the adapter's own base model so the shadow loads the right base (Gemma/Qwen)
+# instead of whatever config.yaml points at (Nemotron). Falls back gracefully if empty.
+if [ -n "$ADAPTER_BASE_MODEL" ]; then
+  SHADOW_CMD+=(--model "$ADAPTER_BASE_MODEL")
+  log "  Base model override: $ADAPTER_BASE_MODEL"
+fi
+nohup "${SHADOW_CMD[@]}" >> "$LOG" 2>&1 &
 SHADOW_MODEL_PID=$!
 echo "$SHADOW_MODEL_PID" > "$SHADOW_MODEL_PID_FILE"
 log "Shadow model_server PID: $SHADOW_MODEL_PID"
@@ -108,12 +180,13 @@ log "Shadow model_server PID: $SHADOW_MODEL_PID"
 sleep 5
 
 log "Starting shadow api.py on port $SHADOW_PORT..."
-MODEL_SERVER_SOCKET="$SHADOW_SOCKET" \
+# api module lives in src/ — cd so uvicorn can import it (matches eval_sequential.sh's start_api)
+(cd "$REPO_DIR/src" && MODEL_SERVER_SOCKET="$SHADOW_SOCKET" \
 nohup "$PYTHON" -m uvicorn api:app \
   --host 127.0.0.1 \
   --port "$SHADOW_PORT" \
   --log-level warning \
-  >> "$LOG" 2>&1 &
+  >> "$LOG" 2>&1 &)
 SHADOW_API_PID=$!
 echo "$SHADOW_API_PID" > "$SHADOW_API_PID_FILE"
 log "Shadow api PID: $SHADOW_API_PID"
@@ -139,7 +212,7 @@ fi
 # ── 5. Run finetuned eval ─────────────────────────────────────────────────────
 log "Running finetuned eval on port $SHADOW_PORT..."
 FINETUNED_EXIT=0
-FINETUNED_RESULTS=$(python3 "$REPO_DIR/scripts/run_sim_eval.py" --port "$SHADOW_PORT" --label "finetuned" 2>&1) || FINETUNED_EXIT=$?
+FINETUNED_RESULTS=$("$PYTHON" "$REPO_DIR/scripts/run_sim_eval.py" --port "$SHADOW_PORT" --label "finetuned" 2>&1) || FINETUNED_EXIT=$?
 echo "$FINETUNED_RESULTS" | tee -a "$LOG"
 
 FINETUNED_PASS=$(echo "$FINETUNED_RESULTS" | grep -oP '\d+(?=/\d+ tasks passed)' | tail -1 || echo "0")
@@ -153,7 +226,7 @@ BASELINE_TOTAL=8
 
 if curl -sf "http://localhost:$BASELINE_LIVE_PORT/health" > /dev/null 2>&1; then
   log "Running baseline eval on port $BASELINE_LIVE_PORT..."
-  BASELINE_RESULTS=$(python3 "$REPO_DIR/scripts/run_sim_eval.py" --port "$BASELINE_LIVE_PORT" --label "baseline" 2>&1) || BASELINE_EXIT=$?
+  BASELINE_RESULTS=$("$PYTHON" "$REPO_DIR/scripts/run_sim_eval.py" --port "$BASELINE_LIVE_PORT" --label "baseline" 2>&1) || BASELINE_EXIT=$?
   echo "$BASELINE_RESULTS" | tee -a "$LOG"
   BASELINE_PASS=$(echo "$BASELINE_RESULTS" | grep -oP '\d+(?=/\d+ tasks passed)' | tail -1 || echo "0")
   BASELINE_TOTAL=$(echo "$BASELINE_RESULTS" | grep -oP '(?<=\d/)\d+(?= tasks passed)' | tail -1 || echo "8")

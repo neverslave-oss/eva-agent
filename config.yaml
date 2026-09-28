@@ -25,7 +25,7 @@ self_identity:
     reflects during idle time, verifies before acquiring, decomposes multi-step tasks
     via micro-planner.
   role: agent
-  version_tag: v1.18.5-evolving
+  version_tag: v1.1.0
 
 
 paths:
@@ -72,10 +72,13 @@ logging:
 # model, model_slots, stt_model, model_catalog, model_context_lengths,
 # model_server, inference, embedding
 model:
-  adapter_path: null
+  adapter_path: /home/pacificDev/.kernel-evolving/workspace/artifacts/finetune/nemotron_fc_v9
   device: cuda:0
   drafter_path: ''
   dtype: bfloat16
+  # When true, Nemotron (with our FC adapter) drives the full tool-calling loop
+  # itself via the single-model native path instead of the Qwen two-stage detour.
+  native_agentic: true
   max_context_length: 65536
   name: nvidia/Nemotron-Labs-Diffusion-3B
   path: ${KERNEL_EVO_HF_HUB}/hub_cache/hub/models--nvidia--Nemotron-Labs-Diffusion-3B/snapshots/0d51902da1f8869f83413ce642fab402fa5641e0
@@ -149,7 +152,8 @@ embedding_server_url: http://localhost:8770/embeddings
 
 providers:
   collect_trajectories: true
-  critic: hf
+  computer_use: hf
+  critic: doubleword
   fallback_provider: openrouter
   gpu_temp_critical_c: 85
   gpu_temp_resume_c: 78
@@ -160,12 +164,26 @@ providers:
   # a ":{provider}" suffix on the model id (e.g. ":deepinfra"). deepinfra is the
   # cheapest provider serving DeepSeek-V4-Flash-0731. Overridable via HF_ROUTER_PROVIDER.
   hf_provider: deepinfra
+  # Per-call-type HF Router provider override. computer_use (vision pipeline)
+  # uses deepinfra serving DeepSeek-V4-Flash-Vision-Exp; chat stays on
+  # deepinfra/DeepSeek.
+  hf_provider_overrides:
+    computer_use: deepinfra
+  # Doubleword route: latency-insensitive background call types (synthesis,
+  # planning, critic, trajectory_teacher) use the async flex tier (service_tier="flex",
+  # ~50% cheaper than realtime). Interactive task_inference stays realtime.
+  doubleword_async_call_types:
+    - synthesis
+    - planning
+    - critic
+    - trajectory_teacher
   model_overrides:
     critic: deepseek-ai/DeepSeek-V4-Flash-0731
     planning: deepseek-ai/DeepSeek-V4-Flash-0731
     stt: google/gemini-2.5-pro
     synthesis: deepseek-ai/DeepSeek-V4-Flash-0731
     task_inference: deepseek-ai/DeepSeek-V4-Flash-0731
+    computer_use: deepseek-ai/DeepSeek-V4-Flash-Vision-Exp
     trajectory_teacher: deepseek-ai/DeepSeek-V4-Flash-0731
     tts: openai/tts-1
     vision: google/gemma-4-26b-a4b-it
@@ -178,18 +196,19 @@ providers:
     openai: gpt-5.4
     openrouter: deepseek-ai/DeepSeek-V4-Flash-0731
     openrouter_tool: openrouter/auto
-  planning: hf
+    doubleword: deepseek-ai/DeepSeek-V4-Flash-0731
+  planning: doubleword
   streaming:
     enabled: true
     synthesis: false
     task_inference: true
     trajectory_teacher: true
   stt: openrouter
-  synthesis: hf
+  synthesis: doubleword
   task_inference: hf
   trajectory_min_critic_score: 0.7
   trajectory_require_artifact: true
-  trajectory_teacher: hf
+  trajectory_teacher: doubleword
   tts: openrouter
   vision: openrouter
 
@@ -275,12 +294,18 @@ evolution:
   finetune_gate:
     adapter_active_dir: ~/.kernel-evolving/workspace/artifacts/adapter_active
     adapter_output_dir: ~/.kernel-evolving/workspace/artifacts/finetune
-    enabled: false
+    enabled: true
     min_improvement: 0
     shadow_port: 8780
     shadow_socket: /tmp/kernel_evo_shadow.sock
     state_file: ~/.kernel-evolving/workspace/data/finetune_gate_state.json
-    trajectory_threshold: 50
+    trajectory_threshold: 100
+    # Local fine-tunes only run inside this window (24h, local time) so training
+    # never pins the GPU / stops services during the day. Threshold is still
+    # checked every cycle; if reached outside the window the run is deferred and
+    # retried on the next cycle until the window opens. Both HH:MM.
+    train_window_start: "23:00"
+    train_window_end: "05:00"
   min_candidate_score: 0.35
   recommendation_boost: 0.05
 
@@ -289,7 +314,7 @@ thinking:
     enabled: true
     max_iterations: 3
     run_timeout_s: 30
-  enabled: true
+  enabled: false
   ideas_dir: ~/.kernel-evolving/workspace/thoughts/ideas
   idle_threshold_s: 300
   journal_dir: ~/.kernel-evolving/workspace/thoughts
@@ -368,3 +393,14 @@ sensors:
   pi:
     base: "${KERNEL_EVO_SENSORS_PI_BASE:-}"   # e.g. http://<hub-ip>:5000
     timeout_s: 5.0
+# ── Tool-call critique/repair layer (2026-09-26 design) ────────────────────
+# T0 refusal re-prompt (additive) / T1 schema-validate / T2 repair-critique /
+# T3 revisor (off by default). All fail-open: a bug here never blocks the loop.
+critique:
+  enabled: true
+  schema_validate: true
+  repair_critique: true
+  refusal_reprompt: true
+  max_repair_retries: 2
+  revisor:
+    enabled: false

@@ -70,6 +70,7 @@ _IDLE_BYPASS_PATHS = {
     "/memory/file/rename", "/memory/file/new",
     "/sqlite/tables", "/sqlite/table", "/sqlite/row", "/sqlite/table/data", "/sqlite/db/data",
     "/voice/status",
+    "/api/sessions",
 }
 
 @app.middleware("http")
@@ -376,6 +377,50 @@ def chat_session_new(body: MessageIn):
     return {"ok": True, "chat_id": chat_id, **result}
 
 
+def _conversations_repo():
+    """Return a ConversationsRepository bound to the running agent's conversations DB."""
+    from runtime_paths import CONVERSATIONS_DB
+    from database.agent import ConversationsRepository
+    return ConversationsRepository(db_path=CONVERSATIONS_DB)
+
+
+class NewSessionIn(BaseModel):
+    """Payload for creating a new conversation/session record."""
+    chat_id: str = ""  # optional; a fresh uuid is generated when omitted
+    title: str = ""
+
+
+@app.get("/api/sessions")
+def api_sessions_list(limit: int = 100):
+    """List persisted conversations (real chat-history sessions), newest first.
+
+    Reads from the chat-history store (ChatHistoryRepository.list_sessions),
+    which is backed by the sessions table that is written on every turn — not
+    the ConversationsRepository metadata table, which nothing populates and
+    stays empty.
+    """
+    try:
+        from runtime_paths import CHAT_HISTORY_DB
+        from database.memory import ChatHistoryRepository
+        repo = ChatHistoryRepository(db_path=CHAT_HISTORY_DB)
+        rows = repo.list_sessions(limit=limit)
+    except Exception as exc:  # DB may be uninitialised on a fresh install
+        return {"sessions": [], "error": str(exc)}
+    return {"sessions": rows, "count": len(rows)}
+
+
+@app.post("/api/sessions")
+def api_sessions_create(body: NewSessionIn):
+    """Create a new conversation record and return its id/chat_id."""
+    conversation_id = str(uuid.uuid4())
+    chat_id = (body.chat_id or "").strip() or f"agent-{uuid.uuid4().hex[:8]}"
+    title = (body.title or "").strip() or "New session"
+    repo = _conversations_repo()
+    repo.upsert(conversation_id=conversation_id, chat_id=chat_id, title=title)
+    created = repo.get(conversation_id)
+    return {"ok": True, **created}
+
+
 @app.post("/message")
 def message(body: MessageIn):
     """Main entry point — triage and respond."""
@@ -654,6 +699,26 @@ def debug_fields(chat_id: str = "", query: str = ""):
             "registry": None,
             "hot_fields": {},
             "routed": None,
+        }
+
+
+@app.get("/debug/computer")
+def debug_computer(chat_id: str = "", query: str = ""):
+    """(Phase 4) Inspect the computer-use expansion state.
+
+    Exposes whether the sidecar is loaded, the driver/registry config, and a
+    debug snapshot. Degrades to a safe no-op JSON if the module is absent or
+    errors, so the live kernel never breaks.
+    """
+    try:
+        from core.expansions.computer_use_bridge import debug_snapshot
+        return debug_snapshot(chat_id=chat_id, query=query)
+    except Exception as e:
+        return {
+            "available": False,
+            "reason": f"/debug/computer handler error: {e}",
+            "chat_id": chat_id,
+            "query": query,
         }
 
 # ── Memory & Workspace endpoints ────────────────────────────────────────────
@@ -1795,6 +1860,55 @@ def evolution_stream():
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
+@app.get("/computer/stream")
+def computer_stream():
+    """Server-sent events stream of the live computer-use screen (Desktop/Mobile/Dashboard).
+
+    Each frame is the same caption + screenshot the Telegram watch streams; a
+    broadcast hub in computer_use_bridge.publish_watch fans it out to every
+    subscribed surface so the computer-use run is visible everywhere, not just
+    Telegram. Screenshot is a base64 data-URI (or empty).
+    """
+    import time as _time
+    from core.expansions.computer_use_bridge import subscribe_watch, unsubscribe_watch
+
+    sub = subscribe_watch()
+
+    def event_generator():
+        last_beat = _time.time()
+        try:
+            while sub.active:
+                try:
+                    frame = sub.queue.get(timeout=15)
+                    payload = {"caption": frame.get("caption", ""), "screenshot": frame.get("screenshot", None) or ""}
+                    yield f"data: {json.dumps(payload)}\n\n"
+                    last_beat = _time.time()
+                except Exception:
+                    # Keepalive comment so proxies don't kill an idle connection.
+                    if _time.time() - last_beat > 15:
+                        yield ": ping\n\n"
+                        last_beat = _time.time()
+        finally:
+            sub.active = False
+            unsubscribe_watch(sub)
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@app.post("/computer/publish")
+def computer_publish(body: dict):
+    """Cross-process bridge: model_server POSTs each live frame here so the
+    uvicorn process (which owns the SSE subscribers) fans it out to every
+    /computer/stream consumer. The endpoint calls publish_watch directly, which
+    fans out to in-process subscribers only — it never re-forwards back over
+    HTTP, so there is no loop between the two processes.
+    """
+    from core.expansions.computer_use_bridge import publish_watch
+
+    publish_watch(body.get("caption", ""), body.get("screenshot", None))
+    return {"ok": True}
+
+
 @app.post("/sim/mode")
 def set_sim_mode(body: dict):
     """Enable/disable SIM_MODE — bypasses exec_shell approval gate for trajectory collection."""
@@ -1830,7 +1944,7 @@ def get_provider_routing():
         "model_catalog": providers_cfg.get("models", {}),
         "model_overrides": providers_cfg.get("model_overrides", {}),
         "call_types": ["task_inference", "synthesis", "critic", "planning", "trajectory_teacher", "vision", "stt", "tts"],
-        "providers": ["local", "openai", "anthropic", "hf", "copilot", "openrouter", "google"],
+        "providers": ["local", "openai", "anthropic", "hf", "copilot", "openrouter", "google", "doubleword"],
     }
 
 
@@ -1876,7 +1990,7 @@ def set_provider_routing(body: dict):
     from core.inference.model_client import is_server_running
     p = _gp()  # get existing singleton — do not pass _cfg (would recreate)
     valid_call_types = {"task_inference", "synthesis", "critic", "planning", "trajectory_teacher", "vision", "stt", "tts"}
-    valid_providers  = {"local", "openai", "anthropic", "hf", "copilot", "openrouter"}
+    valid_providers  = {"local", "openai", "anthropic", "hf", "copilot", "openrouter", "doubleword"}
     changed = {}
     vram_actions = []  # messages about GPU actions taken
 

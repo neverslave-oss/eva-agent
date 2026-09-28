@@ -9,6 +9,7 @@ Usage: python src/telegram_bot.py
 import os
 import json
 import re
+import random
 import subprocess
 import requests
 import threading
@@ -18,6 +19,12 @@ from datetime import date
 from pathlib import Path
 from runtime_paths import DOCUMENTS_DIR
 from core.voice_activity import voice_activity
+
+# Recency window (seconds) for treating an attachment as "recent" context.
+# Attachments older than this are stale and must not be injected as if freshly
+# uploaded, nor force the reply to reference them (bug: a days-old photo was
+# surfaced for an unrelated later turn).
+_ATTACHMENT_RECENCY_SECONDS = int(os.environ.get("KERNEL_EVO_ATTACHMENT_RECENCY_SECONDS", "86400"))
 
 # Add src/ to path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -41,6 +48,19 @@ def _esc(text: str) -> str:
     return str(text).replace("_", "\\_")
 
 
+def _html(text: str) -> str:
+    """HTML-escape text for Telegram parse_mode="HTML".
+
+    Telegram's legacy Markdown parser rejects messages containing unescaped
+    markdown specials (`_`, `*`, backticks, `[`) with a 400 "can't parse
+    entities" error. HTML parse mode only requires escaping `<`, `>`, and `&`,
+    so it's far more robust for arbitrary model-generated text (which is full
+    of code, links, and punctuation).
+    """
+    import html as _html_lib
+    return _html_lib.escape(str(text), quote=False)
+
+
 # ── Tool step display (Telegram) ─────────────────────────────────────
 # Per-tool emoji + verb so tool-call progress messages are informative
 # ("what tool, to do what") instead of a bare "🔧 tool1 → tool2".
@@ -57,6 +77,7 @@ _TOOL_EMOJI = {
     "search_skills": "🔎",
     "list_routines": "📋",
     "recall_memory": "🧠",
+    "computer": "🖥️",
 }
 _TOOL_VERB = {
     "read_file": "read",
@@ -71,6 +92,7 @@ _TOOL_VERB = {
     "search_skills": "find skill",
     "list_routines": "list routines",
     "recall_memory": "recall memory",
+    "computer": "drive",
 }
 # Arg fields to surface first when summarising a tool call.
 _TOOL_ARG_PRIORITY = (
@@ -96,21 +118,26 @@ def _tool_args_label(name: str, args) -> str:
 
 
 def _format_tool_step(n, tool_name, args=None, result=None) -> str:
-    """Format one tool-call step as a readable, emoji-tagged Telegram line."""
+    """Format one tool-call step as a readable, emoji-tagged Telegram line.
+
+    Uses HTML formatting (Telegram HTML parse mode) — the tool name is in
+    <code>, the step number is <b>bold</b>, and dynamic values are HTML-escaped
+    so arbitrary model output never breaks the entity parser.
+    """
     name = str(tool_name or "?")
     emoji = _TOOL_EMOJI.get(name, "🔧")
     verb = _TOOL_VERB.get(name, name.replace("_", " "))
-    # Show the tool name in backticks (precise) with a friendly verb prefix.
-    line = f"*Step {n}* {emoji} `{_esc(verb)}` (`{_esc(name)}`)"
+    # Show the tool name in <code> (precise) with a friendly verb prefix.
+    line = f"<b>Step {n}</b> {emoji} <code>{_html(verb)}</code> (<code>{_html(name)}</code>)"
     label = _tool_args_label(name, args)
     if label:
-        line += f" — `{_esc(label)}`"
+        line += f" — <code>{_html(label)}</code>"
     if result is not None:
         r = str(result).strip()
         if r and not r.lower().startswith("(error") and "error:" not in r.lower()[:60]:
             line += "\n  ✅ ok"
         else:
-            line += f"\n  ⚠️ {_esc(r[:120])}"
+            line += f"\n  ⚠️ {_html(r[:120])}"
     return line
 
 
@@ -171,6 +198,24 @@ def send_message(chat_id: str, text: str, parse_mode: str = "Markdown") -> int |
     return None
 
 
+def delete_message(chat_id: str, message_id: int) -> bool:
+    """Delete a Telegram message (e.g. to replace a stale screenshot).
+
+    Returns True on success. Failures are non-fatal — callers should treat a
+    delete failure as "keep the old message" rather than erroring.
+    """
+    try:
+        r = requests.post(
+            f"{API_BASE}/deleteMessage",
+            json={"chat_id": chat_id, "message_id": message_id},
+            timeout=10,
+        )
+        data = r.json()
+        return bool(data.get("ok"))
+    except Exception:
+        return False
+
+
 def edit_message(chat_id: str, message_id: int, text: str, parse_mode: str = "Markdown") -> bool:
     """Edit an existing message. Falls back silently if it fails."""
     try:
@@ -199,17 +244,26 @@ def edit_message(chat_id: str, message_id: int, text: str, parse_mode: str = "Ma
     return False
 
 
-def send_buttons(chat_id: str, text: str, buttons: list):
-    """Send a message with inline keyboard buttons."""
+def send_buttons(chat_id: str, text: str, buttons: list, parse_mode: str = "Markdown"):
+    """Send a message with inline keyboard buttons.
+
+    `parse_mode` defaults to "Markdown" for backward compatibility. Callers
+    embedding arbitrary user/model content (e.g. the exec_shell auth prompt)
+    should pass parse_mode="HTML" and HTML-escape their content, since Telegram's
+    legacy Markdown parser rejects unescaped `_`/`*`/backticks with "can't parse
+    entities" — silently dropping the message (and its buttons).
+    """
     try:
+        payload = {
+            "chat_id": chat_id,
+            "text": text,
+            "reply_markup": {"inline_keyboard": buttons},
+        }
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
         r = requests.post(
             f"{API_BASE}/sendMessage",
-            json={
-                "chat_id": chat_id,
-                "text": text,
-                "parse_mode": "Markdown",
-                "reply_markup": {"inline_keyboard": buttons},
-            },
+            json=payload,
             timeout=10,
         )
         if not r.ok:
@@ -767,6 +821,32 @@ def handle_callback(chat_id: str, data: str, message_id: int):
             status = "✅ Approved" if approved else "❌ Denied"
             if message_id:
                 edit_message(chat_id, message_id, f"*Shell command* — {status}")
+            return
+        # ── Computer-use risky action confirmation ────────────────────────
+        if data.startswith("cu_allow_") or data.startswith("cu_deny_"):
+            from core.computer_confirm_gate import resolve_confirm
+            approved = data.startswith("cu_allow_")
+            request_id = data.split("_", 2)[-1]
+            resolve_confirm(request_id, approved)
+            status = "✅ Allowed" if approved else "❌ Denied"
+            if message_id:
+                edit_message(chat_id, message_id, f"*Risky computer-use action* — {status}")
+            return
+        # ── Ask-questions user prompt ──────────────────────────────────────
+        # Format: aq_<request_id>_<option_idx>
+        if data.startswith("aq_"):
+            parts = data.split("_")
+            # parts: ['aq', '<rid>', '<idx>']
+            if len(parts) >= 3:
+                request_id = parts[1]
+                try:
+                    option_idx = int(parts[2])
+                except ValueError:
+                    option_idx = 0
+                from core.ask_questions_gate import resolve_question
+                resolve_question(request_id, option_idx)
+                if message_id:
+                    edit_message(chat_id, message_id, "✅ Got it — thanks!")
             return
         if data.startswith("install_"):
             parts = data.split("_", 2)
@@ -1364,7 +1444,7 @@ def handle_message(chat_id: str, text: str, sender_name: str = "", photo_file_id
                     chat_id=str(chat_id),
                 )
                 # Inject recent-attachment context into the prompt
-                att_ctx = _memory_mod.attachment_context_block(chat_id=str(chat_id), limit=3)
+                att_ctx = _memory_mod.attachment_context_block(chat_id=str(chat_id), limit=3, max_age_seconds=_ATTACHMENT_RECENCY_SECONDS)
                 if att_ctx:
                     full_prompt = f"{att_ctx}\n\n{full_prompt}"
 
@@ -1715,40 +1795,115 @@ def handle_message(chat_id: str, text: str, sender_name: str = "", photo_file_id
         return
 
     if text == "/status":
-        import torch
         __version__ = _get_current_version()
 
-        free_mb = 0
-        if torch.cuda.is_available():
-            free, total = torch.cuda.mem_get_info()
-            free_mb = free // (1024 * 1024)
-
-        # Read actual loaded model from model server instead of hardcoding
+        # ── Live model-server health (model, active adapter, VRAM, slots) ──
+        _mc_unreachable = False
         try:
             from core.inference.model_client import health as _mc_health
             _mh = _mc_health()
-            _model_label = _mh.get("model", "unknown")
-            if _mh.get("nemotron"):
-                _nmode = _mh.get("nemotron_mode", "ar")
-                _model_label = f"{_model_label} [Nemotron/{_nmode}]"
+            _mc_unreachable = not _mh or "error" in _mh
         except Exception:
+            _mh = {}
+            _mc_unreachable = True
+
+        _model_label = _mh.get("model", "unknown")
+        if _mh.get("nemotron"):
+            _nmode = _mh.get("nemotron_mode", "ar")
+            _model_label = f"{_model_label} [Nemotron/{_nmode}]"
+        if _mc_unreachable:
             _model_label = "unknown (model server unreachable)"
 
+        _adapter_label = _mh.get("adapter") or "(none)"
+        _main_loaded = _mh.get("main_model_loaded")
+        _drafter = "✅" if _mh.get("drafter_loaded") else "—"
+        _audio = "✅" if _mh.get("audio_capable") else "—"
+        _vram_free = _mh.get("vram_free_mb")
+        if _vram_free is None:
+            try:
+                import torch as _torch
+                if _torch.cuda.is_available():
+                    _free, _total = _torch.cuda.mem_get_info()
+                    _vram_free = _free // (1024 * 1024)
+            except Exception:
+                pass
+
+        # ── Effective serving route: local vs cloud (provider + model) ────
+        # get_provider() applies thermal fallback live, so this reflects what is
+        # ACTUALLY serving task_inference right now, not just the configured value.
+        _route_kind = "local"
+        _route_provider = "local"
+        _route_model = None
         try:
             from core.inference.provider import get_provider as _gp_s
-            _prov_label = _gp_s().get_provider("task_inference")
+            _prov = _gp_s()
+            _route_provider = _prov.get_provider("task_inference")
+            _route_model = _prov.get_model(_route_provider, "task_inference")
+            _route_kind = "local" if _route_provider == "local" else "cloud"
         except Exception:
-            _prov_label = "unknown"
+            _route_provider = "unknown"
+        _route_emoji = "💻" if _route_kind == "local" else "☁️"
+        if _route_kind == "local":
+            _route_line = f"Serving: {_route_emoji} local"
+        else:
+            _route_line = (f"Serving: {_route_emoji} cloud ({_route_provider})")
+            if _route_model:
+                _route_line += f"\nCloud model: {_route_model}"
+
+        # ── Evolution / finetune-gate state ──────────────────────────────
+        _gate_state = {}
+        try:
+            _gsf = Path.home() / ".kernel-evolving/workspace/data/finetune_gate_state.json"
+            if _gsf.exists():
+                _gate_state = json.loads(_gsf.read_text())
+        except Exception:
+            _gate_state = {}
+        _last_ft = (_gate_state.get("last_finetune_ts") or "never")[:16]
+
+        _traj_total = _traj_clean = None
+        try:
+            import sqlite3 as _sq
+            _db = Path.home() / ".kernel-evolving/workspace/data/evolution.db"
+            if _db.exists():
+                _con = _sq.connect(str(_db))
+                _traj_total = _con.execute("SELECT COUNT(*) FROM task_trajectories").fetchone()[0]
+                _traj_clean = _con.execute(
+                    "SELECT COUNT(*) FROM task_trajectories WHERE critic_score >= 0.7"
+                ).fetchone()[0]
+                _con.close()
+        except Exception:
+            pass
+
+        _gate_running = "✅"
+        try:
+            if subprocess.run(["systemctl", "--user", "is-active", "auto-finetune-gate.service"],
+                              capture_output=True, text=True).stdout.strip() != "active":
+                _gate_running = "⛔"
+        except Exception:
+            _gate_running = "?"
+
+        # ── Slots / replicas ─────────────────────────────────────────────
+        _slots = _mh.get("slots") or []
+        _slot_line = ", ".join(s.get("name", s) if isinstance(s, dict) else str(s) for s in _slots) or "—"
 
         update_note = f"\n🆕 Update available: {_latest_version}" if _latest_version and _latest_version != __version__ else ""
+        _loaded_txt = (f"\nModel loaded: {'✅' if _main_loaded else '⏳ lazy (first message loads it)'}")
+        _traj_line = (f"\nTrajectories: {_traj_total} total · {_traj_clean} clean (≥0.7)"
+                      if _traj_total is not None else "\nTrajectories: n/a")
+
         send_message(
             chat_id,
             (
                 f"🐬 *Kernel Evo Status*\n"
                 f"Version: v{__version__}{update_note}\n"
-                f"Model: {_model_label}\n"
-                f"Provider: {_prov_label}\n"
-                f"VRAM free: {free_mb}MB\n"
+                f"🧠 Model: {_model_label}{_loaded_txt}\n"
+                f"Adapter: {_adapter_label}\n"
+                f"{_route_line}\n"
+                f"VRAM free: {_vram_free}MB\n"
+                f"Drafter: {_drafter} · Audio: {_audio}\n"
+                f"Slots: {_slot_line}\n"
+                f"Gate: {_gate_running} · last fine-tune: {_last_ft}\n"
+                f"{_traj_line}\n"
                 f"Ready: {'✅' if _agent_ready else '⏳ loading on first message'}"
             ),
         )
@@ -3167,13 +3322,13 @@ def handle_message(chat_id: str, text: str, sender_name: str = "", photo_file_id
                 if _stream_char_count[0] >= _STREAM_EDIT_EVERY:
                     _stream_char_count[0] = 0
                     preview = _stream_buf[0]
-                    snippet = ("🔍 " + "\n\n".join(log_lines[-3:]) + f"\n\n✍️ {preview}"
-                               if log_lines else f"✍️ {preview}")
+                    snippet = ("🔍 " + "\n\n".join(log_lines[-3:]) + f"\n\n✍️ {_html(preview)}"
+                               if log_lines else f"✍️ {_html(preview)}")
                     if working_id[0]:
-                        edit_message(chat_id, working_id[0], snippet[:4000])
+                        edit_message(chat_id, working_id[0], snippet[:4000], parse_mode="HTML")
                     else:
                         # First output — create the message now, no prior placeholder
-                        working_id[0] = send_message(chat_id, snippet[:4000])
+                        working_id[0] = send_message(chat_id, snippet[:4000], parse_mode="HTML")
 
             def _step_cb(n, tool_name, args=None, result=None):
                 step_num[0] = n
@@ -3185,9 +3340,9 @@ def handle_message(chat_id: str, text: str, sender_name: str = "", photo_file_id
                 # Keep the last few steps so the message stays readable.
                 snippet = "🔍 " + "\n\n".join(log_lines[-4:])
                 if working_id[0]:
-                    edit_message(chat_id, working_id[0], snippet[:4000])
+                    edit_message(chat_id, working_id[0], snippet[:4000], parse_mode="HTML")
                 else:
-                    working_id[0] = send_message(chat_id, snippet[:4000])
+                    working_id[0] = send_message(chat_id, snippet[:4000], parse_mode="HTML")
 
             # Inject recent attachment context only when message references a file
             _triage_text = text
@@ -3200,7 +3355,7 @@ def handle_message(chat_id: str, text: str, sender_name: str = "", photo_file_id
                 "the one i sent", "what i sent", "that i sent",
             )
             if any(kw in _text_lower for kw in _ATT_REF_KEYWORDS):
-                _att_ctx = _memory_mod.attachment_context_block(chat_id=str(chat_id), limit=3)
+                _att_ctx = _memory_mod.attachment_context_block(chat_id=str(chat_id), limit=3, max_age_seconds=_ATTACHMENT_RECENCY_SECONDS)
             if _att_ctx:
                 _triage_text = f"{_att_ctx}\n\n{text}"
 
@@ -3209,7 +3364,7 @@ def handle_message(chat_id: str, text: str, sender_name: str = "", photo_file_id
             # --- Completion gates ---
             # 1. Attachment guard: if user referenced a file, did reply use it?
             if _att_ctx:
-                _guard = _memory_mod.attachment_guard(text, reply, chat_id=str(chat_id))
+                _guard = _memory_mod.attachment_guard(text, reply, chat_id=str(chat_id), max_age_seconds=_ATTACHMENT_RECENCY_SECONDS)
                 if not _guard["ok"]:
                     print(f"[bot] chat guard FAIL (retrying): {_guard['reason']}", flush=True)
                     _retry_text = (
@@ -3218,7 +3373,7 @@ def handle_message(chat_id: str, text: str, sender_name: str = "", photo_file_id
                         f"{text}"
                     )
                     reply = _agent_mod.triage(_retry_text, step_callback=_step_cb, chat_id=str(chat_id), chunk_callback=_chunk_cb)
-                    _guard2 = _memory_mod.attachment_guard(text, reply, chat_id=str(chat_id))
+                    _guard2 = _memory_mod.attachment_guard(text, reply, chat_id=str(chat_id), max_age_seconds=_ATTACHMENT_RECENCY_SECONDS)
                     if not _guard2["ok"]:
                         reply = reply + "\n\n⚠️ (Note: I may not have fully used your uploaded file — please confirm or re-ask if needed.)"
 
@@ -3263,19 +3418,22 @@ def handle_message(chat_id: str, text: str, sender_name: str = "", photo_file_id
                     "Check model/tool logs for this request and retry."
                 )
 
-        # Build final message: preserve all step logs then append final answer
+        # Build final message: preserve all step logs then append final answer.
+        # Escape dynamic content for Telegram HTML parse mode — legacy Markdown
+        # rejects unescaped `_`/`*`/backticks with a 400 "can't parse entities",
+        # which silently drops the final answer. HTML only needs < > & escaped.
         if log_lines:
-            _steps_section = "🔍 " + "\n\n".join(log_lines)
-            reply_text = f"{_steps_section}\n\n🐬 {_final_reply}"
+            _steps_section = "🔍 " + "\n\n".join(_html(l) for l in log_lines)
+            reply_text = f"{_steps_section}\n\n🐬 {_html(_final_reply)}"
         else:
-            reply_text = f"🐬 {_final_reply}"
+            reply_text = f"🐬 {_html(_final_reply)}"
         # Telegram hard limit is 4096 chars; truncate from beginning to keep final answer
         if len(reply_text) > 4000:
             reply_text = "…" + reply_text[-3998:]
-        if working_id[0] and not edit_message(chat_id, working_id[0], reply_text):
-            send_message(chat_id, reply_text)
+        if working_id[0] and not edit_message(chat_id, working_id[0], reply_text, parse_mode="HTML"):
+            send_message(chat_id, reply_text, parse_mode="HTML")
         elif not working_id[0]:
-            send_message(chat_id, reply_text)
+            send_message(chat_id, reply_text, parse_mode="HTML")
     except Exception as e:
         print(f"[bot] ERROR in infer: {e}", flush=True)
         err_text = f"🐬 Error: {str(e)[:200]}"
@@ -3519,9 +3677,43 @@ def start_bot_thread():
 
 OFFSET_FILE = "/tmp/kernel_evolving_telegram_offset"
 
+# Poll loop resilience and lightweight telemetry
+_POLL_BACKOFF_BASE_SECONDS = float(os.environ.get("KERNEL_EVO_POLL_BACKOFF_BASE_SECONDS", "5"))
+_POLL_BACKOFF_MAX_SECONDS = float(os.environ.get("KERNEL_EVO_POLL_BACKOFF_MAX_SECONDS", "60"))
+_POLL_BACKOFF_DNS_MULTIPLIER = float(os.environ.get("KERNEL_EVO_POLL_BACKOFF_DNS_MULTIPLIER", "2"))
+_POLL_BACKOFF_JITTER_MAX_SECONDS = float(os.environ.get("KERNEL_EVO_POLL_BACKOFF_JITTER_MAX_SECONDS", "1"))
+_POLL_FAILURES_TOTAL = 0
+_POLL_DNS_FAILURES_TOTAL = 0
+_POLL_LAST_SUCCESS_EPOCH = 0.0
+
+
+def _is_dns_resolution_error(exc: Exception) -> bool:
+    """Best-effort classifier for DNS resolution failures from requests/urllib."""
+    text = str(exc)
+    return (
+        "NameResolutionError" in text
+        or "Failed to resolve" in text
+        or "Temporary failure in name resolution" in text
+    )
+
+
+def _compute_poll_backoff_seconds(failure_streak: int, dns_failure: bool = False, jitter_seconds: float | None = None) -> float:
+    """Exponential backoff with optional DNS multiplier and bounded jitter."""
+    if failure_streak <= 0:
+        return 0.0
+    delay = _POLL_BACKOFF_BASE_SECONDS * (2 ** (failure_streak - 1))
+    if dns_failure:
+        delay *= _POLL_BACKOFF_DNS_MULTIPLIER
+    delay = min(_POLL_BACKOFF_MAX_SECONDS, delay)
+    if jitter_seconds is None:
+        jitter_seconds = random.uniform(0, _POLL_BACKOFF_JITTER_MAX_SECONDS)
+    return min(_POLL_BACKOFF_MAX_SECONDS, delay + max(0.0, jitter_seconds))
+
 
 def poll():
     """Long-poll Telegram for updates."""
+    global _POLL_FAILURES_TOTAL, _POLL_DNS_FAILURES_TOTAL, _POLL_LAST_SUCCESS_EPOCH
+
     # Restore offset from last run so we don't replay already-seen updates
     offset = None
     try:
@@ -3532,7 +3724,10 @@ def poll():
         pass
     print(f"[bot] Kernel Telegram bot starting...")
 
+    failure_streak = 0
+
     while True:
+        poll_started = time.monotonic()
         try:
             # Telegram expects allowed_updates as a JSON-encoded array, not repeated query params.
             # If encoded incorrectly, normal messages may work while callback_query updates never arrive.
@@ -3542,8 +3737,19 @@ def poll():
 
             resp = requests.get(f"{API_BASE}/getUpdates", params=params, timeout=35)
             data = resp.json()
+            updates = data.get("result", [])
+            latency_ms = int((time.monotonic() - poll_started) * 1000)
 
-            for update in data.get("result", []):
+            _POLL_LAST_SUCCESS_EPOCH = time.time()
+            if failure_streak > 0:
+                print(
+                    f"[bot] Poll recovered after {failure_streak} failure(s): "
+                    f"latency_ms={latency_ms} updates={len(updates)}"
+                )
+            failure_streak = 0
+            print(f"[bot] Poll ok: latency_ms={latency_ms} updates={len(updates)}", flush=True)
+
+            for update in updates:
                 offset = update["update_id"] + 1
                 # Persist offset so restarts don't replay seen updates
                 try:
@@ -3610,8 +3816,19 @@ def poll():
             print("[bot] Stopped.")
             break
         except Exception as e:
-            print(f"[bot] Poll error: {e}")
-            time.sleep(5)
+            failure_streak += 1
+            _POLL_FAILURES_TOTAL += 1
+            dns_failure = _is_dns_resolution_error(e)
+            if dns_failure:
+                _POLL_DNS_FAILURES_TOTAL += 1
+            backoff = _compute_poll_backoff_seconds(failure_streak, dns_failure=dns_failure)
+            print(
+                f"[bot] Poll error: type={type(e).__name__} dns={dns_failure} "
+                f"streak={failure_streak} backoff_s={backoff:.1f} "
+                f"dns_failures_total={_POLL_DNS_FAILURES_TOTAL} err={e}",
+                flush=True,
+            )
+            time.sleep(backoff)
 
 
 if __name__ == "__main__":

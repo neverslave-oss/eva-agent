@@ -21,7 +21,14 @@ def sanitize_text(val: str) -> str:
         return val
     val = val.strip()
     if "\n" in val:
-        val = [p.strip() for p in val.split("\n") if p.strip() and not p.strip().endswith(">")][-1]
+        # Keep the last line that has real content and isn't a leaked XML/`>`
+        # closing remnant. Guard against a value whose *every* line is filtered
+        # out (all end with '>' or all blank) — previously `[...][-1]` blew up
+        # with IndexError. Fall back to the raw (stripped) value in that case so
+        # the tool loop never crashes on a malformed arg.
+        _lines = [p.strip() for p in val.split("\n") if p.strip() and not p.strip().endswith(">")]
+        if _lines:
+            val = _lines[-1]
     val = val.lstrip(">").lstrip("\n").rstrip("<")
     return val
 
@@ -98,3 +105,66 @@ def rewrite_date_tokens(text: str) -> str:
     """
     today = datetime.now().strftime("%Y-%m-%d")
     return text.replace("$(date +%Y-%m-%d)", today)
+
+
+def get_tool_schema(tool_name: str) -> dict | None:
+    """Return the tool's JSON-Schema parameters block, or None if unknown."""
+    try:
+        from core.tools import TOOLS
+        for t in TOOLS:
+            fn = t.get("function", {})
+            if fn.get("name") == tool_name:
+                return fn.get("parameters") or {}
+    except Exception:
+        return None
+    return None
+
+
+def validate_tool_args(tool_name: str, args: dict) -> list:
+    """Validate args against the real tool schema (T1 in the critique design).
+
+    Returns a list of problem descriptors (strings). Empty list == schema-valid.
+    Checks:
+      - every schema-required key present and non-empty
+      - value type matches the schema (string/integer/number/boolean/array)
+
+    A schema-required key with a missing or empty value is a hard problem
+    (the call will fail). A type mismatch is also a problem. Optional keys are
+    never required.
+    """
+    if not isinstance(args, dict):
+        return [f"args must be an object for {tool_name}, got {type(args).__name__}"]
+    schema = get_tool_schema(tool_name)
+    if not schema:
+        # Unknown tool — can't validate. Treat as no problems (fail open).
+        return []
+    props = schema.get("properties", {}) or {}
+    required = schema.get("required", []) or []
+    problems = []
+    # Presence: every schema-required key must be present and non-empty.
+    for key in required:
+        val = args.get(key)
+        if val is None or (isinstance(val, str) and not val.strip()):
+            problems.append(f"missing required key '{key}'")
+    # Types: validate EVERY present key against its schema type (optional too),
+    # so a wrong-typed optional arg (e.g. max_steps="15") is still caught.
+    for key, val in args.items():
+        if val is None:
+            continue
+        prop = props.get(key, {})
+        ptype = prop.get("type")
+        if not ptype:
+            continue
+        if ptype == "string" and not isinstance(val, str):
+            problems.append(f"key '{key}' should be string, got {type(val).__name__}")
+        elif ptype == "integer" and isinstance(val, bool):
+            problems.append(f"key '{key}' should be integer, got bool")
+        elif ptype == "integer" and not isinstance(val, int):
+            problems.append(f"key '{key}' should be integer, got {type(val).__name__}")
+        elif ptype == "number" and not isinstance(val, (int, float)):
+            problems.append(f"key '{key}' should be number, got {type(val).__name__}")
+        elif ptype == "boolean" and not isinstance(val, bool):
+            problems.append(f"key '{key}' should be boolean, got {type(val).__name__}")
+        elif ptype == "array" and not isinstance(val, list):
+            problems.append(f"key '{key}' should be array, got {type(val).__name__}")
+    return problems

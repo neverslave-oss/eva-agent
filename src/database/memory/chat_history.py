@@ -166,6 +166,28 @@ class ChatHistoryRepository(BaseRepository):
             ).fetchall()
         return [{"role": r["role"], "content": r["content"]} for r in rows]
 
+    def list_sessions(self, limit: int = 100) -> list[dict]:
+        """Return persisted sessions, newest first, for the sessions switcher.
+
+        The messages table is the source of truth for conversation history;
+        sessions rows with a non-zero message_count are the real conversations.
+        Returns the same shape (id, chat_id, title, created_at, updated_at) that
+        the previous ConversationsRepository exposed, so the /api/sessions JSON
+        contract is unchanged.
+        """
+        safe_limit = max(1, min(int(limit or 100), 500))
+        with self.connection() as conn:
+            rows = conn.execute(
+                """SELECT id, chat_id,
+                            COALESCE(NULLIF(summary, ''), id) AS title,
+                            created_at, updated_at, message_count
+                    FROM sessions
+                    ORDER BY updated_at DESC
+                    LIMIT ?""",
+                (safe_limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     # ── message helpers ───────────────────────────────────────────────────────
 
     def append_messages(self, messages: list[dict], session_id: str,

@@ -1,0 +1,7 @@
+{
+  "allow_actions": ["observe", "click", "double_click", "type", "hotkey", "navigate", "scroll", "wait", "assert_text", "assert_url", "upload", "submit", "done", "abort"],
+  "deny_actions": ["delete", "purchase", "send_money"],
+  "browser_domain_allowlist": [],
+  "desktop_app_allowlist": [],
+  "require_checkpoint_for": ["submit"]
+}

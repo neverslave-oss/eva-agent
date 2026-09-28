@@ -138,7 +138,7 @@ thinking:
 self_identity:
   role: agent
   codename: kernel-evolving
-  version_tag: v1.18.5-evolving
+  version_tag: v1.1.0
 
 goal_discovery:
   boot_pattern_cap: 3

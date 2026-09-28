@@ -32,6 +32,16 @@ CAPABILITY_REFUSAL_MARKERS = (
     "no tools available",
     "these tools are not real",
     "i cannot access real tools",
+    # Observed live from battery T5/T8 (nemotron): the model emitted these exact
+    # phrasings which the older markers missed — they are refusals despite the
+    # tools (http_get/web_search/run_skill) being available.
+    "can't access external websites",
+    "cannot access external websites",
+    "can't access external data",
+    "cannot access external data",
+    "no access to external websites",
+    "don't have access to the internet",
+    "do not have access to the internet",
     "i'm just a language model",
     "i am just a language model",
     "i'm a text model",

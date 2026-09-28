@@ -25,7 +25,7 @@ self_identity:
     reflects during idle time, verifies before acquiring, decomposes multi-step tasks
     via micro-planner.
   role: agent
-  version_tag: v1.18.5-evolving
+  version_tag: v1.1.0
 
 
 paths:
@@ -178,6 +178,7 @@ providers:
     openai: gpt-5.4
     openrouter: deepseek-ai/DeepSeek-V4-Flash-0731
     openrouter_tool: openrouter/auto
+    doubleword: deepseek-ai/DeepSeek-V4-Flash-0731
   planning: hf
   streaming:
     enabled: true

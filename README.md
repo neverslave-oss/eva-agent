@@ -2,12 +2,12 @@
 
 > A self-evolving, local-first AI agent with autonomous skill acquisition, Think-at-Rest idle reflection, multi-provider inference, and a Telegram-native control plane.
 
-![version](https://img.shields.io/badge/version-v1.0.0-purple)
+![version](https://img.shields.io/badge/version-v1.1.0-purple)
 ![status](https://img.shields.io/badge/status-active-green)
 ![python](https://img.shields.io/badge/python-3.11%2B-blue)
 [![Hippocratic License HL3-LAW-MIL-SV](https://img.shields.io/static/v1?label=Hippocratic%20License&message=HL3-LAW-MIL-SV&labelColor=5e2751&color=bc8c3d)](https://firstdonoharm.dev/version/3/0/law-mil-sv.html)
 
-> **v1.0.0 — open-source release.** Machine-specific paths, credentials, and
+> **v1.1.0 — open-source release.** Machine-specific paths, credentials, and
 > internal working notes have been removed and replaced with environment
 > variables (see `.env.example`). This is the open-source build of the
 > **EVA** agent — see the [OSS repository](https://github.com/neverslave-oss/eva-agent)

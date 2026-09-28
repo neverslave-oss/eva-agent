@@ -2,7 +2,11 @@
 provider.py — ADR-013: Multi-provider inference wrapper.
 
 Routes infer() and infer_with_tools() calls to configured provider per call type.
-Providers: local (Gemma 4 via model_server), openai, anthropic, hf, copilot, olly (OpenClaw/claude-sonnet-4.6)
+Providers: local (Gemma 4 via model_server), openai, anthropic, hf, copilot, openrouter, doubleword, olly (OpenClaw/claude-sonnet-4.6)
+
+Doubleword (https://api.doubleword.ai/v1) is an OpenAI-compatible async/real-time
+inference provider that can be far cheaper than real-time endpoints for batch/async
+work (see https://doubleword.ai/use-cases/openclaw). Config key: DOUBLEWORD_API_KEY.
 
 Local-first routing:
   - Primary: local Gemma 4 E2B-it via model_server socket.
@@ -24,6 +28,17 @@ from core.tools import WORKSPACE as _DEFAULT_WORKSPACE
 from core.voice_activity import is_voice_active
 
 logger = logging.getLogger(__name__)
+
+
+# ── HF Router request tuning ────────────────────────────────────────────────
+# The HF Router (router.huggingface.co) occasionally hangs on a chat/completions
+# call. A long timeout (previously fixed 120s) blocks the tool loop for minutes
+# before falling back to local, making tasks feel very slow. These are
+# configurable via env:
+#   HF_TIMEOUT  — per-request timeout in seconds (default 45)
+#   HF_RETRIES  — how many times to retry a timed-out request (default 2)
+_HF_TIMEOUT = int(os.environ.get("HF_TIMEOUT", "45"))
+_HF_RETRIES = int(os.environ.get("HF_RETRIES", "2"))
 
 
 # ── GPU temperature monitor ────────────────────────────────────────────────────────
@@ -57,11 +72,19 @@ class InferenceProvider:
         self._models = self._cfg.get("models", {})
         # Build routing dict: call_type -> provider name
         self._routing = {}
-        for call_type in ("task_inference", "synthesis", "critic", "planning", "trajectory_teacher"):
+        for call_type in ("task_inference", "synthesis", "critic", "planning", "trajectory_teacher", "computer_use"):
             val = self._cfg.get(call_type)
             if val:
                 self._routing[call_type] = val
         self._streaming = self._cfg.get("streaming", {})
+        # Call types that use Doubleword's async flex tier (service_tier="flex",
+        # ~50% cheaper than realtime) — for latency-insensitive background work
+        # (synthesis, planning, critic, trajectory, cron). Interactive task_inference
+        # stays on realtime. Overridable via providers.doubleword_async_call_types.
+        self._doubleword_async_call_types = set(self._cfg.get(
+            "doubleword_async_call_types",
+            ["synthesis", "planning", "critic", "trajectory_teacher"],
+        ))
         # Thermal fallback config
         self._temp_critical = int(self._cfg.get("gpu_temp_critical_c", 85))
         self._temp_resume = int(self._cfg.get("gpu_temp_resume_c", 70))
@@ -116,7 +139,11 @@ class InferenceProvider:
         """Route a standard (non-tool) inference call with ordered fallback chain."""
         provider = self.get_provider(call_type)
         # Build fallback chain: primary first, then all others in priority order, excluding primary
-        _CHAIN = ["local", "openai", "anthropic", "openrouter", "copilot", "hf"]
+        _CHAIN = ["local", "openai", "anthropic", "openrouter", "copilot", "hf", "doubleword"]
+        # computer_use must use the configured cloud provider (vision/inference) —
+        # never fall back to the local model (GPU-full/OOM poisons the chain).
+        if call_type == "computer_use":
+            _CHAIN = [p for p in _CHAIN if p != "local"]
         chain = [provider] + [p for p in _CHAIN if p != provider]
         # Skip cloud providers without API keys — faster than waiting for network timeout
         _keyless = {
@@ -125,6 +152,7 @@ class InferenceProvider:
             "openrouter": os.environ.get("OPENROUTER_API_KEY"),
             "hf": os.environ.get("HF_TOKEN"),
             "copilot": (os.environ.get("GITHUB_COPILOT_TOKEN") or os.environ.get("GITHUB_TOKEN")),
+            "doubleword": os.environ.get("DOUBLEWORD_API_KEY"),
         }
         last_err = ""
         for p in chain:
@@ -153,9 +181,15 @@ class InferenceProvider:
                 elif p == "openrouter":
                     return self._call_openrouter(messages, model)
                 elif p == "hf":
-                    return self._call_hf(messages, model)
+                    return self._call_hf(messages, model, call_type)
                 elif p == "copilot":
                     return self._call_copilot(messages, model)
+                elif p == "doubleword":
+                    # Sync/background split: latency-insensitive call types go through
+                    # the async flex tier (cheaper); interactive task_inference stays realtime.
+                    if call_type in self._doubleword_async_call_types:
+                        return self._call_doubleword_async(messages, model)
+                    return self._call_doubleword(messages, model)
                 else:
                     continue
             except Exception as e:
@@ -175,7 +209,11 @@ class InferenceProvider:
         loops execute tools in-process here, where the module global already works.
         """
         provider = self.get_provider(call_type)
-        _CHAIN = ["local", "openai", "anthropic", "openrouter", "copilot", "hf"]
+        _CHAIN = ["local", "openai", "anthropic", "openrouter", "copilot", "hf", "doubleword"]
+        # computer_use must use the configured cloud provider (vision/inference) —
+        # never fall back to the local model (GPU-full/OOM poisons the chain).
+        if call_type == "computer_use":
+            _CHAIN = [p for p in _CHAIN if p != "local"]
         chain = [provider] + [p for p in _CHAIN if p != provider]
         # Skip cloud providers without API keys — faster than waiting for network timeout
         _keyless = {
@@ -184,6 +222,7 @@ class InferenceProvider:
             "openrouter": os.environ.get("OPENROUTER_API_KEY"),
             "hf": os.environ.get("HF_TOKEN"),
             "copilot": (os.environ.get("GITHUB_COPILOT_TOKEN") or os.environ.get("GITHUB_TOKEN")),
+            "doubleword": os.environ.get("DOUBLEWORD_API_KEY"),
         }
         last_err = ""
         for p in chain:
@@ -209,7 +248,7 @@ class InferenceProvider:
                         logger.warning(f"[provider] local infer_with_tools returned error — trying next in chain: {result[:120]}")
                         continue
                     return result
-                elif p in ("openai", "copilot", "openrouter"):
+                elif p in ("openai", "copilot", "openrouter", "doubleword"):
                     return self._openai_tool_loop(messages, tools, workspace, max_steps, step_callback, model, p, chunk_callback=chunk_callback)
                 elif p == "anthropic":
                     return self._anthropic_tool_loop(messages, tools, workspace, max_steps, step_callback, model)
@@ -269,16 +308,20 @@ class InferenceProvider:
         data = json.loads(resp.read())
         return data["content"][0]["text"]
 
-    def _hf_router_provider(self) -> str:
+    def _hf_router_provider(self, call_type: str | None = None) -> str:
         """Resolve the Hugging Face Router inference-provider name.
 
         The HF OpenAI-compatible endpoint is https://router.huggingface.co/v1 with
         the provider selected by a ":{provider}" suffix on the model id, e.g.
         "deepseek-ai/DeepSeek-V4-Flash-0731:deepinfra". Providers: deepinfra,
         together, novita, fireworks-ai, hf-inference, ... Not every provider serves
-        every model. Priority: env HF_ROUTER_PROVIDER -> config providers.hf_provider
-        -> 'deepinfra' (cheapest).
+        every model. Priority: per-call-type override (hf_provider_overrides) -> env
+        HF_ROUTER_PROVIDER -> config providers.hf_provider -> 'deepinfra' (cheapest).
         """
+        if call_type:
+            overrides = self._cfg.get("hf_provider_overrides", {})
+            if overrides.get(call_type):
+                return str(overrides[call_type]).strip().rstrip("/")
         env_val = os.environ.get("HF_ROUTER_PROVIDER")
         if env_val:
             return env_val.strip().rstrip("/")
@@ -287,9 +330,9 @@ class InferenceProvider:
             return str(cfg_val).strip().rstrip("/")
         return "deepinfra"
 
-    def _hf_model(self, model: str) -> str:
+    def _hf_model(self, model: str, call_type: str | None = None) -> str:
         """Append the ":{provider}" suffix to the model id for the HF Router."""
-        provider = self._hf_router_provider()
+        provider = self._hf_router_provider(call_type)
         if provider and not model.endswith(f":{provider}"):
             return f"{model}:{provider}"
         return model
@@ -298,29 +341,65 @@ class InferenceProvider:
         """Return the HF Router OpenAI-compatible base URL (router root)."""
         return "https://router.huggingface.co/v1"
 
-    def _call_hf(self, messages: list, model: str | None) -> str:
+    def _hf_post(self, payload: dict, timeout: int | None = None) -> dict:
+        """POST to the HF Router chat/completions with retry on timeout.
+
+        The HF Router occasionally hangs on a request (no response until the
+        client timeout). Instead of blocking the tool loop for up to 120s and
+        then falling back to local, we use a shorter per-attempt timeout and
+        retry a few times for transient network blips. Only after the retries
+        are exhausted do we raise, letting the caller fall through the chain.
+
+        Args:
+            payload: the JSON body to send.
+            timeout: per-attempt timeout in seconds (default _HF_TIMEOUT).
+        Returns:
+            The parsed JSON response dict.
+
+        Raises:
+            RuntimeError if the request ultimately fails after retries.
+        """
         api_key = os.environ.get("HF_TOKEN")
         if not api_key:
             raise RuntimeError("No HF_TOKEN")
-        if not model:
-            raise RuntimeError("No HF model configured")
-        payload = json.dumps({
-            "model": self._hf_model(model),
-            "messages": messages,
-            "max_tokens": 8192,
-        }).encode()
+        timeout = timeout or _HF_TIMEOUT
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",
             # urllib's default User-Agent is blocked by the HF Router (403); send a real one.
             "User-Agent": "kernel-evolving/1.0",
         }
-        req = urllib.request.Request(
-            f"{self._hf_base_url()}/chat/completions",
-            data=payload, headers=headers, method="POST"
-        )
-        resp = urllib.request.urlopen(req, timeout=120)
-        data = json.loads(resp.read())
+        body = json.dumps(payload).encode()
+        last_err = None
+        for attempt in range(1, _HF_RETRIES + 1):
+            try:
+                req = urllib.request.Request(
+                    f"{self._hf_base_url()}/chat/completions",
+                    data=body, headers=headers, method="POST"
+                )
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    return json.loads(resp.read())
+            except (urllib.error.URLError, TimeoutError, OSError) as e:
+                last_err = e
+                logger.warning(
+                    "[provider] HF Router attempt %d/%d failed (timeout=%ss): %s",
+                    attempt, _HF_RETRIES, timeout, str(e)[:120],
+                )
+                if attempt < _HF_RETRIES:
+                    time.sleep(1)  # brief backoff between retries
+        raise RuntimeError(f"HF Router request failed after {_HF_RETRIES} attempts: {last_err}")
+
+    def _call_hf(self, messages: list, model: str | None, call_type: str | None = None) -> str:
+        api_key = os.environ.get("HF_TOKEN")
+        if not api_key:
+            raise RuntimeError("No HF_TOKEN")
+        if not model:
+            raise RuntimeError("No HF model configured")
+        data = self._hf_post({
+            "model": self._hf_model(model, call_type),
+            "messages": messages,
+            "max_tokens": 8192,
+        })
         return data["choices"][0]["message"]["content"]
 
     def _call_copilot(self, messages: list, model: str | None) -> str:
@@ -345,6 +424,108 @@ class InferenceProvider:
         resp = urllib.request.urlopen(req, timeout=120)
         data = json.loads(resp.read())
         return data["choices"][0]["message"]["content"]
+
+    def _call_doubleword(self, messages: list, model: str | None) -> str:
+        """Doubleword API — OpenAI-compatible endpoint (https://api.doubleword.ai/v1).
+
+        Doubleword offers a cheaper async/batch inference tier for background,
+        latency-insensitive work (see doubleword.ai/use-cases/openclaw). This is the
+        real-time chat/completions path, driven by DOUBLEWORD_API_KEY.
+        """
+        api_key = os.environ.get("DOUBLEWORD_API_KEY")
+        if not api_key:
+            raise RuntimeError("No DOUBLEWORD_API_KEY")
+        resolved_model = model or "deepseek-ai/DeepSeek-V4-Flash-0731"
+        payload = json.dumps({
+            "model": resolved_model,
+            "messages": messages,
+            "max_tokens": 4096,
+        }).encode()
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        }
+        req = urllib.request.Request(
+            "https://api.doubleword.ai/v1/chat/completions",
+            data=payload, headers=headers, method="POST"
+        )
+        resp = urllib.request.urlopen(req, timeout=120)
+        data = json.loads(resp.read())
+        return data["choices"][0]["message"]["content"]
+
+    def _call_doubleword_async(self, messages: list, model: str | None,
+                               max_output_tokens: int = 4096,
+                               poll_interval_s: float = 2.0,
+                               poll_timeout_s: float = 600.0) -> str:
+        """Doubleword async flex tier — Responses API (service_tier="flex", background).
+
+        ~50% cheaper than realtime for latency-insensitive work (synthesis, planning,
+        critic, trajectory, cron). Flex waits up to ~1 min to start processing, so this
+        is only used for background call types gated by self._doubleword_async_call_types;
+        interactive task_inference stays on the realtime path (_call_doubleword).
+
+        Flow: POST /responses {service_tier: flex, background: true} → poll
+        GET /responses/{id} until completed → extract output_text from the message item.
+        """
+        api_key = os.environ.get("DOUBLEWORD_API_KEY")
+        if not api_key:
+            raise RuntimeError("No DOUBLEWORD_API_KEY")
+        resolved_model = model or "deepseek-ai/DeepSeek-V4-Flash-0731"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        }
+        payload = json.dumps({
+            "model": resolved_model,
+            "input": messages,
+            "service_tier": "flex",
+            "background": True,
+            "max_output_tokens": max_output_tokens,
+        }).encode()
+        req = urllib.request.Request(
+            "https://api.doubleword.ai/v1/responses",
+            data=payload, headers=headers, method="POST"
+        )
+        try:
+            resp = urllib.request.urlopen(req, timeout=60)
+        except urllib.error.HTTPError as e:
+            logger.error(f"[provider] doubleword async submit HTTP {e.code}: {e.read(500)[:400]}")
+            raise
+        data = json.loads(resp.read())
+        resp_id = data.get("id")
+        if not resp_id:
+            raise RuntimeError("doubleword async: no response id returned")
+
+        # Poll until completed / failed / error / cancelled
+        deadline = time.monotonic() + poll_timeout_s
+        status = None
+        d = {}
+        while True:
+            time.sleep(poll_interval_s)
+            get_req = urllib.request.Request(
+                f"https://api.doubleword.ai/v1/responses/{resp_id}", headers=headers
+            )
+            d = json.loads(urllib.request.urlopen(get_req, timeout=30).read())
+            status = d.get("status")
+            if status in ("completed", "failed", "error", "cancelled"):
+                break
+            if time.monotonic() >= deadline:
+                logger.warning(f"[provider] doubleword async timed out after {poll_timeout_s}s (status {status})")
+                raise RuntimeError(f"doubleword async timeout (status={status})")
+
+        if status != "completed":
+            raise RuntimeError(f"doubleword async failed (status={status})")
+
+        # Extract text from output items (type "message" → content[*].text where type output_text)
+        texts = []
+        for item in (d.get("output") or []):
+            if item.get("type") == "message":
+                for c in (item.get("content") or []):
+                    if c.get("type") == "output_text" and c.get("text"):
+                        texts.append(c["text"])
+        if not texts:
+            raise RuntimeError("doubleword async: completed but no output_text found")
+        return "\n".join(texts)
 
     def _call_openrouter(self, messages: list, model: str | None) -> str:
         """OpenRouter API — OpenAI-compatible endpoint with model routing."""
@@ -381,6 +562,8 @@ class InferenceProvider:
             api_key = os.environ.get("GITHUB_TOKEN")
         if provider == "openrouter":
             api_key = os.environ.get("OPENROUTER_API_KEY")
+        if provider == "doubleword":
+            api_key = os.environ.get("DOUBLEWORD_API_KEY")
         if not api_key:
             raise RuntimeError(f"No API key for {provider}")
 
@@ -390,6 +573,8 @@ class InferenceProvider:
             base_url = "https://api.githubcopilot.com"
         elif provider == "openrouter":
             base_url = "https://openrouter.ai/api/v1"
+        elif provider == "doubleword":
+            base_url = "https://api.doubleword.ai/v1"
         else:
             base_url = "https://api.openai.com/v1"
         workspace = os.path.expanduser(workspace)
@@ -633,25 +818,13 @@ class InferenceProvider:
         current_messages = list(messages)
 
         for step in range(max_steps):
-            payload = json.dumps({
+            data = self._hf_post({
                 "model": self._hf_model(model),
                 "messages": current_messages,
                 "tools": tools,
                 "tool_choice": "auto",
                 "max_tokens": 8192,
-            }).encode()
-            headers = {
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}",
-                # urllib's default User-Agent is blocked by the HF Router (403); send a real one.
-                "User-Agent": "kernel-evolving/1.0",
-            }
-            req = urllib.request.Request(
-                f"{self._hf_base_url()}/chat/completions",
-                data=payload, headers=headers, method="POST"
-            )
-            resp = urllib.request.urlopen(req, timeout=120)
-            data = json.loads(resp.read())
+            })
             choice = data["choices"][0]
             msg = choice["message"]
 

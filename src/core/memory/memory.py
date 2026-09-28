@@ -462,18 +462,44 @@ def record_attachment(
     )
 
 
-def recent_attachments(limit: int = 5, chat_id: str = "") -> list[dict]:
-    """Return the most recent attachment records, optionally filtered by chat."""
+def recent_attachments(limit: int = 5, chat_id: str = "", max_age_seconds: int | None = None) -> list[dict]:
+    """Return the most recent attachment records, optionally filtered by chat.
+
+    max_age_seconds: if set, only attachments created within this window are
+    returned. Stale attachments (e.g. a photo uploaded days ago) are excluded so
+    they are never surfaced as "recent" context for a later turn.
+    """
     try:
-        return _get_repo().recent_attachments(chat_id=chat_id, limit=limit)
+        atts = _get_repo().recent_attachments(chat_id=chat_id, limit=limit)
     except Exception as e:
         print(f"[memory] recent_attachments failed: {e}")
         return []
+    if max_age_seconds is None:
+        return atts
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    cutoff = now.timestamp() - max_age_seconds
+    filtered = []
+    for a in atts:
+        created = a.get("created_at", "")
+        try:
+            ts = datetime.fromisoformat(created).timestamp()
+        except Exception:
+            # Unparseable timestamp: keep it (cannot prove staleness).
+            filtered.append(a)
+            continue
+        if ts >= cutoff:
+            filtered.append(a)
+    return filtered
 
 
-def attachment_context_block(chat_id: str = "", limit: int = 3) -> str:
-    """Build a compact context string listing recent attachments for prompt injection."""
-    atts = recent_attachments(limit=limit, chat_id=chat_id)
+def attachment_context_block(chat_id: str = "", limit: int = 3, max_age_seconds: int | None = None) -> str:
+    """Build a compact context string listing recent attachments for prompt injection.
+
+    max_age_seconds: if set, only attachments created within this window are
+    listed, so stale attachments are not injected as if freshly uploaded.
+    """
+    atts = recent_attachments(limit=limit, chat_id=chat_id, max_age_seconds=max_age_seconds)
     if not atts:
         return ""
     lines = ["Recent uploaded files (most recent first):"]
@@ -497,7 +523,7 @@ _ATTACHMENT_KEYWORDS = (
 )
 
 
-def attachment_guard(user_text: str, reply_text: str, chat_id: str = "") -> dict:
+def attachment_guard(user_text: str, reply_text: str, chat_id: str = "", max_age_seconds: int | None = None) -> dict:
     """Lightweight guard: checks whether the reply likely addressed a recent attachment.
 
     Returns:
@@ -509,7 +535,7 @@ def attachment_guard(user_text: str, reply_text: str, chat_id: str = "") -> dict
     if not any(kw in user_lower for kw in _ATTACHMENT_KEYWORDS):
         return {"ok": True}
 
-    atts = recent_attachments(limit=3, chat_id=chat_id)
+    atts = recent_attachments(limit=3, chat_id=chat_id, max_age_seconds=max_age_seconds)
     if not atts:
         return {"ok": True}
 

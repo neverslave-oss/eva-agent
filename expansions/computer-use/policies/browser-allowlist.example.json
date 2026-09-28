@@ -1,0 +1,6 @@
+{
+  "browser_domain_allowlist": [
+    "localhost",
+    "docs.openclaw.ai"
+  ]
+}
