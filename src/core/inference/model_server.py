@@ -59,37 +59,6 @@ _DEBUG_TWO_STAGE = os.environ.get("KERNEL_EVO_DEBUG_TWO_STAGE", "0") == "1"
 # Resolved from runtime_paths canonical location, overridable via env.
 _ACTIVITY_PATH = str(_MODEL_ACTIVITY_PATH_IMPORT)
 
-def _mark_activity_start():
-    try:
-        import os, json
-        os.makedirs(os.path.dirname(_ACTIVITY_PATH), exist_ok=True)
-        try:
-            with open(_ACTIVITY_PATH) as f:
-                data = json.load(f)
-        except Exception:
-            data = {}
-        data["in_flight"] = int(data.get("in_flight", 0)) + 1
-        data["last_start_ts"] = time.time()
-        with open(_ACTIVITY_PATH, "w") as fw:
-            json.dump(data, fw)
-    except Exception:
-        pass
-
-def _mark_activity_end():
-    try:
-        import os, json
-        try:
-            with open(_ACTIVITY_PATH) as f:
-                data = json.load(f)
-        except Exception:
-            data = {}
-        data["in_flight"] = max(0, int(data.get("in_flight", 0)) - 1)
-        data["last_end_ts"] = time.time()
-        with open(_ACTIVITY_PATH, "w") as fw:
-            json.dump(data, fw)
-    except Exception:
-        pass
-
 # SlotRegistry — imported lazily to avoid circular import; None until wired
 try:
     from model_slots import SlotRegistry, SlotSpec, SlotState  # type: ignore
@@ -119,6 +88,22 @@ from .model_names import (  # noqa: E402
     is_peft_model as _is_peft_model,
     friendly_model_name as _friendly_model_name,
 )
+
+# Activity-file tracking + log preview moved to activity.py (leaf).
+from .activity import (  # noqa: E402
+    mark_activity_start as _mark_activity_start_impl,
+    mark_activity_end as _mark_activity_end_impl,
+    preview_payload_for_log as _preview_payload_for_log,
+)
+
+
+def _mark_activity_start():
+    _mark_activity_start_impl(_ACTIVITY_PATH)
+
+
+def _mark_activity_end():
+    _mark_activity_end_impl(_ACTIVITY_PATH)
+
 
 # ---------------------------------------------------------------------------
 # vLLM engine (main chat model)
@@ -3541,14 +3526,6 @@ def _handle_infer_draft(params: dict) -> dict:
 # ---------------------------------------------------------------------------
 # Socket server
 # ---------------------------------------------------------------------------
-
-def _preview_payload_for_log(payload) -> str:
-    """Return full, pretty-formatted JSON for readable server logs."""
-    try:
-        text = json.dumps(payload, ensure_ascii=False, indent=2)
-    except Exception:
-        text = repr(payload)
-    return text
 
 class _RequestHandler(socketserver.StreamRequestHandler):
     def handle(self):
