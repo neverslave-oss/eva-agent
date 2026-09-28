@@ -111,6 +111,15 @@ from .prompts import (  # noqa: E402
     build_schema_repair_hint as _build_schema_repair_hint,
 )
 
+# Stateless model-name/adapter predicates moved to model_names.py (leaf).
+from .model_names import (  # noqa: E402
+    is_nemotron_model as _is_nemotron_model,
+    is_janus_model as _is_janus_model,
+    adapter_name as _adapter_name,
+    is_peft_model as _is_peft_model,
+    friendly_model_name as _friendly_model_name,
+)
+
 # ---------------------------------------------------------------------------
 # vLLM engine (main chat model)
 # ---------------------------------------------------------------------------
@@ -680,18 +689,6 @@ def _load_hf_model(config_path="config.yaml", model_path_override: str | None = 
 # Nemotron-Labs-Diffusion load + inference helpers
 # ---------------------------------------------------------------------------
 
-def _is_nemotron_model(model_path: str) -> bool:
-    """Return True if the model path/name is a Nemotron-Labs-Diffusion variant."""
-    name = (model_path or "").lower()
-    return "nemotron" in name or "nemotron-labs-diffusion" in name
-
-
-def _is_janus_model(model_path: str) -> bool:
-    """Return True if the model path/name is a DeepSeek Janus/Janus-Pro variant."""
-    name = (model_path or "").lower()
-    return "janus" in name
-
-
 def _load_nemotron(config_path="config.yaml", model_path_override: str | None = None):
     """Load nvidia/Nemotron-Labs-Diffusion via AutoModel + AutoTokenizer.
 
@@ -1010,19 +1007,6 @@ def _nemotron_infer(messages: list, max_new_tokens: int = 8192) -> str:
 # ---------------------------------------------------------------------------
 # Unified load entry points
 # ---------------------------------------------------------------------------
-
-def _adapter_name(adapter_path: str) -> str:
-    path = str(Path(adapter_path).expanduser())
-    return f"adapter_{abs(hash(path))}"
-
-
-def _is_peft_model(model_obj) -> bool:
-    try:
-        from peft import PeftModel
-        return isinstance(model_obj, PeftModel)
-    except Exception:
-        return False
-
 
 def _load_adapter(adapter_path: str) -> str:
     """Load a LoRA adapter onto the already-loaded HF model and return its adapter name."""
@@ -3183,20 +3167,6 @@ def _handle_vram_free_mb(params: dict) -> dict:
         return {"vram_free_mb": free // (1024 * 1024)}
     import psutil
     return {"vram_free_mb": psutil.virtual_memory().available // (1024 * 1024)}
-
-
-def _friendly_model_name(path: str) -> str:
-    """Turn a local model path into a readable name.
-
-    HF cache paths look like .../models--org--repo/snapshots/<hash>/ — recover
-    'org/repo' from that structure instead of showing the meaningless hash
-    (the snapshot dir's basename).
-    """
-    import re
-    m = re.search(r"models--([^/\\]+)--([^/\\]+)", path or "")
-    if m:
-        return f"{m.group(1)}/{m.group(2)}"
-    return str(path).rstrip("/\\").split("/")[-1]
 
 
 def _resolve_loaded_model_name() -> str:
