@@ -26,6 +26,9 @@ _JANUS_PREFIXES = ("deepseek-ai/janus", "janus-pro", "janus-1", "janus-7")
 _TOOL_CAPABLE_PREFIXES = ("google/gemma-4",)
 
 
+from . import state as server_state
+
+
 def _matches_any(model_name: str, model_path: str, prefixes) -> bool:
     """True if model_name starts with a prefix, or model_path contains its stem."""
     return any(
@@ -51,3 +54,25 @@ def detect(model_path: str, cfg: dict) -> dict:
         "is_omni": _matches_any(model_name, model_path, _OMNI_PREFIXES),
         "is_janus": _matches_any(model_name, model_path, _JANUS_PREFIXES),
     }
+
+
+def apply_detect(model_path: str, cfg: dict) -> dict:
+    """Apply capability flags derived from model_path + config onto server_state.
+
+    Pure detection lives in `detect`; this applier writes the returned flags
+    into the shared state holder (server_state.*) and prints the same
+    diagnostics the original monolith did. Kept here so the loader modules can
+    call it without importing back into model_server.py.
+    """
+    flags = detect(model_path, cfg)
+    server_state.model_supports_tools = flags["supports_tools"]
+    server_state.audio_capable = flags["audio_capable"]
+    server_state.native_agentic = flags["native_agentic"]
+    server_state.is_omni = flags["is_omni"]
+    server_state.is_janus = flags["is_janus"]
+    print(f"[model_server] Tool-calling support: {server_state.model_supports_tools}", flush=True)
+    print(f"[model_server] Audio capability: {server_state.audio_capable}", flush=True)
+    print(f"[model_server] Native agentic: {server_state.native_agentic}", flush=True)
+    print(f"[model_server] Omni any-to-any: {server_state.is_omni}", flush=True)
+    print(f"[model_server] Janus: {server_state.is_janus}", flush=True)
+    return flags

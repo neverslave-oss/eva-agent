@@ -51,3 +51,14 @@ infer_lock = threading.RLock()
 # --- LoRA adapters ----------------------------------------------------------
 loaded_adapters: dict[str, str] = {}
 current_adapter_name: str | None = None
+
+
+def target_device():
+    """Return the device of the model's first parameter (HF fallback path)."""
+    import torch
+    if model is not None:
+        try:
+            return next(model.parameters()).device
+        except StopIteration:
+            pass
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")

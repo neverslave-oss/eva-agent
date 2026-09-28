@@ -1,10 +1,23 @@
 """Configuration access helpers for the model server.
 
-Extracted from the original model_server.py monolith (refactor). These read a
-(already loaded) config dict and return the relevant sub-config with defaults.
-The module-level `_config` global itself stays owned by model_server.py — these
-functions take the config as an argument so they stay stateless leaves.
+Extracted from the original model_server.py monolith (refactor).
+
+- `load_config` loads (and caches into server_state) a config file from disk.
+- `inference_cfg`/`critique_cfg` read a (already loaded) config dict and return
+  the relevant sub-config with defaults.
+
+The read helpers take the config as an argument so they stay stateless leaves;
+`load_config` is the one place that owns the disk-load + state assign.
 """
+
+from . import state as server_state
+
+
+def load_config(path="config.yaml"):
+    """Load a config file and stash it on server_state.config."""
+    from runtime_paths import load_config as _load_expanded
+    server_state.config = _load_expanded(path)
+    return server_state.config
 
 
 def inference_cfg(config: dict) -> dict:
