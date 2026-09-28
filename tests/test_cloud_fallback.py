@@ -265,7 +265,7 @@ class TestAudioSttSkipsMainModelLoad:
              patch.object(ms, "_ensure_model", MagicMock()) as m_ensure, \
              patch.object(ms, "_slot_registry", None), \
              patch.object(ms, "_audio_capable", False), \
-             patch.object(ms, "_vllm_enabled", False), \
+             patch.object(ms._vllm, "_vllm_enabled", False), \
              patch.object(ms, "_mm_model", model), \
              patch.object(ms, "_mm_processor", proc), \
              patch.object(ms, "_ensure_multimodal_slot", lambda: None), \
@@ -299,7 +299,7 @@ class TestAudioSttSkipsMainModelLoad:
              patch.object(ms, "_ensure_model", MagicMock()) as m_ensure, \
              patch.object(ms, "_slot_registry", None), \
              patch.object(ms, "_audio_capable", True), \
-             patch.object(ms, "_vllm_enabled", False), \
+             patch.object(ms._vllm, "_vllm_enabled", False), \
              patch.object(ms, "_model", model), \
              patch.object(ms, "_processor", proc), \
              patch("subprocess.run", return_value=MagicMock(returncode=0)), \
@@ -328,7 +328,7 @@ class TestAudioSttSkipsMainModelLoad:
              patch.object(ms, "_ensure_model", MagicMock()) as m_ensure, \
              patch.object(ms, "_slot_registry", None), \
              patch.object(ms, "_audio_capable", False), \
-             patch.object(ms, "_vllm_enabled", False), \
+             patch.object(ms._vllm, "_vllm_enabled", False), \
              patch.object(ms, "_mm_model", None), \
              patch.object(ms, "_mm_processor", proc), \
              patch.object(ms, "_ensure_multimodal_slot", lambda: None), \
