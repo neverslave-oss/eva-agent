@@ -77,6 +77,14 @@ class InferenceProvider:
             if val:
                 self._routing[call_type] = val
         self._streaming = self._cfg.get("streaming", {})
+        # Call types that use Doubleword's async flex tier (service_tier="flex",
+        # ~50% cheaper than realtime) — for latency-insensitive background work
+        # (synthesis, planning, critic, trajectory, cron). Interactive task_inference
+        # stays on realtime. Overridable via providers.doubleword_async_call_types.
+        self._doubleword_async_call_types = set(self._cfg.get(
+            "doubleword_async_call_types",
+            ["synthesis", "planning", "critic", "trajectory_teacher"],
+        ))
         # Thermal fallback config
         self._temp_critical = int(self._cfg.get("gpu_temp_critical_c", 85))
         self._temp_resume = int(self._cfg.get("gpu_temp_resume_c", 70))
@@ -177,6 +185,10 @@ class InferenceProvider:
                 elif p == "copilot":
                     return self._call_copilot(messages, model)
                 elif p == "doubleword":
+                    # Sync/background split: latency-insensitive call types go through
+                    # the async flex tier (cheaper); interactive task_inference stays realtime.
+                    if call_type in self._doubleword_async_call_types:
+                        return self._call_doubleword_async(messages, model)
                     return self._call_doubleword(messages, model)
                 else:
                     continue
@@ -440,6 +452,80 @@ class InferenceProvider:
         resp = urllib.request.urlopen(req, timeout=120)
         data = json.loads(resp.read())
         return data["choices"][0]["message"]["content"]
+
+    def _call_doubleword_async(self, messages: list, model: str | None,
+                               max_output_tokens: int = 4096,
+                               poll_interval_s: float = 2.0,
+                               poll_timeout_s: float = 600.0) -> str:
+        """Doubleword async flex tier — Responses API (service_tier="flex", background).
+
+        ~50% cheaper than realtime for latency-insensitive work (synthesis, planning,
+        critic, trajectory, cron). Flex waits up to ~1 min to start processing, so this
+        is only used for background call types gated by self._doubleword_async_call_types;
+        interactive task_inference stays on the realtime path (_call_doubleword).
+
+        Flow: POST /responses {service_tier: flex, background: true} → poll
+        GET /responses/{id} until completed → extract output_text from the message item.
+        """
+        api_key = os.environ.get("DOUBLEWORD_API_KEY")
+        if not api_key:
+            raise RuntimeError("No DOUBLEWORD_API_KEY")
+        resolved_model = model or "deepseek-ai/DeepSeek-V4-Flash-0731"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        }
+        payload = json.dumps({
+            "model": resolved_model,
+            "input": messages,
+            "service_tier": "flex",
+            "background": True,
+            "max_output_tokens": max_output_tokens,
+        }).encode()
+        req = urllib.request.Request(
+            "https://api.doubleword.ai/v1/responses",
+            data=payload, headers=headers, method="POST"
+        )
+        try:
+            resp = urllib.request.urlopen(req, timeout=60)
+        except urllib.error.HTTPError as e:
+            logger.error(f"[provider] doubleword async submit HTTP {e.code}: {e.read(500)[:400]}")
+            raise
+        data = json.loads(resp.read())
+        resp_id = data.get("id")
+        if not resp_id:
+            raise RuntimeError("doubleword async: no response id returned")
+
+        # Poll until completed / failed / error / cancelled
+        deadline = time.monotonic() + poll_timeout_s
+        status = None
+        d = {}
+        while True:
+            time.sleep(poll_interval_s)
+            get_req = urllib.request.Request(
+                f"https://api.doubleword.ai/v1/responses/{resp_id}", headers=headers
+            )
+            d = json.loads(urllib.request.urlopen(get_req, timeout=30).read())
+            status = d.get("status")
+            if status in ("completed", "failed", "error", "cancelled"):
+                break
+            if time.monotonic() >= deadline:
+                logger.warning(f"[provider] doubleword async timed out after {poll_timeout_s}s (status {status})")
+                raise RuntimeError(f"doubleword async timeout (status={status})")
+
+        if status != "completed":
+            raise RuntimeError(f"doubleword async failed (status={status})")
+
+        # Extract text from output items (type "message" → content[*].text where type output_text)
+        texts = []
+        for item in (d.get("output") or []):
+            if item.get("type") == "message":
+                for c in (item.get("content") or []):
+                    if c.get("type") == "output_text" and c.get("text"):
+                        texts.append(c["text"])
+        if not texts:
+            raise RuntimeError("doubleword async: completed but no output_text found")
+        return "\n".join(texts)
 
     def _call_openrouter(self, messages: list, model: str | None) -> str:
         """OpenRouter API — OpenAI-compatible endpoint with model routing."""

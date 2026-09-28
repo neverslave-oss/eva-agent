@@ -152,6 +152,101 @@ def test_tool_loop_uses_doubleword_base_url(monkeypatch):
     assert captured["auth"] == "Bearer dw-test-key"
 
 
+
+# ── Async flex tier (_call_doubleword_async) ───────────────────────────
+
+def _mock_response_flow(submit_body, poll_bodies):
+    """Return a urlopen mock that serves one submit response then poll bodies.
+
+    submit_body: dict — the POST /responses response (must include an id).
+    poll_bodies: list of dicts — GET /responses/{id} responses, consumed in order.
+    """
+    import io
+    seq = []
+    seq.append(io.BytesIO(json.dumps(submit_body).encode()))
+    for b in poll_bodies:
+        seq.append(io.BytesIO(json.dumps(b).encode()))
+    calls = []
+    def _fake_urlopen(req, timeout=None):
+        calls.append(req)
+        return seq.pop(0)
+    return _fake_urlopen, calls
+
+
+def test_call_doubleword_async_success(monkeypatch):
+    monkeypatch.setenv("DOUBLEWORD_API_KEY", "dw-test-key")
+    prov = InferenceProvider(_make_cfg())
+
+    submit = {"id": "resp_123", "status": "queued", "output": []}
+    polls = [
+        {"id": "resp_123", "status": "in_progress", "output": []},
+        {"id": "resp_123", "status": "completed", "output": [
+            {"type": "message", "content": [
+                {"type": "output_text", "text": "async result"}
+            ]}
+        ]},
+    ]
+    fake_urlopen, calls = _mock_response_flow(submit, polls)
+
+    with patch("time.sleep", return_value=None), \
+         patch("urllib.request.urlopen", fake_urlopen):
+        result = prov._call_doubleword_async(
+            [{"role": "user", "content": "hi"}],
+            model="deepseek-ai/DeepSeek-V4-Flash-0731",
+        )
+
+    assert result == "async result"
+    # First call = submit POST; subsequent = GET polls
+    assert calls[0].full_url == "https://api.doubleword.ai/v1/responses"
+    assert calls[0].get_method() == "POST"
+    submit_payload = json.loads(calls[0].data.decode())
+    assert submit_payload["service_tier"] == "flex"
+    assert submit_payload["background"] is True
+    assert submit_payload["input"][0]["content"] == "hi"
+    # polls hit the retrieve endpoint
+    assert calls[1].full_url == "https://api.doubleword.ai/v1/responses/resp_123"
+
+
+def test_call_doubleword_async_requires_key():
+    env = {k: v for k, v in os.environ.items() if k != "DOUBLEWORD_API_KEY"}
+    with patch.dict(os.environ, env, clear=True):
+        prov = InferenceProvider(_make_cfg())
+        with pytest.raises(RuntimeError):
+            prov._call_doubleword_async([{"role": "user", "content": "hi"}], model="m")
+
+
+def test_call_doubleword_async_raises_on_failed_status(monkeypatch):
+    monkeypatch.setenv("DOUBLEWORD_API_KEY", "dw-test-key")
+    prov = InferenceProvider(_make_cfg())
+    submit = {"id": "resp_x", "status": "queued", "output": []}
+    polls = [{"id": "resp_x", "status": "failed", "error": {"message": "boom"}, "output": []}]
+    fake_urlopen, _ = _mock_response_flow(submit, polls)
+    with patch("time.sleep", return_value=None), \
+         patch("urllib.request.urlopen", fake_urlopen):
+        with pytest.raises(RuntimeError, match="failed"):
+            prov._call_doubleword_async([{"role": "user", "content": "hi"}], model="m")
+
+
+def test_async_gating_routes_background_types_to_flex(monkeypatch):
+    """Synthesis routes to async flex; task_inference stays realtime."""
+    monkeypatch.setenv("DOUBLEWORD_API_KEY", "dw-test-key")
+    prov = InferenceProvider(_make_cfg({
+        "task_inference": "doubleword",
+        "synthesis": "doubleword",
+        "models": {"doubleword": "deepseek-ai/DeepSeek-V4-Flash-0731"},
+    }))
+    assert "synthesis" in prov._doubleword_async_call_types
+    assert "task_inference" not in prov._doubleword_async_call_types
+
+    # monkeypatch both callers; assert dispatch picks async for synthesis
+    calls = []
+    prov._call_doubleword_async = lambda *a, **k: calls.append("async") or "A"
+    prov._call_doubleword = lambda *a, **k: calls.append("realtime") or "R"
+    assert prov.infer([{"role": "user", "content": "x"}], call_type="synthesis") == "A"
+    assert prov.infer([{"role": "user", "content": "x"}], call_type="task_inference") == "R"
+    assert calls == ["async", "realtime"]
+
+
 def io_bytes(b):
     """Return a file-like object wrapping bytes for urlopen-style reads."""
     import io
