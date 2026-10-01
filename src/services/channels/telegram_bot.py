@@ -28,6 +28,7 @@ _ATTACHMENT_RECENCY_SECONDS = int(os.environ.get("KERNEL_EVO_ATTACHMENT_RECENCY_
 
 # Add src/ to path
 sys.path.insert(0, str(Path(__file__).parent))
+from model_helpers import _estimate_model_gb, _vram_fit_mark, _curated_slot_for_repo  # noqa: F401 (re-exported for compatibility)
 
 BOT_TOKEN = os.environ.get("KERNEL_EVO_TELEGRAM_BOT_TOKEN")
 ALLOWED_CHAT_ID = os.environ.get("KERNEL_EVO_TELEGRAM_CHAT_ID")
@@ -511,54 +512,7 @@ def _get_current_model_label() -> str:
         return "local model"
 
 
-# ── Local model VRAM-fit helpers (XP7) ──────────────────────────────────────
-# Used by the /provider local picker to flag models that likely fit the GPU's
-# free VRAM. Estimates are rough (params × bytes-per-param + overhead) — the
-# real fit depends on dtype, quantization, and context length.
-
-def _estimate_model_gb(repo_id: str) -> float:
-    """Rough model-size estimate in GB from the repo id (params → bytes).
-
-    Heuristic: parse a known param-count marker in the repo id (e.g. 0.8B, 3B,
-    7B, 30B). Falls back to 4GB when unknown. Multiply params by ~2 bytes/param
-    (bf16) and add ~1GB overhead; quantized 4-bit models use far less, so this
-    is intentionally conservative (a "fits" flag is safe).
-    """
-    import re as _re
-    m = _re.search(r"(\d+(?:\.\d+)?)[bB]\b", repo_id)
-    if not m:
-        return 4.0
-    params_b = float(m.group(1))
-    gb = params_b * 2.0 + 1.0  # ~2 bytes/param (bf16) + overhead
-    return round(gb, 1)
-
-
-def _vram_fit_mark(est_gb: float, vram_free_mb: int) -> str:
-    """Return a short emoji marker showing whether a model likely fits free VRAM."""
-    if vram_free_mb <= 0:
-        return ""
-    free_gb = vram_free_mb / 1024.0
-    if est_gb <= free_gb * 0.9:
-        return "\U0001f7e2"  # green — fits comfortably
-    if est_gb <= free_gb * 1.5:
-        return "\U0001f7e1"  # yellow — tight / may need quantization
-    return "\U0001f534"      # red — likely too big for free VRAM
-
-
-def _curated_slot_for_repo(repo_id: str) -> str:
-    """Return the default model_slots entry for a curated repo id, or '' if none."""
-    try:
-        import urllib.request as _ur_c
-        with _ur_c.urlopen(f"http://localhost:{8779}/models/curated", timeout=5) as _rc:
-            curated = (json.loads(_rc.read()) or {}).get("curated", [])
-        for cm in curated:
-            if (cm.get("repo_id") or "").lower() == repo_id.lower():
-                return cm.get("slot") or ""
-    except Exception:
-        pass
-    return ""
-
-
+# (VRAM-fit / curated-slot helpers moved to model_helpers.py — see issue #3)
 # ── Short callback tokens (XP7) ──────────────────────────────────────────────
 # Telegram inline callback_data is limited to 64 bytes, so embedding a full HF
 # repo_id (e.g. "google/gemma-4-E2B-it") can exceed the limit and Telegram
