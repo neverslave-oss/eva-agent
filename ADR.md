@@ -89,7 +89,7 @@ GET /health                                  — model loaded + slot status
 | [010](#adr-010) | Evolution Pipeline Critic | Implemented | Critic gate before skill install — quality check |
 | [011](#adr-011) | Micro-Planner Triage | Implemented | Decompose multi-step requests into ordered steps |
 | [012](#adr-012) | Async Pipeline | Implemented | Background job queue with TTL |
-| [013](#adr-013) | Multi-Provider + Trajectories | Proposed | Inference routing, trajectory collection, HF fine-tune loop |
+| [013](#adr-013) | Multi-Provider + Trajectories | Implemented | Inference routing, trajectory collection, HF fine-tune loop |
 | [014](#adr-014) | ADR-to-Codebase Diffusion | Proposed | Prompt → ADR → codebase via DiffusionGemma (separate project) |
 | [015](#adr-015) | Agent Auto-Discovery | Proposed | Peer kernels, OpenClaw, coding agents — agent discovery + peer routing |
 | [016](#adr-016) | Self-Evolution Completeness | Proposed | Completeness checks for the self-evolution loop |
@@ -210,7 +210,7 @@ Background job queue for long-running tasks (skill synthesis, evolution loops). 
 
 ## ADR-013: Multi-Provider + Trajectory Fine-Tuning {#adr-013}
 
-**Date:** 2026-05-11 | **Status:** Proposed
+**Date:** 2026-05-11 | **Status:** Implemented
 
 Inference routing: local-first (Nemotron), cloud fallback on thermal/unavailable. Trajectory collection: every successful tool chain with critic score ≥ 0.7 is captured as JSONL. When enough accumulate, a TRL SFT fine-tune triggers on HuggingFace Jobs. The resulting LoRA adapter is shadow-tested before promotion.
 
