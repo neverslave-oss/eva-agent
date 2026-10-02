@@ -799,5 +799,61 @@ class TestSendFileAttachment(unittest.TestCase):
             os.unlink(tmp)
 
 
+class TestMaintenanceCommandRouting(unittest.TestCase):
+    """
+    Regression: /stop, /restart, /update, /rollback must reach the REAL
+    maintenance handlers (telegram_maintenance) exactly once. A previous
+    slice re-exported thin wrappers that shadowed the real handlers and
+    recursed infinitely (RecursionError). These tests fail with RecursionError
+    if the wrappers ever come back.
+    """
+
+    def setUp(self):
+        self._ctx = _bot_context()
+        self.bot, self.stubs = self._ctx.__enter__()
+        self.messages_sent = []
+        self.bot.send_message = lambda cid, text, *a, **kw: self.messages_sent.append(text) or 42
+
+    def tearDown(self):
+        self._ctx.__exit__(None, None, None)
+
+    def test_stop_dispatches_real_handler_without_recursion(self):
+        """/stop must hit the maintenance _handle_stop once (no RecursionError)."""
+        from unittest.mock import patch
+        with patch("subprocess.call", return_value=0):
+            self.bot.handle_message("123", "/stop")
+        # Real handler sends a confirmation message; a wrapper would recurse first.
+        self.assertTrue(
+            any("stopped" in m.lower() or "gpu freed" in m.lower() for m in self.messages_sent),
+            f"expected stop confirmation, got: {self.messages_sent}",
+        )
+
+    def test_restart_dispatches_real_handler_without_recursion(self):
+        """/restart must reach _restart_via_start_sh once (no RecursionError)."""
+        from unittest.mock import patch, MagicMock
+        import telegram_maintenance as _tm
+        with patch.object(_tm, "_restart_via_start_sh", MagicMock()) as _m:
+            self.bot.handle_message("123", "/restart")
+        _m.assert_called_once()
+
+    def test_update_dispatches_real_handler_without_recursion(self):
+        """/update must reach _do_update once (no RecursionError)."""
+        from unittest.mock import patch, MagicMock
+        import telegram_maintenance as _tm
+        with patch.object(_tm, "_do_update", MagicMock()) as _m:
+            self.bot.handle_message("123", "/update")
+        _m.assert_called_once()
+
+    def test_rollback_dispatches_real_handler_without_recursion(self):
+        """/rollback must reach the maintenance handler once (no RecursionError)."""
+        from unittest.mock import patch
+        with patch("subprocess.run", return_value=type("R", (), {"stdout": "", "stderr": ""})()):
+            self.bot.handle_message("123", "/rollback")
+        self.assertTrue(
+            any("rolled back" in m.lower() for m in self.messages_sent),
+            f"expected rollback confirmation, got: {self.messages_sent}",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
