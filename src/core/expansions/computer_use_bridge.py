@@ -6,13 +6,95 @@ fallback values so kernel boot and normal tool loops are unaffected.
 
 from __future__ import annotations
 
+import json
+import os
 import sys
 from pathlib import Path
+from urllib.request import Request, urlopen
 
 _KERNEL_ROOT = Path(__file__).resolve().parents[3]
 _SIDECAR_ROOT = _KERNEL_ROOT / "expansions" / "computer-use"
 _SIDECAR_SRC = _SIDECAR_ROOT / "src"
 _STATE_FILE = _SIDECAR_ROOT / "tmp" / "chat_state.json"
+
+# Broadcast hub for the computer-use live stream (captions + screenshots).
+# Every subscribed surface (Telegram, Desktop, Mobile, Dashboard) receives each
+# frame via publish_watch(); subscribers get a per-subscriber queue. This is what
+# lets the computer-use stream reach ALL frontends, not just Telegram.
+_watch_subscribers: list["_WatchSub"] = []
+
+class _WatchSub:
+    __slots__ = ("queue", "active")
+    def __init__(self) -> None:
+        import queue as _queue
+        self.queue: _queue.Queue = _queue.Queue(maxsize=200)
+        self.active = True
+
+def subscribe_watch() -> "_WatchSub":
+    """Register a subscriber for the computer-use live stream (SSE consumers)."""
+    sub = _WatchSub()
+    _watch_subscribers.append(sub)
+    return sub
+
+def unsubscribe_watch(sub) -> None:
+    if sub in _watch_subscribers:
+        _watch_subscribers.remove(sub)
+
+def _publish_local(caption, screenshot) -> None:
+    """Fan out a live frame to in-process subscribers only.
+
+    This is the local half of publish_watch. The uvicorn /computer/publish
+    endpoint calls this directly so it never re-forwards across the process
+    boundary (no infinite loop).
+    """
+    inactive = []
+    for s in _watch_subscribers:
+        if not s.active:
+            inactive.append(s)
+            continue
+        try:
+            s.queue.put_nowait({"caption": caption, "screenshot": screenshot})
+        except Exception:
+            pass
+    for s in inactive:
+        _watch_subscribers.remove(s)
+
+
+def _forward_to_api(caption, screenshot) -> None:
+    """Forward a frame to the running uvicorn API so its SSE subscribers see it.
+
+    The computer tool loop runs inside model_server.py, whose in-memory hub has
+    zero subscribers; uvicorn (which serves /computer/stream) has the SSE
+    subscribers but nothing ever publishes there. POSTing the frame to the
+    API's /computer/publish endpoint bridges the two processes.
+
+    Gated by COMPUTER_STREAM_FORWARD_URL (set only on the model_server launch in
+    start.sh) so unit tests and the uvicorn process itself never try to forward
+    (no self-loop). Best-effort: failures never block the computer-use loop.
+    """
+    target = os.environ.get("COMPUTER_STREAM_FORWARD_URL", "")
+    if not target:
+        return
+    try:
+        body = json.dumps({"caption": caption, "screenshot": screenshot}).encode("utf-8")
+        req = Request(target, data=body, headers={"Content-Type": "application/json"})
+        urlopen(req, timeout=2)
+    except Exception:
+        pass
+
+
+def publish_watch(caption, screenshot) -> None:
+    """Publish a live frame (caption + optional screenshot) to all subscribers.
+
+    Fans out to in-process subscribers (the local hub), then — when running in
+    the model_server process — forwards the frame over HTTP to the uvicorn API
+    so every SSE surface (Desktop/Mobile/Dashboard) receives it. Best-effort: a
+    slow/full subscriber queue or an unreachable forward target drops the frame
+    rather than blocking the computer-use loop. Screenshot may be a base64
+    data-URI or a local path.
+    """
+    _publish_local(caption, screenshot)
+    _forward_to_api(caption, screenshot)
 
 _sidecar = None
 
@@ -60,36 +142,175 @@ def helper_plan_hint(chat_id: str = "", text: str = "") -> str:
     return "Plan atomic actions, validate by policy, verify each post-condition."
 
 
+def _default_watch_callback(chat_id: str):
+    """Return a watch callback that streams screenshots to Telegram.
+
+    Returns None (no-op) when there's no chat_id or the telegram channel can't
+    be imported, so the LLM planner degrades gracefully outside a chat context.
+    The screenshot may be a base64 data-URI (from the driver) or a local path;
+    we write it to a temp PNG and send it as a document.
+    """
+    if not chat_id:
+        return None
+    try:
+        from services.channels import telegram_bot as _tb
+    except Exception:
+        return None
+
+    # Track the last screenshot message_id so each new screenshot replaces the
+    # previous one (delete-then-send), preventing the chat from filling up with
+    # screenshots during a long computer-use run.
+    _last_shot_msg_id = {"id": None}
+
+    def _watch(screenshot, caption):
+        # Broadcast to every subscribed surface (Desktop/Mobile/Dashboard) first,
+        # so the live stream reaches all frontends regardless of Telegram.
+        try:
+            publish_watch(caption, screenshot)
+        except Exception:
+            pass
+        # Always stream a text update so the user sees live progress even when
+        # no screenshot is available (e.g. screenshot null / driver has no
+        # capture). This turns the silent typing-indicator wait into a
+        # readable step-by-step feed of what Eva is doing.
+        try:
+            if caption:
+                _tb.send_message(chat_id, f"🖥️ {caption}")
+        except Exception as e:
+            print(f"[bridge] watch text send failed: {e}", flush=True)
+        if not screenshot:
+            return
+        try:
+            import base64 as _b64
+            import tempfile
+            if screenshot.startswith("data:image"):
+                b64 = screenshot.split(",", 1)[1]
+                data = _b64.b64decode(b64)
+                fd, path = tempfile.mkstemp(suffix=".png")
+                with open(fd, "wb") as f:
+                    f.write(data)
+                try:
+                    # Replace the previous screenshot (delete-then-send) so the
+                    # chat only ever holds the latest frame.
+                    if _last_shot_msg_id["id"] is not None:
+                        try:
+                            _tb.delete_message(chat_id, _last_shot_msg_id["id"])
+                        except Exception:
+                            pass
+                    _mid = _tb.send_file(chat_id, path, caption=caption or "")
+                    if _mid:
+                        _last_shot_msg_id["id"] = _mid
+                finally:
+                    try:
+                        os.remove(path)
+                    except Exception:
+                        pass
+            elif Path(screenshot).exists():
+                if _last_shot_msg_id["id"] is not None:
+                    try:
+                        _tb.delete_message(chat_id, _last_shot_msg_id["id"])
+                    except Exception:
+                        pass
+                _mid = _tb.send_file(chat_id, screenshot, caption=caption or "")
+                if _mid:
+                    _last_shot_msg_id["id"] = _mid
+        except Exception as e:
+            print(f"[bridge] watch send failed: {e}", flush=True)
+
+    return _watch
+
+
+def _default_confirm_callback(chat_id: str):
+    """Return an interactive confirm callback for risky actions.
+
+    Sends an Allow/Deny inline-button request to Telegram and blocks until the
+    user responds (or times out, which denies fail-closed). Mirrors the
+    auth_gate pattern. Returns None when there's no chat_id or the bot can't
+    be reached, so the planner degrades to auto-deny outside a chat context.
+    """
+    if not chat_id:
+        return None
+
+    def _confirm(action):
+        try:
+            from core.computer_confirm_gate import request_confirm
+            desc = action.text or action.selector or action.url or ""
+            return request_confirm(chat_id, action.kind, desc)
+        except Exception as e:
+            print(f"[bridge] confirm gate error: {e}", flush=True)
+            return False
+
+    return _confirm
+
+
+def _default_stuck_callback(chat_id: str):
+    """Return an interactive callback for the 'stuck' guard.
+
+    After several consecutive rejected actions the model is looping on the
+    same screen. This asks the user to Continue or Stop via Telegram inline
+    buttons and blocks until they respond. Returns None when there's no chat
+    id or the bot can't be reached, so the planner aborts fail-closed.
+    """
+    if not chat_id:
+        return None
+
+    def _stuck(rejection):
+        try:
+            from core.computer_confirm_gate import request_confirm
+            # Reuse the confirm gate's Allow/Deny prompt: Allow = continue,
+            # Deny = stop. The description carries the rejection reason.
+            return request_confirm(chat_id, "continue", rejection)
+        except Exception as e:
+            print(f"[bridge] stuck gate error: {e}", flush=True)
+            return False
+
+    return _stuck
+
+
 def run_computer_task(
     chat_id: str = "",
     goal: str = "",
     target: dict | None = None,
-    dry_run: bool = True,
+    dry_run: bool = False,
+    llm: bool = False,
+    rl: bool = False,
+    step_cap: int = 10,
+    confirm_callback=None,
+    watch_callback=None,
+    stuck_callback=None,
 ) -> dict:
     if not _ensure_loaded():
         return {"ok": False, "reason": "computer-use sidecar unavailable"}
 
     from computer_use.orchestrator import Orchestrator  # type: ignore
     from computer_use.planner import Planner  # type: ignore
+    from computer_use.rl_planner import RLPlanner  # type: ignore
     from computer_use.safety import PolicyEngine  # type: ignore
     from computer_use.state_store import StateStore  # type: ignore
     from computer_use.telemetry import TraceCollector  # type: ignore
     from computer_use.router import choose_driver  # type: ignore
     from computer_use.drivers.playwright_driver import PlaywrightDriver  # type: ignore
     from computer_use.drivers.pyautogui_driver import PyAutoGUIDriver  # type: ignore
+    from computer_use.drivers.hybrid_driver import HybridDriver  # type: ignore
 
     target = target or {"kind": "desktop"}
     kind = (target or {}).get("kind", "desktop")
 
-    # Route to a real driver. Browser targets use Playwright (real Chromium);
-    # desktop targets use pyautogui (only meaningful on a host with a display).
-    driver_choice = choose_driver(target)
-    if kind == "browser" or driver_choice == "playwright":
-        driver = PlaywrightDriver()
+    # Build the desktop and browser drivers. The desktop driver is the default
+    # (pyautogui); the browser driver (Playwright) is used when the task needs
+    # a real browser. A HybridDriver starts on the desktop and gracefully hands
+    # off to the browser when the desktop driver fails a browser-ish action,
+    # then returns to the desktop once the browser phase is done.
+    desktop = PyAutoGUIDriver()
+    browser = PlaywrightDriver()
+    if kind == "browser":
+        # Explicit browser target — start directly in the browser.
+        driver = browser
     else:
-        driver = PyAutoGUIDriver()
+        # Default: start on the desktop, switch to the browser at runtime when
+        # the goal looks browser-ish and the desktop driver can't handle it.
+        driver = HybridDriver(desktop=desktop, browser=browser, goal=goal)
 
-    planner = Planner()
     policy = PolicyEngine(
         {
             "allow_actions": [
@@ -97,6 +318,7 @@ def run_computer_task(
                 "click",
                 "double_click",
                 "type",
+                "fill",
                 "hotkey",
                 "navigate",
                 "scroll",
@@ -105,6 +327,8 @@ def run_computer_task(
                 "assert_url",
                 "upload",
                 "submit",
+                "launch",
+                "driver_swap",
                 "done",
                 "abort",
             ],
@@ -113,6 +337,58 @@ def run_computer_task(
     )
     store = StateStore(_STATE_FILE)
     tracer = TraceCollector(_SIDECAR_ROOT)
+
+    if llm:
+        # LLM-driven perceive->decide->act planner (vision brain). Runs its own
+        # loop and returns a batch ending in `done`, so the orchestrator is
+        # unchanged. Falls back to the deterministic Planner if the vision brain
+        # is unavailable (no provider / inference failure).
+        from computer_use.llm_planner import LLMPlanner  # type: ignore
+        from computer_use.vision_brain import VisionBrain  # type: ignore
+
+        # Default watch mode: stream each step's screenshot to Telegram (only
+        # when a chat_id is present and the telegram channel is importable).
+        if watch_callback is None:
+            watch_callback = _default_watch_callback(chat_id)
+        # Default confirm gate: prompt on Telegram and auto-deny (fail-closed).
+        # A caller can supply a real interactive confirm_callback to allow risky
+        # actions; without one, risky actions are blocked.
+        if confirm_callback is None:
+            confirm_callback = _default_confirm_callback(chat_id)
+        # Default stuck gate: after repeated rejections, ask the user to
+        # Continue or Stop instead of looping forever.
+        if stuck_callback is None:
+            stuck_callback = _default_stuck_callback(chat_id)
+
+        planner = LLMPlanner(
+            brain=VisionBrain(),
+            driver=driver,
+            policy=policy,
+            step_cap=step_cap,
+            dry_run=dry_run,
+            confirm_callback=confirm_callback,
+            watch_callback=watch_callback,
+            stuck_callback=stuck_callback,
+        )
+    elif rl:
+        # RL-driven perceive->decide->act planner (tabular Q-learning). Uses
+        # verified rewards and fail-closed dead-state abort so it never storms
+        # Telegram with an unverified step-cap 'ok'. Same plan() contract as
+        # the other planners, so the orchestrator is unchanged. Wire the same
+        # watch_callback as the LLM path so RL runs stream live screenshots to
+        # Telegram instead of running silent.
+        if watch_callback is None:
+            watch_callback = _default_watch_callback(chat_id)
+        planner = RLPlanner(
+            driver=driver,
+            policy=policy,
+            step_cap=step_cap,
+            dry_run=dry_run,
+            watch_callback=watch_callback,
+        )
+    else:
+        planner = Planner()
+
     orch = Orchestrator(planner=planner, driver=driver, policy=policy, state_store=store, tracer=tracer)
     result = orch.run_once(goal=goal, target=target, chat_id=(chat_id or "default"), dry_run=dry_run)
 

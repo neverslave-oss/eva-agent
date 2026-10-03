@@ -28,6 +28,35 @@ _PROTECTED_IDENTITY_FILES = (
     "IDENTITY.md",
 )
 
+
+def _canonicalize_path(raw_path: str, workspace: str) -> str:
+    """Normalize a model-supplied file path and enforce the workspace guard.
+
+    Used identically by write_file and read_file so an absolute path like
+    ``/tmp/foo.txt`` resolves to the same place for both operations. Any path
+    outside ``~/.kernel-evolving`` is redirected into the workspace tmp dir
+    (the model must not read/write outside its own workspace).
+    """
+    path = str(raw_path).strip()
+    if "\n" in path:
+        _lines = [p.strip() for p in path.split("\n") if p.strip() and not p.strip().endswith(">")]
+        if _lines:
+            path = _lines[-1]
+    path = path.lstrip(">").rstrip("<")
+    path = os.path.expanduser(path)
+    if not path.startswith("/"):
+        path = os.path.join(workspace, path)
+    _allowed_prefix = os.path.expanduser("~/.kernel-evolving")
+    _tmp_dir = os.path.join(_allowed_prefix, "workspace", "tmp")
+    if not path.startswith(_allowed_prefix):
+        _basename = os.path.basename(path)
+        import logging as _log_cp
+        _log_cp.getLogger(__name__).warning(
+            f"[tools] path outside workspace — redirected to {os.path.join(_tmp_dir, _basename)}"
+        )
+        path = os.path.join(_tmp_dir, _basename)
+    return path
+
 # ── Authorization gate: current chat_id for exec_shell auth ──────────────
 # Only a same-process fallback for in-process callers (e.g. model.py's
 # in-process tool loop, which shares memory with agent.py's triage()).
@@ -42,7 +71,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "exec_shell",
-            "description": "Execute a shell command and return stdout/stderr. Use for running scripts, checking service health, git operations, file operations.",
+            "description": "Execute a shell command and return stdout/stderr. Use for headless automation: running scripts, checking service health, git/file operations, package managers, listing processes, reading logs. This tool has NO access to the screen, mouse, or keyboard — it cannot click, type into a GUI window, fill a form, drive a browser, press keys, or observe any display. If the task must operate a real GUI/screen (launch an app, click UI, fill a form, drive a browser, take over a window), call the computer tool instead — do not try to fake it with shell commands (e.g. pgrep, xdotool hacks) that cannot verify on-screen state.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -71,11 +100,11 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "http_get",
-            "description": "Make an HTTP GET request to a URL and return the response body. Use ONLY for http:// or https:// URLs. For local files use read_file instead.",
+            "description": "Fetch a web page or API over HTTP(S) and return its body. Use when you already have a specific http:// or https:// URL to retrieve. For local files on disk use read_file instead.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "url": {"type": "string"},
+                    "url": {"type": "string", "description": "REQUIRED. The full URL to fetch, including scheme, e.g. https://example.com"},
                     "timeout": {"type": "integer", "description": "Timeout in seconds (default 5)"}
                 },
                 "required": ["url"]
@@ -101,17 +130,17 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "run_skill",
-            "description": "Execute a named skill from the Kernel skill ecosystem. Use this when the user's request matches a skill's purpose (e.g. browser search, image generation, GitHub operations, security scan). Pass the user's original request as 'input'.",
+            "description": "Run an installed skill to perform a specialized task (documentation, security, deployment, media, or other packaged workflow). Use when a task maps to a known skill that provides a dedicated procedure beyond generic tools.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "skill_name": {
                         "type": "string",
-                        "description": "The skill name (e.g. 'browser-automation', 'github', 'security-scanner')"
+                        "description": "REQUIRED. The exact skill name (e.g. 'browser-automation', 'github', 'security-scanner', 'skill-lister')"
                     },
                     "input": {
                         "type": "string",
-                        "description": "The user's request or task to pass to the skill"
+                        "description": "REQUIRED. The user's request or task to pass to the skill"
                     }
                 },
                 "required": ["skill_name", "input"]
@@ -160,13 +189,13 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "web_search",
-            "description": "Search the web or fetch a URL using the browser-automation skill (Puppeteer + Chromium). Use when you need fresh information, documentation, news, research papers, or anything not in local files. Returns page content or search results.",
+            "description": "Search the web for fresh information, documentation, news, research papers, or anything not in local files (Puppeteer + Chromium). Returns search results or page content. To directly fetch a specific URL, use http_get instead.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "Search query (e.g. 'python asyncio tutorial 2026') or full URL to fetch (e.g. 'https://docs.python.org/3/library/asyncio.html')"
+                        "description": "Search query (e.g. 'python asyncio tutorial 2026')"
                     },
                     "save_to": {
                         "type": "string",
@@ -210,13 +239,13 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "search_skills",
-            "description": "Search installed skills by name or description keyword. Use this to find the right skill before calling run_skill. Returns a list of matching skills with their names, commands, and descriptions.",
+            "description": "Search installed skills by keyword and list matches. Use when you need to discover which skill fits a task before running it.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "Search term (e.g. 'browser', 'image', 'github', 'security'). Pass empty string to list all skills."
+                        "description": "REQUIRED. Search term (e.g. 'browser', 'image', 'github', 'security')"
                     }
                 },
                 "required": ["query"]
@@ -312,7 +341,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "computer",
-            "description": "Drive the desktop/browser via the computer-use expansion. Given a natural-language goal, the orchestrator plans atomic actions (observe/click/type/hotkey/navigate/scroll/wait/assert_text/assert_url/upload/submit), validates each against policy, and executes them through the configured driver. Dry-run by default: pass dry_run=false only to actually move the mouse/keyboard. Returns a JSON envelope with status, message, completed and run_id. Use for GUI automation, clicking UI elements, filling forms, navigating apps, or browser tasks that need real screen control.",
+            "description": "USE THIS TOOL for ANY task that must operate a real GUI or screen: launching or driving an application, clicking UI elements, filling forms/inputs, navigating a browser to a URL, taking over an app window, or any goal about controlling a display. This is the ONLY tool with access to the mouse, keyboard, and screen — exec_shell cannot click, type into a window, or observe a display. If the goal involves screen/GUI/browser/desktop interaction, call this tool; do not try to approximate it with shell commands. A natural-language goal is planned into atomic actions (observe/click/type/fill/submit/hotkey/navigate/scroll/wait/assert_text/assert_url/upload) and executed via the configured driver. Real tasks actually run by default (dry_run=false): this moves the mouse/keyboard and drives the screen. Pass dry_run=true only for a planning-only simulation that does not touch the screen. Returns a JSON envelope with status, message, completed and run_id.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -326,10 +355,44 @@ TOOLS = [
                     },
                     "dry_run": {
                         "type": "boolean",
-                        "description": "Plan + validate only, without executing (default true). Set false to actually perform the actions."
+                        "description": "Plan + validate only, without executing (default false — real tasks actually run). Set true to preview actions without moving the mouse/keyboard."
+                    },
+                    "llm": {
+                        "type": "boolean",
+                        "description": "Planner selection. DEFAULT is the RL planner (state-based, verified-reward, handles blank/unknown pages by navigating). Set llm:true ONLY to use the DeepSeek Vision perceive->decide->act loop for tasks needing visual reasoning on a populated screen. For routine browser/form tasks leave this unset (false) so the RL planner drives."
+                    },
+                    "step_cap": {
+                        "type": "integer",
+                        "description": "Max LLM-planner steps (default 10)."
                     }
                 },
                 "required": ["goal"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ask_questions",
+            "description": "Ask the user a question through Telegram inline buttons and wait for their tap. Use this when you need user direction mid-task and the next step genuinely depends on their answer (e.g. which option to pursue, approve a direction, pick a preference). You might include a few options rendered as tappable buttons. Returns the user's chosen option so you can continue. Prefer this over guessing when a decision is truly theirs; do not call it for trivial choices you can default.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": "The question to ask the user"
+                    },
+                    "options": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "The answer options shown as inline buttons, one button per option. Keep each short enough to be tappable (2-4 words)."
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "description": "Optional seconds to wait for the user (default 120)"
+                    }
+                },
+                "required": ["question", "options"]
             }
         }
     }
@@ -491,7 +554,18 @@ def _run_computer(arguments: dict, chat_id: str = "") -> str:
     if not goal:
         return "(error: computer requires 'goal' argument)"
     target = arguments.get("target") or None
-    dry_run = bool(arguments.get("dry_run", True))
+    # The tool arg parser may hand `target` through as a JSON string
+    # (e.g. '{"kind": "desktop"}') rather than a dict. Coerce it so
+    # downstream target.get("kind") doesn't crash on a str.
+    if isinstance(target, str):
+        try:
+            target = json.loads(target)
+        except Exception:
+            target = None
+    dry_run = bool(arguments.get("dry_run", False))
+    llm = bool(arguments.get("llm", False))
+    rl = bool(arguments.get("rl", True))
+    step_cap = int(arguments.get("step_cap", 10) or 10)
     try:
         from core.expansions.computer_use_bridge import run_computer_task
         result = run_computer_task(
@@ -499,6 +573,9 @@ def _run_computer(arguments: dict, chat_id: str = "") -> str:
             goal=str(goal),
             target=target,
             dry_run=dry_run,
+            llm=llm,
+            rl=rl,
+            step_cap=step_cap,
         )
         return json.dumps(result, ensure_ascii=False)
     except Exception as exc:
@@ -537,7 +614,11 @@ def execute_tool(name: str, arguments: dict, workspace: str = WORKSPACE, chat_id
         _chat_id = chat_id or _current_chat_id
         if _chat_id:
             try:
-                from core.auth_gate import request_auth
+                from core.auth_gate import request_auth, is_stop_requested
+                # If a stop has been requested (/stop or 3 consecutive denials),
+                # don't prompt for this command — bail out so the loop aborts.
+                if is_stop_requested(_chat_id):
+                    return "(stopped by user)"
                 auth_result = request_auth(_chat_id, cmd)
                 if auth_result == "deny":
                     return "(authorization denied — command blocked)"
@@ -546,6 +627,11 @@ def execute_tool(name: str, arguments: dict, workspace: str = WORKSPACE, chat_id
                 elif auth_result.startswith("deny"):
                     return f"(authorization failed: {auth_result})"
                 # auth_result == "allow" → proceed
+                # auth_result == "allow_all" → proceed (current + all subsequent
+                # exec_shell calls in this task are pre-approved by the user via
+                # the "✅ Approve all" button; the grant is scoped to the task
+                # loop and cleared when it ends or expires in auth_gate).
+                # The chain above falls through to execution for both.
             except ImportError:
                 pass  # auth_gate not available (tests) → proceed without gate
             except Exception as e:
@@ -567,19 +653,10 @@ def execute_tool(name: str, arguments: dict, workspace: str = WORKSPACE, chat_id
         path = arguments.get("path")
         if not path:
             return "(error: read_file requires 'path' argument)"
-        import os
         path = _rewrite_date_tokens(str(path))
-        # Sanitize: strip shell metacharacters and newlines the model may emit
-        # (e.g. "/home/user/workspace/>\n~/workspace/file.md")
-        path = path.strip()
-        # If path contains newlines, take the last line (often the actual path)
-        if "\n" in path:
-            path = [p.strip() for p in path.split("\n") if p.strip() and not p.strip().endswith(">")][-1]
-        # Strip shell redirect characters that should never be in a file path
-        path = path.lstrip(">").rstrip("<")
-        path = os.path.expanduser(path)
-        if not path.startswith("/"):
-            path = f"{workspace}/{path}"
+        # Sanitize + enforce the same workspace guard as write_file, so an
+        # absolute path like /tmp/x resolves to the same place write put it.
+        path = _canonicalize_path(path, workspace)
         try:
             with open(path) as f:
                 return f.read()[:3000]
@@ -598,7 +675,9 @@ def execute_tool(name: str, arguments: dict, workspace: str = WORKSPACE, chat_id
             # Sanitize the same way read_file does
             local_path = url_str.strip()
             if "\n" in local_path:
-                local_path = [p.strip() for p in local_path.split("\n") if p.strip() and not p.strip().endswith(">")][-1]
+                _lines = [p.strip() for p in local_path.split("\n") if p.strip() and not p.strip().endswith(">")]
+                if _lines:
+                    local_path = _lines[-1]
             local_path = local_path.lstrip(">").rstrip("<")
             local_path = os.path.expanduser(local_path)
             if not local_path.startswith("/"):
@@ -624,25 +703,8 @@ def execute_tool(name: str, arguments: dict, workspace: str = WORKSPACE, chat_id
             return "(error: write_file requires 'content' argument)"
         # Sanitize: strip shell metacharacters and newlines the model may emit
         path = str(path).strip()
-        if "\n" in path:
-            path = [p.strip() for p in path.split("\n") if p.strip() and not p.strip().endswith(">")][-1]
-        path = path.lstrip(">").rstrip("<")
-        # Expand ~ first, then fall back to workspace-relative only if truly relative
-        path = os.path.expanduser(path)
-        if not path.startswith("/"):
-            path = os.path.join(workspace, path)
-        # Hard workspace guard: redirect /tmp, /var, /root, or any path outside
-        # ~/.kernel-evolving to the kernel-evolving workspace tmp dir.
-        # The model must not write outside its own workspace.
-        _allowed_prefix = os.path.expanduser("~/.kernel-evolving")
-        _tmp_dir = os.path.join(_allowed_prefix, "workspace", "tmp")
-        if not path.startswith(_allowed_prefix):
-            _basename = os.path.basename(path)
-            path = os.path.join(_tmp_dir, _basename)
-            import logging as _log_wf
-            _log_wf.getLogger(__name__).warning(
-                f"[write_file] path outside workspace — redirected to {path}"
-            )
+        # Sanitize + enforce the workspace guard (shared with read_file).
+        path = _canonicalize_path(path, workspace)
         # Protected identity files: refuse to overwrite AGENTS.md / SOUL.md /
         # IDENTITY.md. These carry the agent's core persona and are managed by
         # setup.py + the identity consolidator — the model must never clobber them.
@@ -672,7 +734,9 @@ def execute_tool(name: str, arguments: dict, workspace: str = WORKSPACE, chat_id
         # Sanitize: strip newlines and shell redirects Nemotron may emit
         query = (arguments.get("query") or "").lower().strip()
         if "\n" in query:
-            query = [p.strip() for p in query.split("\n") if p.strip() and not p.strip().endswith(">")][-1]
+            _lines = [p.strip() for p in query.split("\n") if p.strip() and not p.strip().endswith(">")]
+            if _lines:
+                query = _lines[-1]
         query = query.lstrip(">").rstrip("<")
         try:
             import yaml as _yaml
@@ -786,7 +850,9 @@ def execute_tool(name: str, arguments: dict, workspace: str = WORKSPACE, chat_id
         # Sanitize: strip newlines and shell redirects Nemotron may emit
         skill_name = skill_name.strip()
         if "\n" in skill_name:
-            skill_name = [p.strip() for p in skill_name.split("\n") if p.strip() and not p.strip().endswith(">")][-1]
+            _lines = [p.strip() for p in skill_name.split("\n") if p.strip() and not p.strip().endswith(">")]
+            if _lines:
+                skill_name = _lines[-1]
         skill_name = skill_name.lstrip(">").rstrip("<")
         if not input_text:
             return "(error: run_skill requires 'input' argument)"
@@ -897,6 +963,24 @@ def execute_tool(name: str, arguments: dict, workspace: str = WORKSPACE, chat_id
 
     elif name == "computer":
         return _run_computer(arguments, chat_id=chat_id)
+
+    elif name == "ask_questions":
+        question = arguments.get("question", "")
+        options = arguments.get("options", [])
+        timeout = arguments.get("timeout", 120)
+        _chat_id = chat_id or _current_chat_id
+        if not _chat_id:
+            return "(error: ask_questions requires a Telegram chat_id context)"
+        try:
+            from core.ask_questions_gate import ask_question
+        except Exception as e:
+            return f"(error: ask_questions gate unavailable: {e})"
+        result = ask_question(_chat_id, question, options, timeout=int(timeout))
+        if "error" in result:
+            return f"(error: {result['error']})"
+        if result.get("timeout"):
+            return "(ask_questions: no user response within timeout — proceed with your best judgment)"
+        return f"User selected option {result['selected_idx']}: {result['selected']}"
 
     return f"Unknown tool: {name}"
 

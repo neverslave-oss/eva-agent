@@ -9,6 +9,7 @@ ActionKind = Literal[
     "click",
     "double_click",
     "type",
+    "fill",
     "hotkey",
     "navigate",
     "scroll",
@@ -17,6 +18,7 @@ ActionKind = Literal[
     "assert_url",
     "upload",
     "submit",
+    "launch",
     "done",
     "abort",
 ]
@@ -28,6 +30,7 @@ class Action(BaseModel):
     text: str | None = None
     url: str | None = None
     timeout_ms: int = Field(default=5000, ge=1)
+    driver: Literal["desktop", "browser"] | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

@@ -50,10 +50,13 @@ class TestExecShell:
 # ─────────────────────────────────────────────────────────────────────────────
 class TestReadFile:
     def test_reads_existing_file(self, tmp_path):
-        f = tmp_path / "test.txt"
-        f.write_text("hello kernel")
-        result = tools_mod.execute_tool("read_file", {"path": str(f)})
+        # Read a path that resolves inside the workspace guard (workspace/tmp)
+        target = Path(os.path.expanduser("~/.kernel-evolving/workspace/tmp/read_existing.txt"))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("hello kernel")
+        result = tools_mod.execute_tool("read_file", {"path": str(target)})
         assert "hello kernel" in result
+        target.unlink(missing_ok=True)
 
     def test_missing_path_arg_returns_error(self):
         result = tools_mod.execute_tool("read_file", {})
@@ -61,7 +64,10 @@ class TestReadFile:
         assert "path" in result
 
     def test_nonexistent_file_returns_error(self):
-        result = tools_mod.execute_tool("read_file", {"path": "/nonexistent/file.txt"})
+        # Missing path inside the guard must error (not silently resolve elsewhere)
+        missing = Path(os.path.expanduser("~/.kernel-evolving/workspace/tmp/definitely_not_here_eva.txt"))
+        missing.unlink(missing_ok=True)
+        result = tools_mod.execute_tool("read_file", {"path": str(missing)})
         assert "error" in result.lower()
 
     def test_tilde_expansion(self):
@@ -160,6 +166,42 @@ class TestWriteFile:
         assert "roundtrip content" in read_result
 
         target.unlink(missing_ok=True)
+
+    def test_absolute_tmp_roundtrip_via_redirect(self, tmp_path):
+        """An absolute path outside the workspace resolves identically for read and write.
+
+        Regression: write_file redirected /tmp/foo.txt into workspace/tmp, but
+        read_file read the literal /tmp/foo.txt — a false failure. Both must
+        canonicalize through the same guard so the round-trip succeeds.
+        """
+        fake_home = tmp_path
+        workspace = fake_home / ".kernel-evolving" / "workspace"
+        redirected = workspace / "tmp" / "evac_roundtrip.txt"
+
+        original_expanduser = os.path.expanduser
+
+        def fake_expanduser(p):
+            if p.startswith("~"):
+                return p.replace("~", str(fake_home), 1)
+            return p
+
+        with patch("os.path.expanduser", side_effect=fake_expanduser):
+            write_result = tools_mod.execute_tool(
+                "write_file",
+                {"path": "/tmp/evac_roundtrip.txt", "content": "canonical roundtrip"},
+                workspace=str(workspace),
+            )
+            assert "error" not in write_result.lower(), f"write failed: {write_result}"
+
+            read_result = tools_mod.execute_tool(
+                "read_file",
+                {"path": "/tmp/evac_roundtrip.txt"},
+                workspace=str(workspace),
+            )
+
+        assert "canonical roundtrip" in read_result, f"read did not resolve redirect: {read_result}"
+        assert redirected.exists()
+        redirected.unlink(missing_ok=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -159,6 +159,16 @@ def infer_with_tools(
     # Fallback: in-process loading (original behaviour)
     import json
 
+    # A new task is starting — clear any stale transient auth state
+    # (approve-all grant, deny counter, stop signal) from a previous task in
+    # this chat so it cannot leak across tasks.
+    if chat_id:
+        try:
+            from core.auth_gate import clear_task_state
+            clear_task_state(chat_id)
+        except Exception:
+            pass
+
     current_messages = []
     for m in messages:
         role = m["role"]
@@ -170,6 +180,16 @@ def infer_with_tools(
         current_messages.append({"role": role, "content": content})
 
     for step in range(max_steps):
+        # Honour a stop request (/stop or 3 consecutive denials) — abort the
+        # tool loop between steps instead of continuing to call tools.
+        if chat_id:
+            try:
+                from core.auth_gate import is_stop_requested
+                if is_stop_requested(chat_id):
+                    print(f"[tool] stop requested — aborting tool loop at step {step}", flush=True)
+                    return "(stopped by user)"
+            except Exception:
+                pass
         text = _processor.apply_chat_template(
             current_messages,
             tools=tools,

@@ -69,3 +69,13 @@ class ConversationsRepository(BaseRepository):
                 (chat_id, limit),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def list_all(self, limit: int = 100) -> list[dict]:
+        """Return the most recently updated conversations across all chat_ids."""
+        safe_limit = max(1, min(int(limit or 100), 500))
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM conversations ORDER BY updated_at DESC LIMIT ?",
+                (safe_limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]

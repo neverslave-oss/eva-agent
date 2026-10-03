@@ -38,7 +38,7 @@ fuser -k ${PORT}/tcp 2>/dev/null || true
 
 # Always kill any existing model_server process so code changes take effect on restart
 echo "[kernel-evolving] Stopping existing model server (if running)..."
-pkill -f "src/core/inference/model_server.py" 2>/dev/null || true
+pkill -f "inference[./]model_server" 2>/dev/null || true
 rm -f "$SOCKET"
 sleep 1
 
@@ -101,7 +101,9 @@ elif [[ $_SOCK_ALIVE -eq 0 ]]; then
         echo "[kernel-evolving] Cloud mode — starting model server LAZY (thought slot on demand, no eager VRAM)..."
         _MODEL_ARGS="--lazy"
     fi
-    nohup $PY "$REPO/src/core/inference/model_server.py" \
+    PYTHONPATH="$REPO/src:${PYTHONPATH:-}" nohup env \
+        COMPUTER_STREAM_FORWARD_URL="http://127.0.0.1:${PORT}/computer/publish" \
+        $PY -m core.inference.model_server \
         --config "$CONFIG" \
         $_MODEL_ARGS \
         >> "$MODEL_LOG" 2>&1 &

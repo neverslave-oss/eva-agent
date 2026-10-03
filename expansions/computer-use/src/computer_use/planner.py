@@ -36,6 +36,20 @@ class Planner:
 
         lowered = text.lower()
 
+        # Launch intent: "open/launch/start <app>" — launch an application on
+        # the desktop. Matches a leading verb followed by a SINGLE app name
+        # token. It must stop at conjunctions/verbs (and/to/then) so a goal
+        # like "open Firefox and navigate to linkedin.com" launches "Firefox",
+        # not the whole sentence as an app name.
+        launch_m = re.search(
+            r"(?:^|[\s,;])(?:open|launch|start|run)\s+([a-z0-9._-]+)(?=\s|$)",
+            lowered,
+        )
+        if launch_m and not _URL_RE.search(text):
+            app = launch_m.group(1).strip()
+            if app:
+                actions.append(Action(kind="launch", text=app, metadata={"app": app}))
+
         # Click intent: "click <target>" — pick a selector from hints or fall back to auto.
         click_m = re.search(r"click(?:\s+(?:on|the))?\s+([\w\s-]+)", text, re.I)
         if click_m:

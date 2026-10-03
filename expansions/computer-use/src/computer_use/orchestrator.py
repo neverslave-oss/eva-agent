@@ -95,7 +95,18 @@ class Orchestrator:
                 result = self.driver.execute(action, target)
                 self.tracer.action_executed(run_id, idx, action_dict, result)
             else:
-                self.tracer.action_executed(run_id, idx, action_dict, {"status": "dry_run"})
+                result = {"status": "dry_run"}
+                self.tracer.action_executed(run_id, idx, action_dict, result)
+
+            # Stop on execution errors — never report a false success. If the
+            # driver couldn't perform the action (e.g. no display, bad app),
+            # fail the run honestly instead of continuing to `done`.
+            if result.get("status") == "error":
+                msg = result.get("error") or f"action {action.kind} failed"
+                if self.state_store:
+                    self.state_store.update_run(chat_id, run_id, {"step": idx, "status": "error", "error": msg})
+                self.tracer.run_finished(run_id, "error", False, msg)
+                return ExecutionResult(status="error", message=msg, completed=False, data={"run_id": run_id})
 
             if self.state_store:
                 self.state_store.update_run(chat_id, run_id, {"step": idx, "status": "running"})

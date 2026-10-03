@@ -68,3 +68,6 @@ config.local.yaml
 
 # Internal agent workflow docs (audits, fix logs, plans) — not for public repo
 .specs/
+
+# local config backups
+config.yaml.bak*

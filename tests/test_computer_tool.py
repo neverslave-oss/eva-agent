@@ -93,3 +93,42 @@ class TestComputerDispatch:
         ):
             result = tools_mod.execute_tool("computer", {"goal": "do a thing"})
         assert "error" in result.lower()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Contract: RL action space ⊆ policy allowlist
+# ─────────────────────────────────────────────────────────────────────────────
+def test_rl_action_space_is_allowed_by_bridge_policy():
+    """Regression: every action kind the RL planner can pick must be permitted
+    by the computer-use policy allowlist. The live failure was the RL planner
+    emitting `fill` (the core of any form task) and the bridge policy blocking
+    it with 'action not allowed: fill', which aborted the run the moment it
+    tried to fill a form. Fix: keep the allowlist in sync with ACTION_KINDS."""
+    import re as _re
+
+    # RL planner's discrete action space (source of truth for what the agent
+    # may choose).
+    rl_src = tools_mod.Path(
+        os.path.join(
+            os.path.dirname(__file__), "..", "expansions", "computer-use", "src",
+            "computer_use", "rl_planner.py",
+        )
+    ).read_text(encoding="utf-8")
+    m = _re.search(r"ACTION_KINDS = \[(.*?)\]", rl_src, _re.S)
+    assert m, "ACTION_KINDS not found in rl_planner.py"
+    rl_actions = _re.findall(r'"([a-z_]+)"', m.group(1))
+
+    # Bridge policy allowlist (the gate run_computer_task applies).
+    bridge_src = tools_mod.Path(
+        os.path.join(os.path.dirname(__file__), "..", "src", "core", "expansions",
+                     "computer_use_bridge.py")
+    ).read_text(encoding="utf-8")
+    am = _re.search(r'"allow_actions": \[(.*?)\]', bridge_src, _re.S)
+    assert am, "allow_actions not found in computer_use_bridge.py"
+    allowed = _re.findall(r'"([a-z_]+)"', am.group(1))
+
+    missing = [a for a in rl_actions if a not in allowed]
+    assert not missing, (
+        f"RL planner can pick actions the bridge policy blocks: {missing}. "
+        "Every RL action kind must be in the policy allow_actions."
+    )

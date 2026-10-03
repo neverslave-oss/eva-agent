@@ -50,13 +50,13 @@ start_model_server() {
   log "Starting model server${adapter_flag:+ with adapter $adapter_flag}..."
   rm -f "$SOCKET"
   if [[ -n "$adapter_flag" ]]; then
-    nohup python3 "$REPO_DIR/src/model_server.py" \
+    nohup python3 "$REPO_DIR/src/core/inference/model_server.py" \
       --config "$REPO_DIR/config.yaml" \
       --lazy \
       --adapter "$adapter_flag" \
       >> "$MODEL_LOG" 2>&1 &
   else
-    nohup python3 "$REPO_DIR/src/model_server.py" \
+    nohup python3 "$REPO_DIR/src/core/inference/model_server.py" \
       --config "$REPO_DIR/config.yaml" \
       --lazy \
       >> "$MODEL_LOG" 2>&1 &

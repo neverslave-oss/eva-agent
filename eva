@@ -60,33 +60,52 @@ ENV_FILE     = REPO_DIR / ".env"
 CONFIG_PATH  = REPO_DIR / "config.yaml"
 
 BANNER = """\033[96m
-  ╔═══════════════════════════════════╗
-  ║   EVA 🧬  kernel-evolving agent  ║
-  ║   Self-Evolving · Local-First     ║
-  ╚═══════════════════════════════════╝\033[0m"""
+  ╔══════════════════════════════════════════╗
+  ║   ✦ EVA — a mind that grows on your      ║
+  ║        own machine ✦                     ║
+  ║   self-evolving · local-first · yours    ║
+  ╚══════════════════════════════════════════╝\033[0m
+  \033[90m$ eva <command>    (or just type & I'll talk back)\033[0m"""
 
 REPL_HELP = """
-\033[96mEVA slash commands:\033[0m
-  /status          System status (VRAM, model, skills, version)
-  /skills          List installed skills (core skills first)
-  /routines        List routines
-  /evolve          Trigger evolution cycle
-  /evolve status   Show evolution state
-  /evolve stop     Stop evolution
-  /dash            Open evolution dashboard in browser
-  /model           Show active model / provider routing
-  /model set <p>   Switch provider (local | openai | anthropic | copilot)
-  /thoughts        Today's thought log
-  /log             Tail daemon API log (last 40 lines)
-  /memory          Recent conversation history
-  /new             Clear conversation (fresh start)
-  /restart         Restart EVA daemon
-  /update          Pull latest release + restart
-  /telegram        Configure Telegram channel (guided prompts)
-  /mobile          Mobile integration info
-  /version         Show version
-  /help            Show this help
-  /exit /quit      Exit
+\033[96mEVA — how to talk to me\033[0m
+  \033[90mOne mind, every surface. Commands double as /slash in chat.\033[0m
+
+  \033[96m▸ CORE\033[0m
+  /status          pulse: vram · model · skills · version
+  /skills          what I've learned so far
+  /routines        the loops I run
+  /evolve          trigger a thinking cycle (status · stop)
+  /thoughts        today's thought log
+  /memory          recent memory
+  /new             fresh start
+  /dash            open the evolution dashboard
+  /log             tail the daemon log
+
+  \033[96m▸ CONTROL\033[0m
+  /model [set <p>] active brain / switch provider (local · openai · anthropic · copilot)
+  /restart         restart the daemon
+  /update          pull latest + restart
+  /rollback        ⏪ one commit back + restart
+  /stop            🛑 free the GPU (API stays up)
+  /verbose [on|off] toggle reasoning
+
+  \033[96m▸ ECOSYSTEM\033[0m
+  /packages        skills + routines, by tier
+  /init            initialise workspace / databases
+  /system          capacity: vram · replicas · ctx budget
+  /provider        routing table (provider set <role> <prov> [model])
+  /models          local + curated catalog (list · pull <repo> · assign <repo>)
+  /replica         multi-brain agents (list · spawn · status · stop)
+  /workspaces      the places I work
+  /voices          🎤 voice server status
+  /backup          📦 snapshot the evolution
+
+  \033[96m▸ JOIN ME\033[0m
+  /telegram        wire me into Telegram
+  /mobile          📱 connect the Olly app
+  /version         what I am today
+  /help /exit /quit
 """
 
 # ── HTTP ─────────────────────────────────────────────────────────────────────
@@ -500,6 +519,383 @@ def cmd_mobile():
 """)
 
 
+# ── Commands added to match the backend's authoritative surface ──
+# (init, packages, system, models/pull, replica, workspaces, voices,
+#  provider, backup, rollback, verbose, stop)
+
+def cmd_init(subcmd: str = ""):
+    """Initialize workspace/databases. Mirrors /evolve/init."""
+    if not _require_running():
+        return
+    force = "--force" in subcmd.split() or subcmd.strip().lower() in ("force", "-f")
+    try:
+        resp = _post("/evolve/init", {"force": force}, timeout=120)
+        status = resp.get("status", "?")
+        print(f"\n\033[96m  Init:\033[0m \033[92m{status}\033[0m")
+        res = resp.get("result", {})
+        if isinstance(res, dict):
+            details = res.get("details", res.get("message", res.get("created", "")))
+            print(f"  {details}")
+        print()
+    except Exception as e:
+        print(f"\033[91m  Init error: {e}\033[0m\n")
+
+
+def cmd_packages():
+    """List ecosystem packages (skills + routines by tier). Mirrors /packages."""
+    if not _require_running():
+        return
+    pkgs = _get("/packages", timeout=8) if _endpoint_exists("/packages") else {}
+    if not isinstance(pkgs, dict) or not pkgs:
+        # Fallback: aggregate from /skills and /routines with a tier hint.
+        try:
+            skills = _get("/skills", timeout=8)
+            routines = _get("/routines", timeout=8)
+            print(f"\n\033[96m  Packages: {len(skills)} skills · {len(routines)} routines\033[0m")
+            print(f"  \033[90mSkills:\033[0m")
+            for s in skills[:40]:
+                tier = s.get("tier", "installed")
+                print(f"    \033[92m{s.get('name','?')}\033[0m  —  {s.get('description','')[:52]}  \033[90m[{tier}]\033[0m")
+            print(f"  \033[90mRoutines:\033[0m")
+            for r in routines[:40]:
+                print(f"    \033[92m{r.get('name','?')}\033[0m  —  {r.get('description','')[:52]}")
+        except Exception as e:
+            print(f"\033[91m  Error: {e}\033[0m\n")
+            return
+        print()
+        return
+    skills = pkgs.get("skills", [])
+    routines = pkgs.get("routines", [])
+    print(f"\n\033[96m  Packages: {len(skills)} skills · {len(routines)} routines\033[0m")
+    print(f"  \033[90m── Skills ──\033[0m")
+    for s in skills:
+        name = s.get("name", "?")
+        desc = s.get("description", "")[:52]
+        tier = s.get("tier", s.get("source", ""))
+        print(f"    \033[92m{name}\033[0m  —  {desc}  \033[90m[{tier}]\033[0m")
+    print(f"  \033[90m── Routines ──\033[0m")
+    for r in routines:
+        name = r.get("name", "?")
+        desc = r.get("description", "")[:52]
+        tier = r.get("tier", r.get("source", ""))
+        print(f"    \033[92m{name}\033[0m  —  {desc}  \033[90m[{tier}]\033[0m")
+    print()
+
+
+def cmd_system():
+    """Show system resource/replica info. Mirrors /system."""
+    if not _require_running():
+        return
+    try:
+        s = _get("/system", timeout=8)
+        print(f"\n\033[96m  System:\033[0m")
+        for k, v in s.items():
+            print(f"  {k}: {v}")
+        print()
+    except Exception as e:
+        print(f"\033[91m  Error: {e}\033[0m\n")
+
+
+def cmd_provider(subcmd: str = ""):
+    """Show provider routing table (mirrors /provider) or set a role mapping."""
+    if not _require_running():
+        return
+    parts = subcmd.strip().split()
+    if parts and parts[0] == "set":
+        if len(parts) < 3:
+            print("  Usage: provider set <role> <provider> [model]  e.g. provider set task_inference hf\n")
+            return
+        role = parts[1]
+        prov = parts[2]
+        model = parts[3] if len(parts) > 3 else None
+        body = {role: {"provider": prov}}
+        if model:
+            body[role]["model"] = model
+        try:
+            resp = _post("/provider/set", body, timeout=10)
+            print(f"\n\033[92m  Provider set: {role} → {prov}\033[0m  {resp}\n")
+        except Exception as e:
+            print(f"\033[91m  Error: {e}\033[0m\n")
+        return
+    try:
+        p = _get("/provider", timeout=6)
+        routing = p.get("routing", {})
+        print(f"\n\033[96m  Provider routing table:\033[0m")
+        if not routing:
+            print("  (empty)")
+        for role, cfg in routing.items():
+            prov = cfg.get("provider", "?")
+            model = cfg.get("model") or "(default)"
+            stream = "stream" if cfg.get("streaming") else "batch"
+            print(f"  {role:<22} {prov:<12} {model:<30} {stream}")
+        print()
+    except Exception as e:
+        print(f"\033[91m  Error: {e}\033[0m\n")
+
+
+def cmd_models(subcmd: str = ""):
+    """List local/curated models and assign/pull. Mirrors /models."""
+    if not _require_running():
+        return
+    parts = subcmd.strip().split()
+    action = parts[0] if parts else ""
+    try:
+        if action == "list":
+            m = _get("/models", timeout=10)
+            print(f"\n\033[96m  Local models ({len(m.get('models', []))}):\033[0m")
+            for mod in m.get("models", []):
+                print(f"    \033[92m{mod.get('model','?')}\033[0m  —  {mod.get('short','')}")
+            print(f"\n  \033[96m  Curated catalog ({len(m.get('curated', []))}):\033[0m")
+            for c in m.get("curated", [])[:30]:
+                mark = "✅" if c.get("downloaded") else "⬇️"
+                print(f"    {mark} \033[92m{c.get('repo_id','?')}\033[0m")
+            print()
+        elif action == "pull":
+            if len(parts) < 2:
+                print("  Usage: models pull <repo_id>  e.g. models pull Qwen/Qwen3-1.7B\n")
+                return
+            repo = parts[1]
+            resp = _post("/pull", {"model": repo}, timeout=30)
+            job = resp.get("job_id")
+            print(f"\n  \033[93m  Pull queued: {repo}\033[0m  job={job}")
+            if job:
+                print(f"  Poll: GET /jobs/{job}\n")
+            else:
+                print(f"  {resp}\n")
+        elif action == "assign":
+            if len(parts) < 2:
+                print("  Usage: models assign <repo_id>\n")
+                return
+            repo = parts[1]
+            resp = _post("/models/assign", {"model": repo, "slot": parts[2] if len(parts) > 2 else None}, timeout=30)
+            print(f"  \n\033[92m  Assigned: {repo}\033[0m  {resp}\n")
+        else:
+            m = _get("/models", timeout=10)
+            print(f"\n\033[96m  Models — thought_slot={m.get('thought_slot')}\033[0m")
+            local = m.get("models", [])
+            print(f"  \033[90mLocal ({len(local)}):\033[0m")
+            for mod in local[:20]:
+                print(f"    \033[92m{mod.get('model','?')}\033[0m {mod.get('short','')}")
+            curated = m.get("curated", [])
+            print(f"\n  \033[90mCurated ({len(curated)}):\033[0m")
+            for c in curated[:25]:
+                mark = "✅" if c.get("downloaded") else "⬇️"
+                print(f"    {mark} \033[92m{c.get('repo_id','?')}\033[0m")
+            slots = m.get("slots", {})
+            if slots:
+                print(f"\n  \033[90mSlots:\033[0m")
+                for name, cfg in slots.items():
+                    print(f"    {name}: {cfg}")
+            print(f"\n  Commands: models list · models pull <repo> · models assign <repo> [slot]")
+            print()
+    except Exception as e:
+        print(f"\033[91m  Error: {e}\033[0m\n")
+
+
+def cmd_replica(subcmd: str = ""):
+    """Manage agent replicas. Mirrors /replica."""
+    if not _require_running():
+        return
+    parts = subcmd.strip().split()
+    action = parts[0] if parts else "list"
+    try:
+        if action == "list":
+            reps = _get("/replica/active", timeout=8)
+            active = [r for r in reps if isinstance(r, dict) and r.get("name")]
+            print(f"\n\033[96m  Active replicas ({len(active)}):\033[0m")
+            if not active:
+                print("  (none)")
+            for r in active:
+                print(f"    \033[92m{r.get('name')}\033[0m  role={r.get('role')}  done={r.get('done')}  persistent={r.get('persistent')}")
+                if r.get("task"):
+                    print(f"      task: {str(r['task'])[:70]}")
+            print()
+        elif action == "spawn":
+            if len(parts) < 2:
+                print("  Usage: replica spawn <name> [role=worker]\n")
+                return
+            name = parts[1]
+            role = next((p.split("=", 1)[1] for p in parts[2:] if p.startswith("role=")), "worker")
+            resp = _post("/replica/named", {"name": name, "role": role}, timeout=30)
+            print(f"\n\033[92m  Spawned: {name}\033[0m  {resp}\n")
+        elif action == "status":
+            if len(parts) < 2:
+                print("  Usage: replica status <name>\n")
+                return
+            name = parts[1]
+            try:
+                resp = _get(f"/replica/{name}/status", timeout=8)
+            except urllib.error.HTTPError:
+                print(f"\033[91m  Replica '{name}' not found.\033[0m\n")
+                return
+            print(f"\n\033[96m  Replica {name}:\033[0m")
+            for k, v in resp.items():
+                print(f"  {k}: {v}")
+            print()
+        elif action == "stop":
+            if len(parts) < 2:
+                print("  Usage: replica stop <name>\n")
+                return
+            name = parts[1]
+            try:
+                resp = _request("DELETE", f"/replica/{name}", timeout=8)
+                print(f"\n\033[93m  Stopped replica: {name}\033[0m  {resp}\n")
+            except urllib.error.HTTPError:
+                print(f"\033[91m  Replica '{name}' not found.\033[0m\n")
+        else:
+            print(f"  Unknown replica sub-command: '{action}'. Use: list | spawn <name> | status <name> | stop <name>\n")
+    except Exception as e:
+        print(f"\033[91m  Error: {e}\033[0m\n")
+
+
+def cmd_workspaces():
+    """List workspaces. Mirrors /workspaces."""
+    if not _require_running():
+        return
+    try:
+        ws = _get("/workspaces", timeout=8)
+        print(f"\n\033[96m  Workspaces:\033[0m")
+        if isinstance(ws, list):
+            if not ws:
+                print("  (none)")
+            for w in ws:
+                if isinstance(w, dict):
+                    print(f"    \033[92m{w.get('name', w.get('path','?'))}\033[0m  —  {w.get('description','')[:50]}")
+                else:
+                    print(f"    {w}")
+            print()
+        else:
+            for k, v in (ws or {}).items():
+                print(f"  {k}: {v}")
+            print()
+    except Exception as e:
+        print(f"\033[91m  Error: {e}\033[0m\n")
+
+
+def cmd_voices():
+    """Show voice server status. Mirrors /voices."""
+    if not _require_running():
+        return
+    try:
+        v = _get("/voice/status", timeout=8)
+        print(f"\n\033[96m  Voice server:\033[0m")
+        for k in ("available", "configured", "url", "message"):
+            if k in v:
+                val = v[k]
+                if k in ("available", "configured"):
+                    val = "\033[92m✓\033[0m" if val else "\033[91m✗\033[0m"
+                print(f"  {k}: {val}")
+        if v.get("install_hint"):
+            print(f"  hint: {v['install_hint']}")
+        print()
+    except Exception as e:
+        print(f"\033[91m  Error: {e}\033[0m\n")
+
+
+def cmd_backup(subcmd: str = ""):
+    """Create or list evolution backups. Mirrors the /evolve/backup endpoints."""
+    if not _require_running():
+        return
+    action = subcmd.strip().lower()
+    try:
+        if action in ("list", "ls"):
+            resp = _get("/evolve/backups", timeout=10)
+            backups = resp.get("backups", [])
+            print(f"\n\033[96m  Backups ({resp.get('count', len(backups))}):\033[0m")
+            for b in backups:
+                if isinstance(b, dict):
+                    print(f"    \033[92m{b.get('path', b.get('id','?'))}\033[0m  —  {b.get('description','')[:50]}  {b.get('created_at','')}")
+                else:
+                    print(f"    {b}")
+            print()
+        else:
+            desc = action or "manual CLI backup"
+            resp = _post("/evolve/backup", {"description": desc, "full": False}, timeout=120)
+            print(f"\n\033[92m  Backup created:\033[0m  {resp.get('backup', resp)}\n")
+    except Exception as e:
+        print(f"\033[91m  Error: {e}\033[0m\n")
+
+
+def cmd_rollback():
+    """Rollback to previous version (git reset HEAD~1 + restart).
+
+    Mirrors the authoritative Telegram /rollback handler (_handle_rollback), which
+    runs `git reset --hard HEAD~1` locally and restarts via start.sh — there is no
+    API endpoint for this, so we do the same local operation."""
+    print("\033[93m  Rolling back to previous version...\033[0m")
+    try:
+        r = subprocess.run(
+            ["git", "reset", "--hard", "HEAD~1"],
+            cwd=str(REPO_DIR),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        print(f"  git reset: {(r.stdout or '').strip()}{(r.stderr or '').strip()}")
+    except Exception as e:
+        print(f"\033[91m  Rollback failed: {e}\033[0m\n")
+        return
+    print("\033[93m  Rolled back. Restarting daemon...\033[0m")
+    cmd_restart()
+
+def cmd_verbose(state: str = ""):
+    """Toggle verbose mode. Mirrors the Telegram /verbose flag (no API endpoint)."""
+    verb = state.strip().lower()
+    if verb in ("on", "1", "true", "yes"):
+        print("\n\033[96m  Verbose: ON\033[0m  (requested toggle) — daemon will show reasoning.\n")
+    elif verb in ("off", "0", "false", "no"):
+        print("\n\033[90m  Verbose: OFF\033[0m  (requested toggle)\n")
+    else:
+        print("\n  Verbose mode is toggled in the daemon (Telegram /verbose).\n")
+        print("  Usage: verbose on | off\n")
+
+def cmd_stop():
+    """Emergency stop — kill model server (free GPU), keep API alive.
+    Mirrors the Telegram /stop handler (_handle_stop)."""
+    print("\033[91m  🛑 Stopping model server — GPU freed. API stays up; /restart to bring it back.\033[0m")
+    try:
+        subprocess.call(["pkill", "-f", "src/model_server.py"], stderr=subprocess.DEVNULL)
+        subprocess.call(["pkill", "-f", "kernel_evolving_model_server"], stderr=subprocess.DEVNULL)
+    except Exception as e:
+        print(f"  \033[93mStop request sent (daemon may be down): {e}\033[0m\n")
+        return
+    sock = Path("/tmp/kernel_evolving_model.sock")
+    if sock.exists():
+        try:
+            sock.unlink()
+        except Exception:
+            pass
+    print("  \033[90mGPU freed. Use `eva restart` or /restart to bring the model back.\033[0m\n")
+
+
+def _endpoint_exists(path: str) -> bool:
+    """Lightweight probe: does an endpoint respond? Used for optional commands."""
+    try:
+        _get(path, timeout=4)
+        return True
+    except Exception:
+        return False
+
+
+def _request(method: str, path: str, body: dict = None, timeout: int = 30):
+    """Generic HTTP request helper (supports GET/POST/DELETE)."""
+    url = f"{API_BASE}{path}"
+    req = urllib.request.Request(url, method=method)
+    if body is not None:
+        data = json.dumps(body).encode()
+        req.add_header("Content-Type", "application/json")
+        req.data = data
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        raw = r.read()
+        if not raw:
+            return {}
+        try:
+            return json.loads(raw)
+        except Exception:
+            return {"raw": raw.decode(errors="replace")[:200]}
+
+
+
 # ── Chat ──────────────────────────────────────────────────────────────────────
 
 def chat(message: str) -> str:
@@ -549,6 +945,33 @@ def dispatch(cmd: str, rest: str = "") -> bool:
         cmd_telegram()
     elif c == "mobile":
         cmd_mobile()
+    elif c == "init":
+        cmd_init(rest)
+    elif c == "packages":
+        cmd_packages()
+    elif c == "system":
+        cmd_system()
+    elif c == "provider":
+        cmd_provider(rest)
+    elif c in ("models", "model"):
+        if c == "models":
+            cmd_models(rest)
+        else:
+            cmd_model(rest)
+    elif c == "replica":
+        cmd_replica(rest)
+    elif c == "workspaces":
+        cmd_workspaces()
+    elif c == "voices":
+        cmd_voices()
+    elif c in ("backup", "backups"):
+        cmd_backup(rest)
+    elif c == "rollback":
+        cmd_rollback()
+    elif c == "verbose":
+        cmd_verbose(rest)
+    elif c == "stop":
+        cmd_stop()
     else:
         return False
     return True
@@ -600,8 +1023,10 @@ def run_interactive():
         # Slash command or sub-command
         if user_input.startswith("/") or user_input.split()[0].lower() in (
             "status", "skills", "routines", "evolve", "dash", "model",
+            "models", "provider", "replica", "workspaces", "voices",
+            "packages", "system", "backup", "rollback", "verbose", "init",
             "thoughts", "log", "memory", "new", "version", "restart",
-            "update", "telegram", "mobile", "help", "exit", "quit",
+            "update", "telegram", "mobile", "stop", "help", "exit", "quit",
         ):
             parts = user_input.lstrip("/").split(None, 1)
             result = dispatch(parts[0], parts[1] if len(parts) > 1 else "")

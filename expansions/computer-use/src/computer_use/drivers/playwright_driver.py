@@ -31,17 +31,47 @@ def _load_playwright():
     return _playwright
 
 
-def _default_chromium() -> str | None:
-    """Return a usable chromium executable path, or None."""
-    for cand in ("/usr/bin/chromium", "/usr/bin/chromium-browser",
-                 "/usr/bin/google-chrome", "/usr/bin/google-chrome-stable"):
+def _default_firefox() -> str | None:
+    """Return a Firefox executable path, or None to use Playwright's bundled build.
+
+    Prefers Playwright's own Firefox build (firefox-1538) because the system
+    Firefox (firefox-esr) is often incompatible with Playwright's CDP protocol
+    and fails to launch. Only falls back to a system Firefox when the bundled
+    build is absent.
+    """
+    import glob
+    bundled = glob.glob(os.path.expanduser("~/.cache/ms-playwright/firefox-*/firefox/firefox"))
+    if bundled:
+        return None  # let Playwright use its compatible bundled Firefox
+    for cand in ("/usr/bin/firefox", "/usr/bin/firefox-esr",
+                 "/usr/local/bin/firefox"):
         if os.path.exists(cand):
             return cand
     return None
 
 
+def _parse_coords(sel: str) -> tuple[int, int] | None:
+    """Parse an 'x,y' screen-coordinate selector into (x, y), else None.
+
+    The vision brain emits click coordinates as "x,y" (e.g. "1191,73").
+    Playwright must treat these as mouse coordinates, not CSS selectors.
+    """
+    if not sel:
+        return None
+    s = sel.strip()
+    if "," not in s:
+        return None
+    parts = s.split(",")
+    if len(parts) != 2:
+        return None
+    try:
+        return (int(parts[0].strip()), int(parts[1].strip()))
+    except Exception:
+        return None
+
+
 class PlaywrightDriver(BaseDriver):
-    """Real browser driver. Each instance owns one browser context.
+    """Real browser driver backed by Firefox. Each instance owns one browser context.
 
     The browser is launched lazily on first observe/execute and closed on
     close(). This keeps the expansion side-effect-free until actually used.
@@ -49,7 +79,7 @@ class PlaywrightDriver(BaseDriver):
 
     def __init__(self, executable_path: str | None = None, headless: bool = True,
                  trace_dir: str | Path | None = None):
-        self.executable_path = executable_path or _default_chromium()
+        self.executable_path = executable_path or _default_firefox()
         self.headless = headless
         self.trace_dir = Path(trace_dir) if trace_dir else None
         self._pw = None
@@ -66,7 +96,7 @@ class PlaywrightDriver(BaseDriver):
         launch_kwargs = {"headless": self.headless}
         if self.executable_path:
             launch_kwargs["executable_path"] = self.executable_path
-        self._browser = self._pw.chromium.launch(**launch_kwargs)
+        self._browser = self._pw.firefox.launch(**launch_kwargs)
         self._context = self._browser.new_context()
         if self.trace_dir:
             self.trace_dir.mkdir(parents=True, exist_ok=True)
@@ -127,6 +157,55 @@ class PlaywrightDriver(BaseDriver):
         except Exception:
             return None
 
+    def _frame_image(self):
+        """Decode the current screenshot into a PIL image, or None on failure."""
+        try:
+            from PIL import Image
+            import io
+            png = self._page.screenshot()
+            return Image.open(io.BytesIO(png))
+        except Exception:
+            return None
+
+    def is_frame_black(self, threshold: float = 6.0) -> bool:
+        """True when the captured browser frame is effectively black/locked.
+
+        Mirrors the pyautogui driver so the black/locked guard also fires on
+        browser frames (a failed launch / blank compositor surface). Returns
+        False on any capture error so we never block on a transient failure.
+        """
+        try:
+            img = self._frame_image()
+            if img is None:
+                return False
+            gray = img.convert("L")
+            px = list(gray.getdata())
+            mean = sum(px) / float(len(px)) if px else 0.0
+            return mean < threshold
+        except Exception:
+            return False
+
+    def is_frame_white(self, threshold: float = 250.0, near_white_ratio: float = 0.95) -> bool:
+        """True when the captured browser frame is effectively blank-white.
+
+        Mirrors the pyautogui driver so the white-blank guard also fires on
+        browser frames (a browser that failed to launch and left a white
+        compositor surface). Returns False on any capture error.
+        """
+        try:
+            img = self._frame_image()
+            if img is None:
+                return False
+            gray = img.convert("L")
+            px = list(gray.getdata())
+            if not px:
+                return False
+            mean = sum(px) / float(len(px))
+            near_white = sum(1 for v in px if v > threshold) / float(len(px))
+            return mean > threshold and near_white > near_white_ratio
+        except Exception:
+            return False
+
     @staticmethod
     def _state_hash(url: str | None, text: str) -> str:
         import hashlib
@@ -147,18 +226,35 @@ class PlaywrightDriver(BaseDriver):
 
             if kind == "click":
                 sel = action.selector or "body"
-                self._page.click(sel, timeout=action.timeout_ms)
+                coord = _parse_coords(sel)
+                if coord:
+                    self._page.mouse.click(coord[0], coord[1])
+                else:
+                    self._page.click(sel, timeout=action.timeout_ms)
                 return {"status": "ok", "driver": "playwright", "action": kind, "selector": sel}
 
             if kind == "double_click":
                 sel = action.selector or "body"
-                self._page.dblclick(sel, timeout=action.timeout_ms)
+                coord = _parse_coords(sel)
+                if coord:
+                    self._page.mouse.dblclick(coord[0], coord[1])
+                else:
+                    self._page.dblclick(sel, timeout=action.timeout_ms)
                 return {"status": "ok", "driver": "playwright", "action": kind, "selector": sel}
 
             if kind == "type":
                 sel = action.selector or "body"
                 self._page.fill(sel, action.text or "")
                 return {"status": "ok", "driver": "playwright", "action": kind, "selector": sel}
+
+            if kind == "fill":
+                sel = action.selector
+                if not sel:
+                    return {"status": "error", "driver": "playwright", "action": kind,
+                            "error": "fill requires a selector"}
+                self._page.fill(sel, action.text or "")
+                return {"status": "ok", "driver": "playwright", "action": kind, "selector": sel,
+                        "filled": action.text or ""}
 
             if kind == "hotkey":
                 key = action.text or action.selector or ""
