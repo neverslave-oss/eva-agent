@@ -4,7 +4,7 @@
 **Issue:** #2 — split oversized api.py (2947), handlers.py (2168), thought_engine.py (1641)
 **Scope:** `src/api.py` ONLY (2947 lines, 101 top-level defs/classes, 86 route decorators, 13 Pydantic classes). `src/core/inference/handlers.py` and `src/services/thought_engine.py` are separate parts of the issue — NOT in this plan.
 **Branch:** `refactor/api-split` (based on latest `origin/dev`, which includes merged #3/#11)
-**Status:** In progress
+**Status:** ✅ DONE — PR #12 merged to `dev` (squash `8574906f`, 2026-10-03). `src/api.py` (2947) → package: 13 one-class-per-file schemas + helpers + 7 routers; `__init__.py` = 298 lines. Review caught + fixed missing `_pipeline_jobs` re-export (test_async_pipeline regression); final gate 95 passed. api.py scope of issue #2 COMPLETE.
 
 ## Hard rules (Fabio, non-negotiable)
 

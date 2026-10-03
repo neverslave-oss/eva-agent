@@ -4,7 +4,7 @@
 **Issue:** #2 — split oversized api.py (2947, DONE via PR #12), handlers.py (2168), thought_engine.py (1641, DONE via PR #9)
 **Scope:** `src/core/inference/handlers.py` ONLY (2168 lines, 20 handler functions, no classes).
 **Branch:** `refactor/handlers-split` (based on latest `origin/dev`)
-**Status:** In progress
+**Status:** ✅ DONE — PR #13 merged to `dev` (squash `92655eb`, 2026-10-03). `handlers.py` (2168) → `handlers/` package: 6 leaf modules (chat, tools, multimodal, ops, slots, draft); `__init__.py` = 119 lines pure re-exports of all 20 handlers. Reviewer verified all bodies byte-identical to dev; full gate 101 passed. handlers.py scope of issue #2 COMPLETE — issue #2 fully closed (2026-10-03) after #12 + #13.
 
 ## Context
 

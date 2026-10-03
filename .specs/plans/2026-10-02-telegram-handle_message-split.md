@@ -3,7 +3,7 @@
 **Date:** 2026-10-02
 **Issue:** #3 — decompose telegram_bot.py monolith (3865 lines)
 **Branch:** `refactor/telegram-messaging-split`
-**Status:** ✅ DONE (all slices A, B1-B3, C landed; PR #11 open)
+**Status:** ✅ DONE — PR #11 merged to `dev` (squash `3b74fd6`), issue #3 CLOSED (2026-10-03).
 
 ## Context
 
